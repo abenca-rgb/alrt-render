@@ -1,0 +1,14 @@
+{
+  "name": "alrt-render",
+  "version": "1.0.0",
+  "description": "ALRT-Render backend for TradingView webhooks",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2"
+  }
+}
