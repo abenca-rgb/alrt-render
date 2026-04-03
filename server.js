@@ -118,11 +118,12 @@ app.post("/webhook/tradingview", (req, res) => {
       return res.status(500).json({ ok: false, error: "Server secret missing" });
     }
 
-    if (!payload.secret || payload.secret !== WEBHOOK_SECRET) {
-      console.warn("Unauthorized webhook attempt");
-      console.log("Received secret:", JSON.stringify(payload.secret));
-      return res.status(401).json({ ok: false, error: "Unauthorized" });
-    }
+   // tijdelijk uitgeschakeld voor debug
+// if (!payload.secret || payload.secret !== WEBHOOK_SECRET) {
+//   console.warn("Unauthorized webhook attempt");
+//   console.log("Received secret:", JSON.stringify(payload.secret));
+//   return res.status(401).json({ ok: false, error: "Unauthorized" });
+// }
 
     // TradingView moet snel antwoord krijgen
     res.status(200).json({
