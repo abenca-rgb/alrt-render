@@ -187,9 +187,37 @@ app.post("/webhook/tradingview", async (req, res) => {
       pick(body.side, body.direction, "")
     );
 
-    const entry = pick(body.entry, body.price, body.entry_price);
-    const tp = pick(body.tp1, body.tp, body.take_profit);
-    const sl = pick(body.sl, body.stop_loss, body.stop);
+    const entry = pick(
+  body.entry,
+  body.entry_price,
+  body.price,
+  body.entryPrice,
+  body.Entry,
+  body.close
+);
+
+const tp = pick(
+  body.tp1,
+  body.tp,
+  body.take_profit,
+  body.takeProfit,
+  body.tp_price,
+  body.target,
+  body.target_price,
+  body.TP,
+  body.tpPrice
+);
+
+const sl = pick(
+  body.sl,
+  body.stop_loss,
+  body.stop,
+  body.stopLoss,
+  body.sl_price,
+  body.stop_price,
+  body.SL,
+  body.slPrice
+);
 
     const rsi = pick(body.rsi);
     const atrPct = pick(body.atr_pct, body.atrPercent);
