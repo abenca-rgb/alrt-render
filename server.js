@@ -51,17 +51,17 @@ app.post("/webhook/tradingview", async (req, res) => {
 
     currentRef++;
 
-    const explanation1 =
-      side === "LONG"
-        ? "Momentum draait omhoog en de trend blijft bullish."
-        : "Momentum draait omlaag en de trend blijft bearish.";
+   const explanation1 =
+  side === "LONG"
+    ? "Momentum is turning upward and the trend remains bullish."
+    : "Momentum is turning downward and the trend remains bearish.";
 
-    const explanation2 =
-      rsi
-        ? `RSI ondersteunt deze setup (${rsi}).`
-        : "Prijsactie ondersteunt deze setup.";
+const explanation2 =
+  rsi
+    ? `RSI supports this setup (${rsi}).`
+    : "Price action supports this setup.";
 
-    const text = `
+const text = `
 🚨 ALERT #${currentRef}
 
 PAIR: ${symbol}
@@ -78,7 +78,7 @@ ${explanation1}
 ${explanation2}
 
 CHART: attached
-NFA
+NFA (Not Financial Advice)
 `;
 
     // SEND TELEGRAM
