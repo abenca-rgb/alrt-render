@@ -47,12 +47,6 @@ function fmtPrice(v) {
   const n = Number(v);
   if (!Number.isFinite(n)) return String(v);
 
-function fmtPrice(v) {
-  if (v === null || v === undefined || v === "") return "N/A";
-
-  const n = Number(v);
-  if (!Number.isFinite(n)) return String(v);
-
   if (n >= 1000) return n.toFixed(2);
   if (n >= 1) return n.toFixed(4);
   if (n >= 0.01) return n.toFixed(5);
@@ -83,8 +77,6 @@ function formatUtc(ts) {
 
     if (/^\d+$/.test(raw)) {
       const num = Number(raw);
-
-      // seconden vs milliseconden
       d = raw.length <= 10 ? new Date(num * 1000) : new Date(num);
     } else {
       d = new Date(raw);
@@ -195,36 +187,36 @@ app.post("/webhook/tradingview", async (req, res) => {
     );
 
     const entry = pick(
-  body.entry,
-  body.entry_price,
-  body.price,
-  body.entryPrice,
-  body.Entry,
-  body.close
-);
+      body.entry,
+      body.entry_price,
+      body.price,
+      body.entryPrice,
+      body.Entry,
+      body.close
+    );
 
-const tp = pick(
-  body.tp1,
-  body.tp,
-  body.take_profit,
-  body.takeProfit,
-  body.tp_price,
-  body.target,
-  body.target_price,
-  body.TP,
-  body.tpPrice
-);
+    const tp = pick(
+      body.tp1,
+      body.tp,
+      body.take_profit,
+      body.takeProfit,
+      body.tp_price,
+      body.target,
+      body.target_price,
+      body.TP,
+      body.tpPrice
+    );
 
-const sl = pick(
-  body.sl,
-  body.stop_loss,
-  body.stop,
-  body.stopLoss,
-  body.sl_price,
-  body.stop_price,
-  body.SL,
-  body.slPrice
-);
+    const sl = pick(
+      body.sl,
+      body.stop_loss,
+      body.stop,
+      body.stopLoss,
+      body.sl_price,
+      body.stop_price,
+      body.SL,
+      body.slPrice
+    );
 
     const rsi = pick(body.rsi);
     const atrPct = pick(body.atr_pct, body.atrPercent);
