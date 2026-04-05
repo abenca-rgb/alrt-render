@@ -13,7 +13,7 @@ const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
 app.use(express.json({ limit: "1mb" }));
 
-// ===== CHART LINKS =====
+// ===== CHART PAGE LINKS =====
 const CHARTS = {
   BTCUSDT: "https://www.tradingview.com/chart/?symbol=BINANCE:BTCUSDT",
   ETHUSDT: "https://www.tradingview.com/chart/?symbol=BINANCE:ETHUSDT",
@@ -29,6 +29,14 @@ const CHARTS = {
   LINKUSDT: "https://www.tradingview.com/chart/?symbol=BINANCE:LINKUSDT",
   AVAXUSDT: "https://www.tradingview.com/chart/?symbol=BINANCE:AVAXUSDT",
   SHIBUSDT: "https://www.tradingview.com/chart/?symbol=BINANCE:SHIBUSDT",
+};
+
+// ===== OPTIONAL DIRECT IMAGE LINKS =====
+// Alleen invullen als je echte image-urls hebt.
+// Zolang dit leeg blijft, valt het systeem terug op sendMessage.
+const CHART_IMAGES = {
+  // BTCUSDT: "https://....png",
+  // ETHUSDT: "https://....png",
 };
 
 // ===== HELPERS =====
@@ -94,12 +102,21 @@ function formatUtc(ts) {
   return `${y}-${m}-${day} ${hh}:${mm} UTC`;
 }
 
-function makeRef6(seed) {
-  const str = String(seed || Date.now());
-  let hash = 0;
+function makeRef6({ symbol, side, eventTime, entry, tp, sl }) {
+  // Praktisch unieke 6-digit ref op basis van alert-inhoud.
+  // Niet mathematisch 100% gegarandeerd, maar veel beter dan de huidige setup.
+  const base = [
+    symbol || "",
+    side || "",
+    String(eventTime || ""),
+    String(entry || ""),
+    String(tp || ""),
+    String(sl || ""),
+  ].join("|");
 
-  for (let i = 0; i < str.length; i++) {
-    hash = (hash * 31 + str.charCodeAt(i)) % 900000;
+  let hash = 0;
+  for (let i = 0; i < base.length; i++) {
+    hash = (hash * 31 + base.charCodeAt(i)) % 900000;
   }
 
   return String(100000 + hash);
@@ -153,6 +170,47 @@ function buildExplanation(side, rsi, atrPct) {
   }
 
   return { line1, line2 };
+}
+
+async function sendTelegramAlert({ symbol, text }) {
+  const imageUrl = CHART_IMAGES[symbol] || null;
+
+  if (imageUrl) {
+    const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: CHAT_ID,
+        photo: imageUrl,
+        caption: text,
+      }),
+    });
+
+    const data = await response.json();
+    console.log("TELEGRAM PHOTO RESPONSE:", data);
+
+    if (!response.ok || !data.ok) {
+      throw new Error(`Telegram sendPhoto failed: ${JSON.stringify(data)}`);
+    }
+
+    return;
+  }
+
+  const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: CHAT_ID,
+      text,
+    }),
+  });
+
+  const data = await response.json();
+  console.log("TELEGRAM MESSAGE RESPONSE:", data);
+
+  if (!response.ok || !data.ok) {
+    throw new Error(`Telegram sendMessage failed: ${JSON.stringify(data)}`);
+  }
 }
 
 // ===== BASIC ROUTES =====
@@ -229,13 +287,15 @@ app.post("/webhook/tradingview", async (req, res) => {
       Date.now()
     );
 
-    const alertSeed = pick(
-      body.alert_id,
-      body.id,
-      `${symbol}-${side}-${eventTime}`
-    );
+    const refId = makeRef6({
+      symbol,
+      side,
+      eventTime,
+      entry,
+      tp,
+      sl,
+    });
 
-    const refId = makeRef6(alertSeed);
     const prettyTime = formatUtc(eventTime);
     const { line1, line2 } = buildExplanation(side, rsi, atrPct);
 
@@ -270,23 +330,7 @@ NFA (Not Financial Advice)`;
       return;
     }
 
-    const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: CHAT_ID,
-        text,
-      }),
-    });
-
-    const data = await response.json();
-
-    console.log("TELEGRAM RESPONSE:", data);
-
-    if (!response.ok || !data.ok) {
-      console.error("Telegram send failed:", data);
-      return;
-    }
+    await sendTelegramAlert({ symbol, text });
 
     console.log(`ALERT SENT: ${symbol} ${side} REF ${refId}`);
     console.log("ALERT DATA:", {
@@ -298,6 +342,7 @@ NFA (Not Financial Advice)`;
       time: prettyTime,
       refId,
       chartLink,
+      imageUsed: Boolean(CHART_IMAGES[symbol]),
     });
   } catch (err) {
     console.error("ERROR:", err);
