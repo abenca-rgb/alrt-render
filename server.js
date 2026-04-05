@@ -36,8 +36,6 @@ const CHARTS = {
 };
 
 // ===== OPTIONAL DIRECT IMAGE LINKS =====
-// Alleen invullen met echte directe image-urls als je die later hebt.
-// Anders valt het systeem automatisch terug op sendMessage.
 const CHART_IMAGES = {
   // BTCUSDT: "https://....png",
   // ETHUSDT: "https://....png",
@@ -206,21 +204,11 @@ function hasValidTradeLevels(side, entry, tp, sl) {
   const t = parseNum(tp);
   const s = parseNum(sl);
 
-  if (!Number.isFinite(e) || !Number.isFinite(t) || !Number.isFinite(s)) {
-    return false;
-  }
+  if (!Number.isFinite(e) || !Number.isFinite(t) || !Number.isFinite(s)) return false;
+  if (e <= 0 || t <= 0 || s <= 0) return false;
 
-  if (e <= 0 || t <= 0 || s <= 0) {
-    return false;
-  }
-
-  if (side === "LONG") {
-    return t > e && s < e;
-  }
-
-  if (side === "SHORT") {
-    return t < e && s > e;
-  }
+  if (side === "LONG") return t > e && s < e;
+  if (side === "SHORT") return t < e && s > e;
 
   return false;
 }
@@ -278,6 +266,26 @@ function buildTradeKey(symbol, side, refId) {
   return `${symbol}|${side}|${refId}`;
 }
 
+function findOpenTradeByAlertIds(ids) {
+  const cleanIds = ids.filter(Boolean).map(String);
+
+  if (cleanIds.length === 0) return null;
+
+  for (const [key, trade] of activeTrades.entries()) {
+    if (trade.hit) continue;
+
+    if (
+      cleanIds.includes(String(trade.sourceAlertId || "")) ||
+      cleanIds.includes(String(trade.signalAlertId || "")) ||
+      cleanIds.includes(String(trade.parentAlertId || ""))
+    ) {
+      return { key, trade };
+    }
+  }
+
+  return null;
+}
+
 function findLatestOpenTradeBySymbol(symbol) {
   let latest = null;
 
@@ -291,6 +299,23 @@ function findLatestOpenTradeBySymbol(symbol) {
   }
 
   return latest;
+}
+
+function shouldInferHit(trade, currentPrice) {
+  if (!Number.isFinite(currentPrice)) return null;
+  if (trade.hit) return null;
+
+  if (trade.side === "LONG") {
+    if (currentPrice >= trade.tp) return "TP";
+    if (currentPrice <= trade.sl) return "SL";
+  }
+
+  if (trade.side === "SHORT") {
+    if (currentPrice <= trade.tp) return "TP";
+    if (currentPrice >= trade.sl) return "SL";
+  }
+
+  return null;
 }
 
 async function sendTelegramAlert({ symbol, text }) {
@@ -355,23 +380,6 @@ NFA (Not Financial Advice)`;
     symbol: trade.symbol,
     text: hitText,
   });
-}
-
-function shouldInferHit(trade, currentPrice) {
-  if (!Number.isFinite(currentPrice)) return null;
-  if (trade.hit) return null;
-
-  if (trade.side === "LONG") {
-    if (currentPrice >= trade.tp) return "TP";
-    if (currentPrice <= trade.sl) return "SL";
-  }
-
-  if (trade.side === "SHORT") {
-    if (currentPrice <= trade.tp) return "TP";
-    if (currentPrice >= trade.sl) return "SL";
-  }
-
-  return null;
 }
 
 // ===== BASIC ROUTES =====
@@ -462,8 +470,12 @@ app.post("/webhook/tradingview", async (req, res) => {
     );
 
     const currentPrice = parseNum(
-      pick(body.price, body.close, body.last, body.last_price, body.market_price)
+      pick(body.price, body.close, body.last, body.last_price, body.market_price, body.hit_price)
     );
+
+    const sourceAlertId = pick(body.alert_id);
+    const signalAlertId = pick(body.signal_alert_id, body.parent_alert_id, body.alert_id);
+    const parentAlertId = pick(body.parent_alert_id, body.signal_alert_id, body.alert_id);
 
     const refId = makeRef6({
       symbol,
@@ -483,47 +495,96 @@ app.post("/webhook/tradingview", async (req, res) => {
 
     // ===== HANDLE EXPLICIT TP/SL HIT WEBHOOKS =====
     if (explicitHitType && symbol) {
-      const latest = findLatestOpenTradeBySymbol(symbol);
+      const exact = findOpenTradeByAlertIds([
+        signalAlertId,
+        parentAlertId,
+        sourceAlertId,
+      ]);
 
-      if (latest) {
-        latest.trade.hit = true;
-        latest.trade.hitType = explicitHitType;
-        latest.trade.hitAtMs = Date.now();
+      if (exact) {
+        exact.trade.hit = true;
+        exact.trade.hitType = explicitHitType;
+        exact.trade.hitAtMs = Date.now();
 
         await sendHitAlert({
-          trade: latest.trade,
+          trade: exact.trade,
           hitType: explicitHitType,
           hitTime: Date.now(),
         });
 
-        console.log(`EXPLICIT HIT SENT: ${symbol} ${explicitHitType} REF ${latest.trade.refId}`);
-      } else {
-        console.log(`EXPLICIT HIT RECEIVED BUT NO OPEN TRADE FOUND: ${symbol} ${explicitHitType}`);
+        console.log(`EXPLICIT HIT SENT (ID MATCH): ${symbol} ${explicitHitType} REF ${exact.trade.refId}`);
+        console.log("HIT MATCH DATA:", {
+          symbol,
+          explicitHitType,
+          sourceAlertId,
+          signalAlertId,
+          parentAlertId,
+          matchedRefId: exact.trade.refId,
+          matchedSourceAlertId: exact.trade.sourceAlertId,
+        });
+
+        return;
       }
+
+      const fallback = findLatestOpenTradeBySymbol(symbol);
+
+      if (fallback) {
+        fallback.trade.hit = true;
+        fallback.trade.hitType = explicitHitType;
+        fallback.trade.hitAtMs = Date.now();
+
+        await sendHitAlert({
+          trade: fallback.trade,
+          hitType: explicitHitType,
+          hitTime: Date.now(),
+        });
+
+        console.log(`EXPLICIT HIT SENT (SYMBOL FALLBACK): ${symbol} ${explicitHitType} REF ${fallback.trade.refId}`);
+        console.log("HIT FALLBACK DATA:", {
+          symbol,
+          explicitHitType,
+          sourceAlertId,
+          signalAlertId,
+          parentAlertId,
+          matchedRefId: fallback.trade.refId,
+          matchedSourceAlertId: fallback.trade.sourceAlertId,
+        });
+
+        return;
+      }
+
+      console.log("EXPLICIT HIT RECEIVED BUT NO OPEN TRADE FOUND:", {
+        symbol,
+        explicitHitType,
+        sourceAlertId,
+        signalAlertId,
+        parentAlertId,
+        activeTrades: activeTrades.size,
+      });
 
       return;
     }
 
-    // ===== INFER HITS FROM PRICE ON ANY NEW WEBHOOK =====
+    // ===== INFER HITS FROM PRICE ON NEW WEBHOOKS =====
     if (symbol && Number.isFinite(currentPrice)) {
       for (const [key, trade] of activeTrades.entries()) {
         if (trade.symbol !== symbol) continue;
         if (trade.hit) continue;
 
-        const hitType = shouldInferHit(trade, currentPrice);
-        if (!hitType) continue;
+        const inferredHit = shouldInferHit(trade, currentPrice);
+        if (!inferredHit) continue;
 
         trade.hit = true;
-        trade.hitType = hitType;
+        trade.hitType = inferredHit;
         trade.hitAtMs = Date.now();
 
         await sendHitAlert({
           trade,
-          hitType,
+          hitType: inferredHit,
           hitTime: Date.now(),
         });
 
-        console.log(`INFERRED HIT SENT: ${symbol} ${hitType} REF ${trade.refId}`);
+        console.log(`INFERRED HIT SENT: ${symbol} ${inferredHit} REF ${trade.refId}`);
       }
     }
 
@@ -556,11 +617,14 @@ app.post("/webhook/tradingview", async (req, res) => {
         hit: false,
         hitType: null,
         hitAtMs: null,
+        sourceAlertId,
+        signalAlertId,
+        parentAlertId,
       });
     }
 
-    const { line1, line2 } = buildExplanation(side, rsi, atrPct);
     const chartLink = CHARTS[symbol] || "N/A";
+    const { line1, line2 } = buildExplanation(side, rsi, atrPct);
 
     const text = `🚨 ALERT #${refId}
 
@@ -596,6 +660,9 @@ NFA (Not Financial Advice)`;
       storedForHits: validLevels,
       activeTrades: activeTrades.size,
       eventType,
+      sourceAlertId,
+      signalAlertId,
+      parentAlertId,
     });
   } catch (err) {
     console.error("ERROR:", err);
