@@ -47,10 +47,17 @@ function fmtPrice(v) {
   const n = Number(v);
   if (!Number.isFinite(n)) return String(v);
 
+function fmtPrice(v) {
+  if (v === null || v === undefined || v === "") return "N/A";
+
+  const n = Number(v);
+  if (!Number.isFinite(n)) return String(v);
+
   if (n >= 1000) return n.toFixed(2);
   if (n >= 1) return n.toFixed(4);
   if (n >= 0.01) return n.toFixed(5);
-  return n.toFixed(6);
+  if (n >= 0.0001) return n.toFixed(8);
+  return n.toFixed(10);
 }
 
 function normalizeSymbol(v) {
