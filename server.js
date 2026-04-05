@@ -11,6 +11,10 @@ const PORT = process.env.PORT || 3000;
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
+// ===== ACTIVE TRADES =====
+const activeTrades = new Map();
+const MAX_TRADE_AGE_MS = 24 * 60 * 60 * 1000;
+
 app.use(express.json({ limit: "1mb" }));
 
 // ===== CHART PAGE LINKS =====
@@ -32,8 +36,8 @@ const CHARTS = {
 };
 
 // ===== OPTIONAL DIRECT IMAGE LINKS =====
-// Alleen invullen als je echte image-urls hebt.
-// Zolang dit leeg blijft, valt het systeem terug op sendMessage.
+// Alleen invullen met echte directe image-urls als je die later hebt.
+// Anders valt het systeem automatisch terug op sendMessage.
 const CHART_IMAGES = {
   // BTCUSDT: "https://....png",
   // ETHUSDT: "https://....png",
@@ -47,6 +51,12 @@ function pick(...values) {
     }
   }
   return null;
+}
+
+function parseNum(v) {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
 }
 
 function fmtPrice(v) {
@@ -73,6 +83,13 @@ function normalizeSide(v) {
   const x = String(v || "").toUpperCase().trim();
   if (x === "LONG" || x === "SHORT") return x;
   return "N/A";
+}
+
+function normalizeEventType(v) {
+  return String(v || "")
+    .toLowerCase()
+    .trim()
+    .replace(/\s+/g, "_");
 }
 
 function formatUtc(ts) {
@@ -102,9 +119,21 @@ function formatUtc(ts) {
   return `${y}-${m}-${day} ${hh}:${mm} UTC`;
 }
 
+function eventTimeToMs(ts) {
+  if (ts === null || ts === undefined || ts === "") return Date.now();
+
+  const raw = String(ts).trim();
+
+  if (/^\d+$/.test(raw)) {
+    const num = Number(raw);
+    return raw.length <= 10 ? num * 1000 : num;
+  }
+
+  const d = new Date(raw);
+  return Number.isNaN(d.getTime()) ? Date.now() : d.getTime();
+}
+
 function makeRef6({ symbol, side, eventTime, entry, tp, sl }) {
-  // Praktisch unieke 6-digit ref op basis van alert-inhoud.
-  // Niet mathematisch 100% gegarandeerd, maar veel beter dan de huidige setup.
   const base = [
     symbol || "",
     side || "",
@@ -172,6 +201,98 @@ function buildExplanation(side, rsi, atrPct) {
   return { line1, line2 };
 }
 
+function hasValidTradeLevels(side, entry, tp, sl) {
+  const e = parseNum(entry);
+  const t = parseNum(tp);
+  const s = parseNum(sl);
+
+  if (!Number.isFinite(e) || !Number.isFinite(t) || !Number.isFinite(s)) {
+    return false;
+  }
+
+  if (e <= 0 || t <= 0 || s <= 0) {
+    return false;
+  }
+
+  if (side === "LONG") {
+    return t > e && s < e;
+  }
+
+  if (side === "SHORT") {
+    return t < e && s > e;
+  }
+
+  return false;
+}
+
+function cleanupActiveTrades() {
+  const now = Date.now();
+
+  for (const [key, trade] of activeTrades.entries()) {
+    if (now - trade.createdAtMs > MAX_TRADE_AGE_MS) {
+      activeTrades.delete(key);
+    }
+  }
+}
+
+function detectExplicitHitType(eventType, body) {
+  const normalized = normalizeEventType(eventType);
+  const rawText = JSON.stringify(body).toLowerCase();
+
+  if (
+    normalized.includes("tp_hit") ||
+    normalized.includes("take_profit_hit") ||
+    normalized === "tp" ||
+    rawText.includes('"event":"tp_hit"') ||
+    rawText.includes('"type":"tp_hit"') ||
+    rawText.includes('"event_type":"tp_hit"')
+  ) {
+    return "TP";
+  }
+
+  if (
+    normalized.includes("sl_hit") ||
+    normalized.includes("stop_loss_hit") ||
+    normalized === "sl" ||
+    rawText.includes('"event":"sl_hit"') ||
+    rawText.includes('"type":"sl_hit"') ||
+    rawText.includes('"event_type":"sl_hit"')
+  ) {
+    return "SL";
+  }
+
+  return null;
+}
+
+function isLikelySignalEvent(eventType, side, entry) {
+  const normalized = normalizeEventType(eventType);
+
+  if (normalized.includes("signal")) return true;
+  if (normalized.includes("entry")) return true;
+  if (normalized.includes("alert")) return true;
+
+  return (side === "LONG" || side === "SHORT") && entry !== null && entry !== undefined && entry !== "";
+}
+
+function buildTradeKey(symbol, side, refId) {
+  return `${symbol}|${side}|${refId}`;
+}
+
+function findLatestOpenTradeBySymbol(symbol) {
+  let latest = null;
+
+  for (const [key, trade] of activeTrades.entries()) {
+    if (trade.symbol !== symbol) continue;
+    if (trade.hit) continue;
+
+    if (!latest || trade.createdAtMs > latest.trade.createdAtMs) {
+      latest = { key, trade };
+    }
+  }
+
+  return latest;
+}
+
 async function sendTelegramAlert({ symbol, text }) {
   const imageUrl = CHART_IMAGES[symbol] || null;
 
@@ -213,6 +334,46 @@ async function sendTelegramAlert({ symbol, text }) {
   }
 }
 
+async function sendHitAlert({ trade, hitType, hitTime }) {
+  const hitText = `🎯 ${hitType} HIT
+
+PAIR: ${trade.symbol}
+DIRECTION: ${trade.side}
+
+ENTRY: ${fmtPrice(trade.entry)}
+TP: ${fmtPrice(trade.tp)}
+SL: ${fmtPrice(trade.sl)}
+
+TIMEFRAME: 60M
+TIME (UTC): ${formatUtc(hitTime)}
+
+REF: #${trade.refId}
+RESULT: ${hitType}
+NFA (Not Financial Advice)`;
+
+  await sendTelegramAlert({
+    symbol: trade.symbol,
+    text: hitText,
+  });
+}
+
+function shouldInferHit(trade, currentPrice) {
+  if (!Number.isFinite(currentPrice)) return null;
+  if (trade.hit) return null;
+
+  if (trade.side === "LONG") {
+    if (currentPrice >= trade.tp) return "TP";
+    if (currentPrice <= trade.sl) return "SL";
+  }
+
+  if (trade.side === "SHORT") {
+    if (currentPrice <= trade.tp) return "TP";
+    if (currentPrice >= trade.sl) return "SL";
+  }
+
+  return null;
+}
+
 // ===== BASIC ROUTES =====
 app.get("/", (req, res) => {
   res.status(200).json({
@@ -225,23 +386,24 @@ app.get("/health", (req, res) => {
   res.status(200).json({
     ok: true,
     timestamp: new Date().toISOString(),
+    activeTrades: activeTrades.size,
   });
 });
 
 // ===== WEBHOOK =====
 app.post("/webhook/tradingview", async (req, res) => {
   const body = req.body || {};
-
-  // Snel antwoorden aan TradingView
   res.status(200).json({ ok: true });
 
   try {
+    cleanupActiveTrades();
+
     const symbol = normalizeSymbol(
-      pick(body.symbol, body.ticker, body.pair, body.coin, "")
+      pick(body.symbol, body.ticker, body.pair, body.coin, body.market, "")
     );
 
     const side = normalizeSide(
-      pick(body.side, body.direction, "")
+      pick(body.side, body.direction, body.position, body.trade_side, "")
     );
 
     const entry = pick(
@@ -276,8 +438,8 @@ app.post("/webhook/tradingview", async (req, res) => {
       body.slPrice
     );
 
-    const rsi = pick(body.rsi);
-    const atrPct = pick(body.atr_pct, body.atrPercent);
+    const rsi = pick(body.rsi, body.rsi_value);
+    const atrPct = pick(body.atr_pct, body.atrPercent, body.atr_percent);
 
     const eventTime = pick(
       body.time_close,
@@ -285,6 +447,22 @@ app.post("/webhook/tradingview", async (req, res) => {
       body.timestamp,
       body.time,
       Date.now()
+    );
+
+    const eventTimeMs = eventTimeToMs(eventTime);
+    const prettyTime = formatUtc(eventTime);
+
+    const eventType = pick(
+      body.event,
+      body.type,
+      body.event_type,
+      body.kind,
+      body.signal_type,
+      ""
+    );
+
+    const currentPrice = parseNum(
+      pick(body.price, body.close, body.last, body.last_price, body.market_price)
     );
 
     const refId = makeRef6({
@@ -296,9 +474,92 @@ app.post("/webhook/tradingview", async (req, res) => {
       sl,
     });
 
-    const prettyTime = formatUtc(eventTime);
-    const { line1, line2 } = buildExplanation(side, rsi, atrPct);
+    const explicitHitType = detectExplicitHitType(eventType, body);
 
+    if (!BOT_TOKEN || !CHAT_ID) {
+      console.error("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID");
+      return;
+    }
+
+    // ===== HANDLE EXPLICIT TP/SL HIT WEBHOOKS =====
+    if (explicitHitType && symbol) {
+      const latest = findLatestOpenTradeBySymbol(symbol);
+
+      if (latest) {
+        latest.trade.hit = true;
+        latest.trade.hitType = explicitHitType;
+        latest.trade.hitAtMs = Date.now();
+
+        await sendHitAlert({
+          trade: latest.trade,
+          hitType: explicitHitType,
+          hitTime: Date.now(),
+        });
+
+        console.log(`EXPLICIT HIT SENT: ${symbol} ${explicitHitType} REF ${latest.trade.refId}`);
+      } else {
+        console.log(`EXPLICIT HIT RECEIVED BUT NO OPEN TRADE FOUND: ${symbol} ${explicitHitType}`);
+      }
+
+      return;
+    }
+
+    // ===== INFER HITS FROM PRICE ON ANY NEW WEBHOOK =====
+    if (symbol && Number.isFinite(currentPrice)) {
+      for (const [key, trade] of activeTrades.entries()) {
+        if (trade.symbol !== symbol) continue;
+        if (trade.hit) continue;
+
+        const hitType = shouldInferHit(trade, currentPrice);
+        if (!hitType) continue;
+
+        trade.hit = true;
+        trade.hitType = hitType;
+        trade.hitAtMs = Date.now();
+
+        await sendHitAlert({
+          trade,
+          hitType,
+          hitTime: Date.now(),
+        });
+
+        console.log(`INFERRED HIT SENT: ${symbol} ${hitType} REF ${trade.refId}`);
+      }
+    }
+
+    // ===== NORMAL SIGNAL ALERT =====
+    const isSignal = isLikelySignalEvent(eventType, side, entry);
+
+    if (!isSignal || !symbol || (side !== "LONG" && side !== "SHORT")) {
+      console.log("NON-SIGNAL WEBHOOK RECEIVED:", {
+        symbol,
+        side,
+        eventType,
+      });
+      return;
+    }
+
+    const validLevels = hasValidTradeLevels(side, entry, tp, sl);
+
+    if (validLevels) {
+      const tradeKey = buildTradeKey(symbol, side, refId);
+
+      activeTrades.set(tradeKey, {
+        tradeKey,
+        refId,
+        symbol,
+        side,
+        entry: parseNum(entry),
+        tp: parseNum(tp),
+        sl: parseNum(sl),
+        createdAtMs: eventTimeMs,
+        hit: false,
+        hitType: null,
+        hitAtMs: null,
+      });
+    }
+
+    const { line1, line2 } = buildExplanation(side, rsi, atrPct);
     const chartLink = CHARTS[symbol] || "N/A";
 
     const text = `🚨 ALERT #${refId}
@@ -319,17 +580,6 @@ ${line2}
 CHART: attached
 NFA (Not Financial Advice)`;
 
-    if (!BOT_TOKEN || !CHAT_ID) {
-      console.error("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID");
-      console.log("Payload received but Telegram config is missing:", {
-        symbol,
-        side,
-        refId,
-        chartLink,
-      });
-      return;
-    }
-
     await sendTelegramAlert({ symbol, text });
 
     console.log(`ALERT SENT: ${symbol} ${side} REF ${refId}`);
@@ -343,6 +593,9 @@ NFA (Not Financial Advice)`;
       refId,
       chartLink,
       imageUsed: Boolean(CHART_IMAGES[symbol]),
+      storedForHits: validLevels,
+      activeTrades: activeTrades.size,
+      eventType,
     });
   } catch (err) {
     console.error("ERROR:", err);
