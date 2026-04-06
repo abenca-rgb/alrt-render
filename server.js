@@ -14,6 +14,10 @@ const PORT = process.env.PORT || 3000;
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
+// Optional example:
+// CHART_IMAGE_TEMPLATE=https://your-domain.com/charts/{symbol}.png
+const CHART_IMAGE_TEMPLATE = process.env.CHART_IMAGE_TEMPLATE || "";
+
 // ===== PATHS =====
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -27,7 +31,6 @@ const recentHitKeys = new Map();
 const MAX_TRADE_AGE_MS = 24 * 60 * 60 * 1000;
 const HIT_DEDUP_TTL_MS = 36 * 60 * 60 * 1000;
 
-// serialize saves so file writes never overlap
 let savePromise = Promise.resolve();
 
 app.use(express.json({ limit: "1mb" }));
@@ -51,7 +54,6 @@ const CHARTS = {
 };
 
 // ===== OPTIONAL DIRECT IMAGE LINKS =====
-// Alleen echte directe image urls gebruiken (png/jpg/webp).
 const CHART_IMAGES = {
   // BTCUSDT: "https://....png",
   // ETHUSDT: "https://....jpg",
@@ -89,8 +91,8 @@ function fmtPrice(v) {
 function fmtPct(v, { signed = false } = {}) {
   const n = Number(v);
   if (!Number.isFinite(n)) return "N/A";
-  const value = signed && n > 0 ? `+${n.toFixed(2)}%` : `${n.toFixed(2)}%`;
-  return value;
+  if (signed && n > 0) return `+${n.toFixed(2)}%`;
+  return `${n.toFixed(2)}%`;
 }
 
 function fmtRR(v) {
@@ -375,120 +377,272 @@ function deriveSetupType({ body, side, rsi, atrPct }) {
   return "TREND";
 }
 
+function getRsiBucket(side, rsi) {
+  const r = parseNum(rsi);
+  if (!Number.isFinite(r)) return "UNKNOWN";
+
+  if (side === "LONG") {
+    if (r >= 70) return "HOT";
+    if (r >= 60) return "STRONG";
+    if (r >= 50) return "STEADY";
+    if (r >= 40) return "EARLY";
+    return "RECOVERY";
+  }
+
+  if (side === "SHORT") {
+    if (r <= 30) return "HOT";
+    if (r <= 40) return "STRONG";
+    if (r <= 50) return "STEADY";
+    if (r <= 60) return "EARLY";
+    return "ROLLING";
+  }
+
+  return "UNKNOWN";
+}
+
+function getAtrBucket(atrPct) {
+  const a = parseNum(atrPct);
+  if (!Number.isFinite(a)) return "UNKNOWN";
+  if (a <= 0.9) return "TIGHT";
+  if (a <= 1.5) return "CONTROLLED";
+  if (a <= 2.6) return "NORMAL";
+  return "EXPANDED";
+}
+
 function chooseVariant(seed, variants) {
   if (!Array.isArray(variants) || variants.length === 0) return "";
   const index = stableHash(seed) % variants.length;
   return variants[index];
 }
 
-function buildReasonEngine({ symbol, side, rsi, atrPct, eventTime, setupType, strength }) {
-  const r = parseNum(rsi);
-  const atr = parseNum(atrPct);
-  const seed = `${symbol}|${side}|${eventTime}|${setupType}|${strength}`;
+function buildWhyLine({ symbol, side, setupType, strength, rsi, atrPct, eventTime }) {
+  const rsiBucket = getRsiBucket(side, rsi);
+  const atrBucket = getAtrBucket(atrPct);
+  const majorTag = isMajorSymbol(symbol) ? "MAJOR" : "ALT";
+  const seedBase = `${symbol}|${side}|${setupType}|${strength}|${rsiBucket}|${atrBucket}|${majorTag}|${eventTime}`;
 
-  const introBySetup = {
-    BREAKOUT: {
-      LONG: [
-        "Bullish breakout structure is developing with price pressing through resistance.",
-        "Breakout conditions are active and buyers are defending continuation.",
-        "Price is expanding above local resistance with constructive momentum."
-      ],
-      SHORT: [
-        "Bearish breakdown structure is developing with price slipping under support.",
-        "Breakdown conditions are active and sellers are pressing continuation.",
-        "Price is expanding below local support with downside momentum."
-      ],
+  const reasons = {
+    COMPRESSION: {
+      LONG: {
+        TIGHT: [
+          "Compression remains tight and favors a cleaner upside release.",
+          "Price is tightly coiled, which supports a stronger bullish expansion.",
+          "Volatility is compressed enough to support a sharper move higher."
+        ],
+        CONTROLLED: [
+          "The structure stays compact while momentum remains supportive for continuation.",
+          "Controlled volatility supports a structured bullish expansion.",
+          "This compression profile still leaves room for an upside extension."
+        ],
+        NORMAL: [
+          "The setup still holds a compressed structure despite slightly broader movement.",
+          "Volatility is stable enough to keep the bullish expansion case valid.",
+          "The market remains orderly enough for a continuation move from compression."
+        ],
+        EXPANDED: [
+          "Momentum still favors continuation, even with a less compact volatility profile.",
+          "The structure remains bullish, although volatility is already widening.",
+          "The setup keeps an upside bias as price transitions out of compression."
+        ],
+      },
+      SHORT: {
+        TIGHT: [
+          "Compression remains tight and favors a cleaner downside release.",
+          "Price is tightly coiled, which supports a sharper bearish expansion.",
+          "Volatility is compressed enough to support a stronger move lower."
+        ],
+        CONTROLLED: [
+          "The structure stays compact while downside pressure remains active.",
+          "Controlled volatility supports a structured bearish expansion.",
+          "This compression profile still leaves room for a downside extension."
+        ],
+        NORMAL: [
+          "The setup still holds a compressed structure despite slightly broader movement.",
+          "Volatility is stable enough to keep the bearish expansion case valid.",
+          "The market remains orderly enough for a continuation move from compression."
+        ],
+        EXPANDED: [
+          "Momentum still favors continuation, even with a less compact volatility profile.",
+          "The structure remains bearish, although volatility is already widening.",
+          "The setup keeps a downside bias as price transitions out of compression."
+        ],
+      },
     },
     PULLBACK: {
-      LONG: [
-        "This looks like a continuation setup after a healthy pullback.",
-        "Price is retracing inside the trend while buyers remain in control.",
-        "The setup reflects a bullish pullback rather than trend failure."
-      ],
-      SHORT: [
-        "This looks like a continuation setup after a corrective bounce.",
-        "Price is retracing into weakness while sellers remain in control.",
-        "The setup reflects a bearish pullback rather than trend failure."
-      ],
+      LONG: {
+        RECOVERY: [
+          "Price is stabilizing after a pullback and early buyers are stepping back in.",
+          "The retrace is being absorbed, which supports a continuation attempt higher.",
+          "This pullback still looks constructive rather than disruptive."
+        ],
+        EARLY: [
+          "The retrace remains healthy and the bullish structure is still intact.",
+          "Buyers are defending the pullback area without damaging the trend.",
+          "The setup reflects a controlled retrace inside a broader bullish structure."
+        ],
+        STEADY: [
+          "Momentum remains stable through the pullback, which supports continuation.",
+          "The market is retracing in an orderly way without losing bullish structure.",
+          "This pullback stays aligned with the prevailing upside trend."
+        ],
+        STRONG: [
+          "Buy-side pressure remains firm even after the retrace, which supports continuation.",
+          "The pullback is shallow relative to the underlying bullish strength.",
+          "Momentum remains supportive despite the temporary retrace."
+        ],
+        HOT: [
+          "Bullish momentum remains dominant and the retrace has not weakened the setup.",
+          "The market remains strong enough to treat the dip as a continuation opportunity.",
+          "This pullback sits inside a clearly supportive momentum profile."
+        ],
+      },
+      SHORT: {
+        ROLLING: [
+          "Price is stalling after a bounce and sellers are beginning to press again.",
+          "The recovery looks corrective rather than trend-changing.",
+          "This bounce still looks like a setup for downside continuation."
+        ],
+        EARLY: [
+          "The bounce remains contained and the bearish structure is still intact.",
+          "Sellers are defending the rebound area without losing control.",
+          "The setup reflects a controlled rebound inside a broader bearish structure."
+        ],
+        STEADY: [
+          "Momentum remains stable through the bounce, which supports downside continuation.",
+          "The market is retracing in an orderly way without repairing bearish structure.",
+          "This rebound stays aligned with the prevailing downside trend."
+        ],
+        STRONG: [
+          "Sell-side pressure remains firm even after the rebound, which supports continuation.",
+          "The bounce is shallow relative to the underlying bearish strength.",
+          "Momentum remains supportive for downside continuation despite the retrace."
+        ],
+        HOT: [
+          "Bearish momentum remains dominant and the rebound has not weakened the setup.",
+          "The market remains weak enough to treat the bounce as a continuation opportunity.",
+          "This rebound sits inside a clearly bearish momentum profile."
+        ],
+      },
     },
     TREND: {
-      LONG: [
-        "Trend structure remains constructive on the 60M chart.",
-        "The broader 60M flow still favors continuation to the upside.",
-        "This setup aligns with the prevailing bullish structure."
-      ],
-      SHORT: [
-        "Trend structure remains weak on the 60M chart.",
-        "The broader 60M flow still favors continuation to the downside.",
-        "This setup aligns with the prevailing bearish structure."
-      ],
+      LONG: {
+        HOT: [
+          "The 60M trend remains strong and buyers still control the pace.",
+          "Momentum continues to support an active bullish trend structure.",
+          "The broader flow remains constructive with no major damage to trend."
+        ],
+        STRONG: [
+          "The trend stays healthy and continuation conditions remain in place.",
+          "Price structure continues to favor upside continuation on 60M.",
+          "The broader trend remains supportive for another move higher."
+        ],
+        STEADY: [
+          "The trend remains intact and price is still behaving constructively.",
+          "This setup stays aligned with a stable bullish structure.",
+          "Continuation remains favored while the 60M structure holds."
+        ],
+        EARLY: [
+          "The trend is rebuilding and the structure is improving step by step.",
+          "Price continues to recover into a more constructive bullish profile.",
+          "The market is still early in restoring bullish trend behavior."
+        ],
+        RECOVERY: [
+          "The market is attempting to transition from recovery into trend continuation.",
+          "Bullish structure is rebuilding after earlier weakness.",
+          "The setup still leans constructive as recovery conditions improve."
+        ],
+      },
+      SHORT: {
+        HOT: [
+          "The 60M trend remains strong to the downside and sellers still control the pace.",
+          "Momentum continues to support an active bearish trend structure.",
+          "The broader flow remains weak with no meaningful repair to trend."
+        ],
+        STRONG: [
+          "The trend stays healthy for sellers and continuation conditions remain in place.",
+          "Price structure continues to favor downside continuation on 60M.",
+          "The broader trend remains supportive for another move lower."
+        ],
+        STEADY: [
+          "The trend remains intact and price is still behaving bearishly.",
+          "This setup stays aligned with a stable bearish structure.",
+          "Continuation remains favored while the 60M structure stays weak."
+        ],
+        EARLY: [
+          "The trend is rebuilding to the downside and weakness is increasing step by step.",
+          "Price continues to roll into a more bearish structure.",
+          "The market is still early in restoring bearish trend behavior."
+        ],
+        ROLLING: [
+          "The market is transitioning from stalling into renewed downside pressure.",
+          "Bearish structure is rebuilding after earlier stabilization.",
+          "The setup still leans weak as downside conditions improve."
+        ],
+      },
+    },
+    BREAKOUT: {
+      LONG: {
+        DEFAULT: [
+          "Price is pressing into breakout territory with momentum on its side.",
+          "The setup reflects active pressure against resistance.",
+          "Breakout conditions remain valid while buyers keep control."
+        ],
+      },
+      SHORT: {
+        DEFAULT: [
+          "Price is pressing into breakdown territory with momentum on its side.",
+          "The setup reflects active pressure against support.",
+          "Breakdown conditions remain valid while sellers keep control."
+        ],
+      },
     },
     REVERSAL: {
-      LONG: [
-        "A potential reversal is forming from a weaker zone.",
-        "Buyers are attempting to reclaim structure after prior weakness.",
-        "This setup suggests reversal pressure may be building."
-      ],
-      SHORT: [
-        "A potential reversal is forming from an overextended zone.",
-        "Sellers are attempting to reclaim control after prior strength.",
-        "This setup suggests reversal pressure may be building lower."
-      ],
-    },
-    COMPRESSION: {
-      LONG: [
-        "Price is compressing and a directional expansion may follow.",
-        "Low-volatility structure can fuel a sharper upside release.",
-        "This setup reflects compression before a possible bullish expansion."
-      ],
-      SHORT: [
-        "Price is compressing and a directional expansion may follow.",
-        "Low-volatility structure can fuel a sharper downside release.",
-        "This setup reflects compression before a possible bearish expansion."
-      ],
+      LONG: {
+        DEFAULT: [
+          "The setup suggests a bullish reversal attempt from a weaker zone.",
+          "Buyers are trying to reclaim structure after earlier weakness.",
+          "This looks like an early reversal rather than a standard continuation."
+        ],
+      },
+      SHORT: {
+        DEFAULT: [
+          "The setup suggests a bearish reversal attempt from an extended zone.",
+          "Sellers are trying to reclaim control after earlier strength.",
+          "This looks like an early reversal rather than a standard continuation."
+        ],
+      },
     },
     MOMENTUM: {
-      LONG: [
-        "Momentum is accelerating to the upside.",
-        "Buy-side pressure is increasing and supports continuation.",
-        "This setup shows active bullish momentum rather than passive drift."
-      ],
-      SHORT: [
-        "Momentum is accelerating to the downside.",
-        "Sell-side pressure is increasing and supports continuation.",
-        "This setup shows active bearish momentum rather than passive drift."
-      ],
+      LONG: {
+        DEFAULT: [
+          "Momentum remains active and supports continued upside pressure.",
+          "The move is being driven by ongoing bullish momentum rather than drift.",
+          "Buy-side acceleration remains supportive for continuation."
+        ],
+      },
+      SHORT: {
+        DEFAULT: [
+          "Momentum remains active and supports continued downside pressure.",
+          "The move is being driven by ongoing bearish momentum rather than drift.",
+          "Sell-side acceleration remains supportive for continuation."
+        ],
+      },
     },
   };
 
-  const fallback = {
-    LONG: [
-      "Momentum and structure align with this 60M long setup.",
-      "The current 60M structure supports a bullish continuation attempt.",
-      "Price action and momentum remain supportive for a long setup."
-    ],
-    SHORT: [
-      "Momentum and structure align with this 60M short setup.",
-      "The current 60M structure supports a bearish continuation attempt.",
-      "Price action and momentum remain supportive for a short setup."
-    ],
-  };
+  const setupBlock = reasons[setupType] || {};
+  const sideBlock = setupBlock[side] || {};
+  const bucketList =
+    sideBlock[atrBucket] ||
+    sideBlock[rsiBucket] ||
+    sideBlock.DEFAULT ||
+    [
+      side === "LONG"
+        ? "Structure and momentum remain supportive for this long setup."
+        : "Structure and momentum remain supportive for this short setup."
+    ];
 
-  const library = introBySetup[setupType] || {};
-  const line1 = chooseVariant(seed, library[side] || fallback[side] || ["Structure supports this setup."]);
-
-  let line2 = "";
-  if (Number.isFinite(r) && Number.isFinite(atr)) {
-    line2 = `RSI ${r.toFixed(2)} and ATR ${atr.toFixed(2)}% fit the current ${strength} setup profile.`;
-  } else if (Number.isFinite(r)) {
-    line2 = `RSI ${r.toFixed(2)} supports the current ${strength} setup profile.`;
-  } else if (Number.isFinite(atr)) {
-    line2 = `ATR ${atr.toFixed(2)}% remains acceptable for this ${strength} 60M setup.`;
-  } else {
-    line2 = `The current setup profile is classified as ${strength} on 60M.`;
-  }
-
-  return { line1, line2 };
+  return chooseVariant(seedBase, bucketList);
 }
 
 function cleanupState() {
@@ -677,6 +831,10 @@ function resolveChartImageUrl(body, symbol) {
     return String(mapped).trim();
   }
 
+  if (CHART_IMAGE_TEMPLATE && CHART_IMAGE_TEMPLATE.includes("{symbol}")) {
+    return CHART_IMAGE_TEMPLATE.replace("{symbol}", symbol);
+  }
+
   return null;
 }
 
@@ -693,15 +851,9 @@ function buildAlertText({
   side,
   entry,
   tp,
-  sl,
-  tpPct,
-  slPct,
   rr,
-  setupType,
-  strength,
   prettyTime,
-  line1,
-  line2,
+  whyLine,
   chartLink,
 }) {
   return `🚨 <b>ALERT #${escapeHtml(refId)}</b>
@@ -710,23 +862,17 @@ function buildAlertText({
 <b>DIRECTION:</b> ${escapeHtml(side)}
 
 <b>ENTRY:</b> ${escapeHtml(fmtPrice(entry))}
-<b>TP:</b> ${escapeHtml(fmtPrice(tp))} (${escapeHtml(fmtPct(tpPct))})
-<b>SL:</b> ${escapeHtml(fmtPrice(sl))} (${escapeHtml(fmtPct(slPct, { signed: true }))})
+<b>TP:</b> ${escapeHtml(fmtPrice(tp))}
 <b>RR:</b> ${escapeHtml(fmtRR(rr))}
-
-<b>SETUP:</b> ${escapeHtml(setupType)}
-<b>STRENGTH:</b> ${escapeHtml(strength)}
 
 <b>TIMEFRAME:</b> 60M
 <b>TIME (UTC):</b> ${escapeHtml(prettyTime)}
 
-${escapeHtml(line1)}
-${escapeHtml(line2)}
+<b>WHY:</b> ${escapeHtml(whyLine)}
 
-<b>REF:</b> #${escapeHtml(refId)}
 <b>CHART:</b> ${escapeHtml(chartLink)}
 
-NFA (Not Financial Advice)`;
+NFA`;
 }
 
 function buildHitText({
@@ -748,14 +894,8 @@ function buildHitText({
 
 <b>ENTRY:</b> ${escapeHtml(fmtPrice(trade.entry))}
 <b>EXIT:</b> ${escapeHtml(fmtPrice(exitPrice))}
-<b>TP:</b> ${escapeHtml(fmtPrice(trade.tp))}
-<b>SL:</b> ${escapeHtml(fmtPrice(trade.sl))}
-
 <b>MOVE:</b> ${escapeHtml(fmtPct(movePct, { signed: true }))}
 <b>RR:</b> ${escapeHtml(fmtRR(rr))}
-
-<b>SETUP:</b> ${escapeHtml(trade.setupType || "N/A")}
-<b>STRENGTH:</b> ${escapeHtml(trade.strength || "N/A")}
 
 <b>TIMEFRAME:</b> 60M
 <b>TIME (UTC):</b> ${escapeHtml(formatUtc(hitTime))}
@@ -764,10 +904,9 @@ function buildHitText({
 <b>STATUS:</b> ${escapeHtml(status)}
 <b>CHART:</b> ${escapeHtml(chartLink)}
 
-NFA (Not Financial Advice)`;
+NFA`;
 }
 
-// ===== PERSISTENCE =====
 async function ensureDataDir() {
   await fs.mkdir(DATA_DIR, { recursive: true });
 }
@@ -1058,9 +1197,6 @@ app.post("/webhook/tradingview", async (req, res) => {
 
     const validLevels = hasValidTradeLevels(side, entryParsed, tpParsed, slParsed);
     const rr = rrFromLevels(side, entryParsed, tpParsed, slParsed);
-    const tpPct = pctMove(side, entryParsed, tpParsed);
-    const slPctRaw = pctMove(side, entryParsed, slParsed);
-    const slPctDisplay = Number.isFinite(slPctRaw) ? -Math.abs(slPctRaw) : null;
 
     const refId = makeRef6({
       symbol,
@@ -1112,14 +1248,6 @@ app.post("/webhook/tradingview", async (req, res) => {
         await markRecentHit(hitKey);
 
         console.log(`EXPLICIT HIT SENT (ID MATCH): ${symbol} ${explicitHitType} REF ${exact.trade.refId}`);
-        console.log("HIT MATCH DATA:", {
-          symbol,
-          explicitHitType,
-          candidateIds,
-          matchedRefId: exact.trade.refId,
-          tradeAlertIds: exact.trade.alertIds,
-        });
-
         await removeTrade(exact.key);
         return;
       }
@@ -1140,15 +1268,6 @@ app.post("/webhook/tradingview", async (req, res) => {
         await markRecentHit(hitKey);
 
         console.log(`EXPLICIT HIT SENT (SYMBOL+SIDE FALLBACK): ${symbol} ${explicitHitType} REF ${sideFallback.trade.refId}`);
-        console.log("HIT FALLBACK DATA:", {
-          symbol,
-          side,
-          explicitHitType,
-          candidateIds,
-          matchedRefId: sideFallback.trade.refId,
-          tradeAlertIds: sideFallback.trade.alertIds,
-        });
-
         await removeTrade(sideFallback.key);
         return;
       }
@@ -1169,14 +1288,6 @@ app.post("/webhook/tradingview", async (req, res) => {
         await markRecentHit(hitKey);
 
         console.log(`EXPLICIT HIT SENT (SYMBOL FALLBACK): ${symbol} ${explicitHitType} REF ${symbolFallback.trade.refId}`);
-        console.log("HIT SYMBOL FALLBACK DATA:", {
-          symbol,
-          explicitHitType,
-          candidateIds,
-          matchedRefId: symbolFallback.trade.refId,
-          tradeAlertIds: symbolFallback.trade.alertIds,
-        });
-
         await removeTrade(symbolFallback.key);
         return;
       }
@@ -1263,14 +1374,14 @@ app.post("/webhook/tradingview", async (req, res) => {
       });
     }
 
-    const { line1, line2 } = buildReasonEngine({
+    const whyLine = buildWhyLine({
       symbol,
       side,
+      setupType,
+      strength,
       rsi,
       atrPct,
       eventTime,
-      setupType,
-      strength,
     });
 
     const text = buildAlertText({
@@ -1279,15 +1390,9 @@ app.post("/webhook/tradingview", async (req, res) => {
       side,
       entry: entryParsed,
       tp: tpParsed,
-      sl: slParsed,
-      tpPct,
-      slPct: slPctDisplay,
       rr,
-      setupType,
-      strength,
       prettyTime,
-      line1,
-      line2,
+      whyLine,
       chartLink,
     });
 
@@ -1303,8 +1408,6 @@ app.post("/webhook/tradingview", async (req, res) => {
       entry: fmtPrice(entryParsed),
       tp: fmtPrice(tpParsed),
       sl: fmtPrice(slParsed),
-      tpPct: fmtPct(tpPct),
-      slPct: fmtPct(slPctDisplay, { signed: true }),
       rr: fmtRR(rr),
       time: prettyTime,
       refId,
@@ -1318,6 +1421,7 @@ app.post("/webhook/tradingview", async (req, res) => {
       setupType,
       strength,
       usedDynamicLevels: !validIncomingLevels && validLevels,
+      whyLine,
     });
   } catch (err) {
     console.error("ERROR:", err);
