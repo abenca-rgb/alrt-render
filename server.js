@@ -1,6 +1,9 @@
 import express from "express";
 import dotenv from "dotenv";
 import fetch from "node-fetch";
+import path from "path";
+import { fileURLToPath } from "url";
+import { promises as fs } from "fs";
 
 dotenv.config();
 
@@ -11,9 +14,18 @@ const PORT = process.env.PORT || 3000;
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
+// ===== PATHS =====
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const DATA_DIR = path.join(__dirname, "data");
+const TRADES_FILE = path.join(DATA_DIR, "active-trades.json");
+
 // ===== ACTIVE TRADES =====
 const activeTrades = new Map();
 const MAX_TRADE_AGE_MS = 24 * 60 * 60 * 1000;
+
+// serialize saves so file writes never overlap
+let savePromise = Promise.resolve();
 
 app.use(express.json({ limit: "1mb" }));
 
@@ -36,6 +48,8 @@ const CHARTS = {
 };
 
 // ===== OPTIONAL DIRECT IMAGE LINKS =====
+// Vul later alleen echte directe image-urls in.
+// Anders valt het systeem automatisch terug op sendMessage.
 const CHART_IMAGES = {
   // BTCUSDT: "https://....png",
   // ETHUSDT: "https://....png",
@@ -215,11 +229,17 @@ function hasValidTradeLevels(side, entry, tp, sl) {
 
 function cleanupActiveTrades() {
   const now = Date.now();
+  let changed = false;
 
   for (const [key, trade] of activeTrades.entries()) {
     if (now - trade.createdAtMs > MAX_TRADE_AGE_MS) {
       activeTrades.delete(key);
+      changed = true;
     }
+  }
+
+  if (changed) {
+    void persistActiveTrades();
   }
 }
 
@@ -233,7 +253,8 @@ function detectExplicitHitType(eventType, body) {
     normalized === "tp" ||
     rawText.includes('"event":"tp_hit"') ||
     rawText.includes('"type":"tp_hit"') ||
-    rawText.includes('"event_type":"tp_hit"')
+    rawText.includes('"event_type":"tp_hit"') ||
+    rawText.includes('"hit_type":"tp"')
   ) {
     return "TP";
   }
@@ -244,7 +265,8 @@ function detectExplicitHitType(eventType, body) {
     normalized === "sl" ||
     rawText.includes('"event":"sl_hit"') ||
     rawText.includes('"type":"sl_hit"') ||
-    rawText.includes('"event_type":"sl_hit"')
+    rawText.includes('"event_type":"sl_hit"') ||
+    rawText.includes('"hit_type":"sl"')
   ) {
     return "SL";
   }
@@ -318,6 +340,72 @@ function shouldInferHit(trade, currentPrice) {
   return null;
 }
 
+// ===== PERSISTENCE =====
+async function ensureDataDir() {
+  await fs.mkdir(DATA_DIR, { recursive: true });
+}
+
+async function persistActiveTrades() {
+  savePromise = savePromise.then(async () => {
+    await ensureDataDir();
+
+    const payload = {
+      updatedAt: new Date().toISOString(),
+      trades: Array.from(activeTrades.entries()).map(([key, trade]) => [key, trade]),
+    };
+
+    await fs.writeFile(TRADES_FILE, JSON.stringify(payload, null, 2), "utf8");
+  }).catch((err) => {
+    console.error("PERSIST SAVE ERROR:", err);
+  });
+
+  return savePromise;
+}
+
+async function loadActiveTrades() {
+  try {
+    await ensureDataDir();
+    const raw = await fs.readFile(TRADES_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+
+    const items = Array.isArray(parsed?.trades) ? parsed.trades : [];
+    const now = Date.now();
+
+    for (const item of items) {
+      if (!Array.isArray(item) || item.length !== 2) continue;
+
+      const [key, trade] = item;
+      if (!trade || typeof trade !== "object") continue;
+      if (!trade.createdAtMs) continue;
+      if (now - trade.createdAtMs > MAX_TRADE_AGE_MS) continue;
+      if (trade.hit) continue;
+
+      activeTrades.set(key, trade);
+    }
+
+    console.log(`Loaded ${activeTrades.size} active trades from disk`);
+  } catch (err) {
+    if (err.code === "ENOENT") {
+      console.log("No active-trades.json found yet, starting clean");
+      return;
+    }
+
+    console.error("PERSIST LOAD ERROR:", err);
+  }
+}
+
+async function removeTrade(tradeKey) {
+  if (activeTrades.delete(tradeKey)) {
+    await persistActiveTrades();
+  }
+}
+
+async function upsertTrade(tradeKey, trade) {
+  activeTrades.set(tradeKey, trade);
+  await persistActiveTrades();
+}
+
+// ===== TELEGRAM =====
 async function sendTelegramAlert({ symbol, text }) {
   const imageUrl = CHART_IMAGES[symbol] || null;
 
@@ -373,6 +461,7 @@ TIMEFRAME: 60M
 TIME (UTC): ${formatUtc(hitTime)}
 
 REF: #${trade.refId}
+ALERT ID: ${trade.sourceAlertId || trade.signalAlertId || trade.parentAlertId || "N/A"}
 RESULT: ${hitType}
 NFA (Not Financial Advice)`;
 
@@ -523,6 +612,7 @@ app.post("/webhook/tradingview", async (req, res) => {
           matchedSourceAlertId: exact.trade.sourceAlertId,
         });
 
+        await removeTrade(exact.key);
         return;
       }
 
@@ -550,6 +640,7 @@ app.post("/webhook/tradingview", async (req, res) => {
           matchedSourceAlertId: fallback.trade.sourceAlertId,
         });
 
+        await removeTrade(fallback.key);
         return;
       }
 
@@ -567,6 +658,8 @@ app.post("/webhook/tradingview", async (req, res) => {
 
     // ===== INFER HITS FROM PRICE ON NEW WEBHOOKS =====
     if (symbol && Number.isFinite(currentPrice)) {
+      const hitKeys = [];
+
       for (const [key, trade] of activeTrades.entries()) {
         if (trade.symbol !== symbol) continue;
         if (trade.hit) continue;
@@ -585,6 +678,11 @@ app.post("/webhook/tradingview", async (req, res) => {
         });
 
         console.log(`INFERRED HIT SENT: ${symbol} ${inferredHit} REF ${trade.refId}`);
+        hitKeys.push(key);
+      }
+
+      for (const key of hitKeys) {
+        await removeTrade(key);
       }
     }
 
@@ -605,7 +703,7 @@ app.post("/webhook/tradingview", async (req, res) => {
     if (validLevels) {
       const tradeKey = buildTradeKey(symbol, side, refId);
 
-      activeTrades.set(tradeKey, {
+      await upsertTrade(tradeKey, {
         tradeKey,
         refId,
         symbol,
@@ -675,6 +773,15 @@ app.use((req, res) => {
 });
 
 // ===== START =====
-app.listen(PORT, () => {
-  console.log(`ALRT-Render running on port ${PORT}`);
+async function startServer() {
+  await loadActiveTrades();
+
+  app.listen(PORT, () => {
+    console.log(`ALRT-Render running on port ${PORT}`);
+  });
+}
+
+startServer().catch((err) => {
+  console.error("STARTUP ERROR:", err);
+  process.exit(1);
 });
