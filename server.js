@@ -51,11 +51,10 @@ const CHARTS = {
 };
 
 // ===== OPTIONAL DIRECT IMAGE LINKS =====
-// Vul later alleen echte directe image-urls in.
-// Anders valt het systeem automatisch terug op sendMessage.
+// Alleen echte directe image urls gebruiken (png/jpg/webp).
 const CHART_IMAGES = {
   // BTCUSDT: "https://....png",
-  // ETHUSDT: "https://....png",
+  // ETHUSDT: "https://....jpg",
 };
 
 // ===== HELPERS =====
@@ -87,10 +86,11 @@ function fmtPrice(v) {
   return n.toFixed(10);
 }
 
-function fmtPct(v) {
+function fmtPct(v, { signed = false } = {}) {
   const n = Number(v);
   if (!Number.isFinite(n)) return "N/A";
-  return `${n.toFixed(2)}%`;
+  const value = signed && n > 0 ? `+${n.toFixed(2)}%` : `${n.toFixed(2)}%`;
+  return value;
 }
 
 function fmtRR(v) {
@@ -654,37 +654,117 @@ function shouldInferHit(trade, currentPrice) {
   return null;
 }
 
-function buildSyntheticTradeFromHit({
+function resolveChartLink(symbol) {
+  return CHARTS[symbol] || "N/A";
+}
+
+function resolveChartImageUrl(body, symbol) {
+  const inline = pick(
+    body.chart_image_url,
+    body.image_url,
+    body.snapshot_url,
+    body.chart_snapshot,
+    body.image,
+    body.photo
+  );
+
+  if (inline && /^https?:\/\//i.test(String(inline))) {
+    return String(inline).trim();
+  }
+
+  const mapped = CHART_IMAGES[symbol];
+  if (mapped && /^https?:\/\//i.test(String(mapped))) {
+    return String(mapped).trim();
+  }
+
+  return null;
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function buildAlertText({
+  refId,
   symbol,
   side,
   entry,
   tp,
   sl,
-  eventTime,
-  refId,
-  ids,
+  tpPct,
+  slPct,
+  rr,
   setupType,
   strength,
+  prettyTime,
+  line1,
+  line2,
+  chartLink,
 }) {
-  const rr = rrFromLevels(side, entry, tp, sl);
+  return `🚨 <b>ALERT #${escapeHtml(refId)}</b>
 
-  return {
-    tradeKey: buildTradeKey(symbol || "UNKNOWN", side || "N/A", refId || "000000"),
-    refId: refId || "000000",
-    symbol: symbol || "UNKNOWN",
-    side: side || "N/A",
-    entry: parseNum(entry),
-    tp: parseNum(tp),
-    sl: parseNum(sl),
-    createdAtMs: eventTimeToMs(eventTime),
-    hit: false,
-    hitType: null,
-    hitAtMs: null,
-    alertIds: ids || [],
-    setupType: setupType || "TREND",
-    strength: strength || "N/A",
-    rr,
-  };
+<b>PAIR:</b> ${escapeHtml(symbol)}
+<b>DIRECTION:</b> ${escapeHtml(side)}
+
+<b>ENTRY:</b> ${escapeHtml(fmtPrice(entry))}
+<b>TP:</b> ${escapeHtml(fmtPrice(tp))} (${escapeHtml(fmtPct(tpPct))})
+<b>SL:</b> ${escapeHtml(fmtPrice(sl))} (${escapeHtml(fmtPct(slPct, { signed: true }))})
+<b>RR:</b> ${escapeHtml(fmtRR(rr))}
+
+<b>SETUP:</b> ${escapeHtml(setupType)}
+<b>STRENGTH:</b> ${escapeHtml(strength)}
+
+<b>TIMEFRAME:</b> 60M
+<b>TIME (UTC):</b> ${escapeHtml(prettyTime)}
+
+${escapeHtml(line1)}
+${escapeHtml(line2)}
+
+<b>REF:</b> #${escapeHtml(refId)}
+<b>CHART:</b> ${escapeHtml(chartLink)}
+
+NFA (Not Financial Advice)`;
+}
+
+function buildHitText({
+  trade,
+  hitType,
+  hitTime,
+  exitPrice,
+  movePct,
+  rr,
+  chartLink,
+}) {
+  const icon = hitType === "TP" ? "🎯" : "🛑";
+  const status = hitType === "TP" ? "CLOSED AT TP" : "CLOSED AT SL";
+
+  return `${icon} <b>${escapeHtml(hitType)} HIT</b>
+
+<b>PAIR:</b> ${escapeHtml(trade.symbol)}
+<b>DIRECTION:</b> ${escapeHtml(trade.side)}
+
+<b>ENTRY:</b> ${escapeHtml(fmtPrice(trade.entry))}
+<b>EXIT:</b> ${escapeHtml(fmtPrice(exitPrice))}
+<b>TP:</b> ${escapeHtml(fmtPrice(trade.tp))}
+<b>SL:</b> ${escapeHtml(fmtPrice(trade.sl))}
+
+<b>MOVE:</b> ${escapeHtml(fmtPct(movePct, { signed: true }))}
+<b>RR:</b> ${escapeHtml(fmtRR(rr))}
+
+<b>SETUP:</b> ${escapeHtml(trade.setupType || "N/A")}
+<b>STRENGTH:</b> ${escapeHtml(trade.strength || "N/A")}
+
+<b>TIMEFRAME:</b> 60M
+<b>TIME (UTC):</b> ${escapeHtml(formatUtc(hitTime))}
+
+<b>REF:</b> #${escapeHtml(trade.refId)}
+<b>STATUS:</b> ${escapeHtml(status)}
+<b>CHART:</b> ${escapeHtml(chartLink)}
+
+NFA (Not Financial Advice)`;
 }
 
 // ===== PERSISTENCE =====
@@ -767,36 +847,15 @@ async function upsertTrade(tradeKey, trade) {
 }
 
 // ===== TELEGRAM =====
-async function sendTelegramAlert({ symbol, text }) {
-  const imageUrl = CHART_IMAGES[symbol] || null;
-
-  if (imageUrl) {
-    const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: CHAT_ID,
-        photo: imageUrl,
-        caption: text,
-      }),
-    });
-
-    const data = await response.json();
-    console.log("TELEGRAM PHOTO RESPONSE:", data);
-
-    if (!response.ok || !data.ok) {
-      throw new Error(`Telegram sendPhoto failed: ${JSON.stringify(data)}`);
-    }
-
-    return;
-  }
-
+async function sendTelegramMessage(text) {
   const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       chat_id: CHAT_ID,
       text,
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
     }),
   });
 
@@ -808,41 +867,66 @@ async function sendTelegramAlert({ symbol, text }) {
   }
 }
 
+async function sendTelegramPhoto(photoUrl, caption) {
+  const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: CHAT_ID,
+      photo: photoUrl,
+      caption,
+      parse_mode: "HTML",
+    }),
+  });
+
+  const data = await response.json();
+  console.log("TELEGRAM PHOTO RESPONSE:", data);
+
+  if (!response.ok || !data.ok) {
+    throw new Error(`Telegram sendPhoto failed: ${JSON.stringify(data)}`);
+  }
+}
+
+async function sendTelegramAlert({ text, imageUrl = null }) {
+  if (imageUrl) {
+    try {
+      await sendTelegramPhoto(imageUrl, text);
+      return { usedPhoto: true };
+    } catch (err) {
+      console.error("PHOTO SEND FAILED, FALLING BACK TO MESSAGE:", err.message);
+    }
+  }
+
+  await sendTelegramMessage(text);
+  return { usedPhoto: false };
+}
+
 async function sendHitAlert({ trade, hitType, hitTime, hitPrice = null }) {
-  const rr = rrFromLevels(trade.side, trade.entry, trade.tp, trade.sl);
-  const movePct =
+  const exitPrice =
     hitType === "TP"
-      ? pctMove(trade.side, trade.entry, trade.tp)
+      ? trade.tp
       : hitType === "SL"
-      ? pctMove(trade.side, trade.entry, trade.sl)
-      : pctMove(trade.side, trade.entry, hitPrice);
+      ? trade.sl
+      : hitPrice;
 
-  const hitText = `🎯 ${hitType} HIT
+  const rr = rrFromLevels(trade.side, trade.entry, trade.tp, trade.sl);
+  const movePct = pctMove(trade.side, trade.entry, exitPrice);
+  const chartLink = trade.chartLink || resolveChartLink(trade.symbol);
+  const imageUrl = trade.chartImageUrl || null;
 
-PAIR: ${trade.symbol}
-DIRECTION: ${trade.side}
-
-ENTRY: ${fmtPrice(trade.entry)}
-TP: ${fmtPrice(trade.tp)}
-SL: ${fmtPrice(trade.sl)}
-
-MOVE: ${fmtPct(movePct)}
-RR: ${fmtRR(rr)}
-
-SETUP: ${trade.setupType || "N/A"}
-STRENGTH: ${trade.strength || "N/A"}
-
-TIMEFRAME: 60M
-TIME (UTC): ${formatUtc(hitTime)}
-
-REF: #${trade.refId}
-ALERT ID: ${(trade.alertIds && trade.alertIds[0]) || "N/A"}
-RESULT: ${hitType}
-NFA (Not Financial Advice)`;
+  const hitText = buildHitText({
+    trade,
+    hitType,
+    hitTime,
+    exitPrice,
+    movePct,
+    rr,
+    chartLink,
+  });
 
   await sendTelegramAlert({
-    symbol: trade.symbol,
     text: hitText,
+    imageUrl,
   });
 }
 
@@ -972,9 +1056,11 @@ app.post("/webhook/tradingview", async (req, res) => {
       slParsed = derived.sl;
     }
 
+    const validLevels = hasValidTradeLevels(side, entryParsed, tpParsed, slParsed);
     const rr = rrFromLevels(side, entryParsed, tpParsed, slParsed);
     const tpPct = pctMove(side, entryParsed, tpParsed);
-    const slPct = pctMove(side, entryParsed, slParsed);
+    const slPctRaw = pctMove(side, entryParsed, slParsed);
+    const slPctDisplay = Number.isFinite(slPctRaw) ? -Math.abs(slPctRaw) : null;
 
     const refId = makeRef6({
       symbol,
@@ -991,6 +1077,9 @@ app.post("/webhook/tradingview", async (req, res) => {
       console.error("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID");
       return;
     }
+
+    const chartLink = resolveChartLink(symbol);
+    const chartImageUrl = resolveChartImageUrl(body, symbol);
 
     // ===== HANDLE EXPLICIT TP/SL HIT WEBHOOKS =====
     if (explicitHitType && symbol) {
@@ -1092,35 +1181,11 @@ app.post("/webhook/tradingview", async (req, res) => {
         return;
       }
 
-      // LAST RESORT: send hit anyway from current payload
-      const syntheticTrade = buildSyntheticTradeFromHit({
+      console.log("EXPLICIT HIT RECEIVED BUT NO MATCHED TRADE FOUND - NOT SENT TO TELEGRAM:", {
         symbol,
-        side,
-        entry: entryParsed,
-        tp: tpParsed,
-        sl: slParsed,
-        eventTime,
-        refId,
-        ids: candidateIds,
-        setupType,
-        strength,
-      });
-
-      await sendHitAlert({
-        trade: syntheticTrade,
-        hitType: explicitHitType,
-        hitTime: eventTimeMs,
-        hitPrice: currentPrice,
-      });
-
-      await markRecentHit(hitKey);
-
-      console.log("EXPLICIT HIT SENT (SYNTHETIC FALLBACK):", {
-        symbol,
-        side,
         explicitHitType,
         candidateIds,
-        refId,
+        eventTime,
       });
 
       return;
@@ -1174,8 +1239,6 @@ app.post("/webhook/tradingview", async (req, res) => {
       return;
     }
 
-    const validLevels = hasValidTradeLevels(side, entryParsed, tpParsed, slParsed);
-
     if (validLevels) {
       const tradeKey = buildTradeKey(symbol, side, refId);
 
@@ -1195,6 +1258,8 @@ app.post("/webhook/tradingview", async (req, res) => {
         setupType,
         strength,
         rr,
+        chartLink,
+        chartImageUrl,
       });
     }
 
@@ -1208,29 +1273,28 @@ app.post("/webhook/tradingview", async (req, res) => {
       strength,
     });
 
-    const text = `🚨 ALERT #${refId}
+    const text = buildAlertText({
+      refId,
+      symbol,
+      side,
+      entry: entryParsed,
+      tp: tpParsed,
+      sl: slParsed,
+      tpPct,
+      slPct: slPctDisplay,
+      rr,
+      setupType,
+      strength,
+      prettyTime,
+      line1,
+      line2,
+      chartLink,
+    });
 
-PAIR: ${symbol}
-DIRECTION: ${side}
-
-ENTRY: ${fmtPrice(entryParsed)}
-TP: ${fmtPrice(tpParsed)} (${fmtPct(tpPct)})
-SL: ${fmtPrice(slParsed)} (${fmtPct(slPct)})
-RR: ${fmtRR(rr)}
-
-SETUP: ${setupType}
-STRENGTH: ${strength}
-
-TIMEFRAME: 60M
-TIME (UTC): ${prettyTime}
-
-${line1}
-${line2}
-
-CHART: attached
-NFA (Not Financial Advice)`;
-
-    await sendTelegramAlert({ symbol, text });
+    const sendResult = await sendTelegramAlert({
+      text,
+      imageUrl: chartImageUrl,
+    });
 
     console.log(`ALERT SENT: ${symbol} ${side} REF ${refId}`);
     console.log("ALERT DATA:", {
@@ -1240,11 +1304,13 @@ NFA (Not Financial Advice)`;
       tp: fmtPrice(tpParsed),
       sl: fmtPrice(slParsed),
       tpPct: fmtPct(tpPct),
-      slPct: fmtPct(slPct),
+      slPct: fmtPct(slPctDisplay, { signed: true }),
       rr: fmtRR(rr),
       time: prettyTime,
       refId,
-      imageUsed: Boolean(CHART_IMAGES[symbol]),
+      imageUsed: sendResult.usedPhoto,
+      chartImageUrl,
+      chartLink,
       storedForHits: validLevels,
       activeTrades: activeTrades.size,
       eventType,
