@@ -33,7 +33,7 @@ const HIT_DEDUP_TTL_MS = 36 * 60 * 60 * 1000;
 
 let savePromise = Promise.resolve();
 
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "2mb" }));
 
 // ===== CHART PAGE LINKS =====
 const CHARTS = {
@@ -96,6 +96,7 @@ function fmtPct(v, { signed = false } = {}) {
   const n = Number(v);
   if (!Number.isFinite(n)) return "N/A";
   if (signed && n > 0) return `+${n.toFixed(2)}%`;
+  if (signed && n < 0) return `${n.toFixed(2)}%`;
   return `${n.toFixed(2)}%`;
 }
 
@@ -751,11 +752,14 @@ function detectExplicitHitType(eventType, body) {
   if (
     normalized.includes("tp_hit") ||
     normalized.includes("take_profit_hit") ||
+    normalized.includes("takeprofit_hit") ||
     normalized === "tp" ||
     rawText.includes('"event":"tp_hit"') ||
     rawText.includes('"type":"tp_hit"') ||
     rawText.includes('"event_type":"tp_hit"') ||
-    rawText.includes('"hit_type":"tp"')
+    rawText.includes('"hit_type":"tp"') ||
+    rawText.includes("take_profit_hit") ||
+    rawText.includes("tp hit")
   ) {
     return "TP";
   }
@@ -763,11 +767,14 @@ function detectExplicitHitType(eventType, body) {
   if (
     normalized.includes("sl_hit") ||
     normalized.includes("stop_loss_hit") ||
+    normalized.includes("stoploss_hit") ||
     normalized === "sl" ||
     rawText.includes('"event":"sl_hit"') ||
     rawText.includes('"type":"sl_hit"') ||
     rawText.includes('"event_type":"sl_hit"') ||
-    rawText.includes('"hit_type":"sl"')
+    rawText.includes('"hit_type":"sl"') ||
+    rawText.includes("stop_loss_hit") ||
+    rawText.includes("sl hit")
   ) {
     return "SL";
   }
@@ -845,7 +852,7 @@ function findOpenTradeByCandidateIds(ids) {
     const matched = tradeIds.some((id) => wanted.includes(id));
 
     if (matched) {
-      return { key, trade, matchType: "candidate_id" };
+      return { key, trade, matchType: "candidate_id", score: 1000 };
     }
   }
 
@@ -861,7 +868,7 @@ function findLatestOpenTradeBySymbolAndSide(symbol, side) {
     if (trade.hit) continue;
 
     if (!latest || trade.createdAtMs > latest.trade.createdAtMs) {
-      latest = { key, trade, matchType: "symbol_side_latest" };
+      latest = { key, trade, matchType: "symbol_side_latest", score: 700 };
     }
   }
 
@@ -876,7 +883,7 @@ function findLatestOpenTradeBySymbol(symbol) {
     if (trade.hit) continue;
 
     if (!latest || trade.createdAtMs > latest.trade.createdAtMs) {
-      latest = { key, trade, matchType: "symbol_latest" };
+      latest = { key, trade, matchType: "symbol_latest", score: 500 };
     }
   }
 
@@ -899,11 +906,68 @@ function findNearestOpenTradeBySymbolTime(symbol, hitTimeMs, side = "N/A") {
         trade,
         diff,
         matchType: "symbol_time_nearest",
+        score: 600 - Math.min(599, Math.floor(diff / 60000)),
       };
     }
   }
 
   return nearest;
+}
+
+function levelDistancePct(expected, actual) {
+  const e = parseNum(expected);
+  const a = parseNum(actual);
+
+  if (!Number.isFinite(e) || !Number.isFinite(a) || e <= 0) return null;
+  return Math.abs((a - e) / e) * 100;
+}
+
+function findBestOpenTradeByHitPrice(symbol, side, hitType, currentPrice, eventTimeMs) {
+  if (!Number.isFinite(currentPrice)) return null;
+
+  let best = null;
+
+  for (const [key, trade] of activeTrades.entries()) {
+    if (trade.symbol !== symbol) continue;
+    if (trade.hit) continue;
+    if (side !== "N/A" && trade.side !== side) continue;
+
+    const expected = hitType === "TP" ? trade.tp : trade.sl;
+    const distPct = levelDistancePct(expected, currentPrice);
+    if (!Number.isFinite(distPct)) continue;
+
+    const timeDiff = Math.abs((trade.createdAtMs || 0) - eventTimeMs);
+    const score = 800 - Math.min(600, Math.floor(distPct * 100)) - Math.min(180, Math.floor(timeDiff / 60000));
+
+    if (!best || score > best.score) {
+      best = {
+        key,
+        trade,
+        distPct,
+        timeDiff,
+        matchType: "price_proximity",
+        score,
+      };
+    }
+  }
+
+  return best;
+}
+
+function findBestExplicitHitMatch({ symbol, side, candidateIds, currentPrice, eventTimeMs }) {
+  const matches = [
+    findOpenTradeByCandidateIds(candidateIds),
+    findBestOpenTradeByHitPrice(symbol, side, "TP", currentPrice, eventTimeMs),
+    findBestOpenTradeByHitPrice(symbol, side, "SL", currentPrice, eventTimeMs),
+    findLatestOpenTradeBySymbolAndSide(symbol, side),
+    findNearestOpenTradeBySymbolTime(symbol, eventTimeMs, side),
+    findLatestOpenTradeBySymbol(symbol),
+  ].filter(Boolean);
+
+  if (!matches.length) return null;
+
+  matches.sort((a, b) => (b.score || 0) - (a.score || 0));
+  return matches[0];
 }
 
 function getOpenTradesForSymbol(symbol) {
@@ -917,6 +981,9 @@ function getOpenTradesForSymbol(symbol) {
       refId: trade.refId,
       symbol: trade.symbol,
       side: trade.side,
+      entry: trade.entry,
+      tp: trade.tp,
+      sl: trade.sl,
       createdAtMs: trade.createdAtMs,
       createdAtUtc: formatUtc(trade.createdAtMs),
       alertIds: uniqueStrings(trade.alertIds || []),
@@ -955,6 +1022,7 @@ function looksLikeDirectImageUrl(url) {
   if (value.includes("/image")) return true;
   if (value.includes("/images/")) return true;
   if (value.includes("chart-image")) return true;
+  if (value.includes("snapshot")) return true;
   return false;
 }
 
@@ -964,6 +1032,7 @@ function resolveChartImageUrl(body, symbol) {
     body.image_url,
     body.snapshot_url,
     body.chart_snapshot,
+    body.chart_image,
     body.image,
     body.photo
   );
@@ -992,6 +1061,18 @@ function escapeHtml(value) {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
+}
+
+function escapeAttr(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;");
+}
+
+function formatChartHtml(chartLink) {
+  if (!chartLink || chartLink === "N/A") return "N/A";
+  if (!/^https?:\/\//i.test(String(chartLink))) return escapeHtml(chartLink);
+  return `<a href="${escapeAttr(chartLink)}">Open chart</a>`;
 }
 
 function inferLeverage(symbol, strength) {
@@ -1027,6 +1108,7 @@ function buildAlertText({
   side,
   entry,
   tp,
+  sl,
   rr,
   leverage,
   prettyTime,
@@ -1034,10 +1116,11 @@ function buildAlertText({
   chartLink,
   showChartLink,
 }) {
-  return `🚨 <b>${escapeHtml(symbol)} ${escapeHtml(side)}</b>
+  return `🚨 <b>ALERT • ${escapeHtml(symbol)} ${escapeHtml(side)}</b>
 
 <b>ENTRY</b> ${escapeHtml(fmtPrice(entry))}
 <b>TP</b> ${escapeHtml(fmtPrice(tp))}
+<b>SL</b> ${escapeHtml(fmtPrice(sl))}
 <b>RR</b> ${escapeHtml(fmtRR(rr))}
 <b>LEV</b> ${escapeHtml(leverage)}
 
@@ -1046,7 +1129,7 @@ function buildAlertText({
 
 <b>WHY</b> ${escapeHtml(whyLine)}${showChartLink ? `
 
-<b>CHART</b> ${escapeHtml(chartLink)}` : ""}
+<b>CHART</b> ${formatChartHtml(chartLink)}` : ""}
 
 NFA`;
 }
@@ -1064,10 +1147,12 @@ function buildHitText({
   const icon = hitType === "TP" ? "🎯" : "🛑";
   const status = hitType === "TP" ? "TP HIT" : "SL HIT";
 
-  return `${icon} <b>${escapeHtml(trade.symbol)} ${escapeHtml(status)}</b>
+  return `${icon} <b>HIT • ${escapeHtml(trade.symbol)} ${escapeHtml(status)}</b>
 
 <b>ENTRY</b> ${escapeHtml(fmtPrice(trade.entry))}
 <b>EXIT</b> ${escapeHtml(fmtPrice(exitPrice))}
+<b>TP</b> ${escapeHtml(fmtPrice(trade.tp))}
+<b>SL</b> ${escapeHtml(fmtPrice(trade.sl))}
 <b>MOVE</b> ${escapeHtml(fmtPct(movePct, { signed: true }))}
 <b>RR</b> ${escapeHtml(fmtRR(rr))}
 <b>LEV</b> ${escapeHtml(trade.leverage || "N/A")}
@@ -1076,7 +1161,7 @@ function buildHitText({
 <b>UTC</b> ${escapeHtml(formatUtc(hitTime))}
 <b>REF</b> ${escapeHtml(trade.refId)}${showChartLink ? `
 
-<b>CHART</b> ${escapeHtml(chartLink)}` : ""}
+<b>CHART</b> ${formatChartHtml(chartLink)}` : ""}
 
 NFA`;
 }
@@ -1336,7 +1421,7 @@ app.post("/webhook/tradingview", async (req, res) => {
     );
 
     const currentPrice = parseNum(
-      pick(body.price, body.close, body.last, body.last_price, body.market_price, body.hit_price)
+      pick(body.hit_price, body.last_price, body.market_price, body.price, body.close, body.last)
     );
 
     const setupType = deriveSetupType({
@@ -1421,6 +1506,7 @@ app.post("/webhook/tradingview", async (req, res) => {
 
       let matched =
         findOpenTradeByCandidateIds(candidateIds) ||
+        findBestOpenTradeByHitPrice(symbol, side, explicitHitType, currentPrice, eventTimeMs) ||
         findLatestOpenTradeBySymbolAndSide(symbol, side) ||
         findNearestOpenTradeBySymbolTime(symbol, eventTimeMs, side) ||
         findLatestOpenTradeBySymbol(symbol);
@@ -1444,6 +1530,7 @@ app.post("/webhook/tradingview", async (req, res) => {
           tradeIds: uniqueStrings(matched.trade.alertIds || []),
           hitTimeUtc: formatUtc(eventTimeMs),
           tradeTimeUtc: formatUtc(matched.trade.createdAtMs),
+          currentPrice,
         });
 
         await removeTrade(matched.key);
@@ -1457,6 +1544,7 @@ app.post("/webhook/tradingview", async (req, res) => {
         candidateIds,
         eventTime,
         eventTimeUtc: formatUtc(eventTimeMs),
+        currentPrice,
         openTradesForSymbol: getOpenTradesForSymbol(symbol),
         totalActiveTrades: activeTrades.size,
       });
@@ -1491,7 +1579,13 @@ app.post("/webhook/tradingview", async (req, res) => {
 
         await markRecentHit(inferredHitKey);
 
-        console.log(`INFERRED HIT SENT: ${symbol} ${inferredHit} REF ${trade.refId}`);
+        console.log(`INFERRED HIT SENT: ${symbol} ${inferredHit} REF ${trade.refId}`, {
+          currentPrice,
+          tp: trade.tp,
+          sl: trade.sl,
+          side: trade.side,
+        });
+
         hitKeysToRemove.push(key);
       }
 
@@ -1510,6 +1604,18 @@ app.post("/webhook/tradingview", async (req, res) => {
         eventType,
       });
       return;
+    }
+
+    if (!validLevels) {
+      console.log("SIGNAL RECEIVED BUT LEVELS INVALID - ALERT STILL SENT, TRADE NOT STORED:", {
+        symbol,
+        side,
+        entry: entryParsed,
+        tp: tpParsed,
+        sl: slParsed,
+        eventType,
+        eventTime: prettyTime,
+      });
     }
 
     if (validLevels) {
@@ -1555,6 +1661,7 @@ app.post("/webhook/tradingview", async (req, res) => {
       side,
       entry: entryParsed,
       tp: tpParsed,
+      sl: slParsed,
       rr,
       leverage,
       prettyTime,
@@ -1597,7 +1704,7 @@ app.post("/webhook/tradingview", async (req, res) => {
         symbol,
         refId,
         chartLink,
-        note: "TradingView chart page links are not image URLs, so Telegram cannot show them as photos.",
+        note: "A TradingView chart page link is not an image. Telegram only shows a photo when it receives a real direct image URL.",
       });
     }
   } catch (err) {
