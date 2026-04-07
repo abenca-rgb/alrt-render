@@ -31,6 +31,7 @@ const recentHitKeys = new Map();
 const MAX_TRADE_AGE_MS = 24 * 60 * 60 * 1000;
 const HIT_DEDUP_TTL_MS = 36 * 60 * 60 * 1000;
 
+let nextRef = 100000;
 let savePromise = Promise.resolve();
 
 app.use(express.json({ limit: "2mb" }));
@@ -194,17 +195,19 @@ function stableHash(str) {
   return hash;
 }
 
-function makeRef6({ symbol, side, eventTime, entry, tp, sl }) {
-  const base = [
-    symbol || "",
-    side || "",
-    String(eventTime || ""),
-    String(entry || ""),
-    String(tp || ""),
-    String(sl || ""),
-  ].join("|");
+function allocNextRef() {
+  nextRef += 1;
+  if (nextRef > 999999) nextRef = 100000;
+  return String(nextRef).padStart(6, "0");
+}
 
-  return String(100000 + (stableHash(base) % 900000));
+function parseIncomingRef(body) {
+  const raw = pick(body.ref_id, body.ref, body.reference, body.alert_ref);
+  if (!raw) return null;
+
+  const digits = String(raw).replace(/\D/g, "");
+  if (digits.length === 6) return digits;
+  return null;
 }
 
 function isMajorSymbol(symbol) {
@@ -233,6 +236,18 @@ function pctMove(side, entry, price) {
 
   if (side === "LONG") return ((p - e) / e) * 100;
   if (side === "SHORT") return ((e - p) / e) * 100;
+
+  return null;
+}
+
+function tpPctFromLevels(side, entry, tp) {
+  const e = parseNum(entry);
+  const t = parseNum(tp);
+
+  if (!Number.isFinite(e) || !Number.isFinite(t) || e <= 0) return null;
+
+  if (side === "LONG") return ((t - e) / e) * 100;
+  if (side === "SHORT") return ((e - t) / e) * 100;
 
   return null;
 }
@@ -827,9 +842,8 @@ function collectAllCandidateIds({ body, symbol, side, eventTimeMs, refId }) {
   ]);
 }
 
-function buildRecentHitKey({ symbol, hitType, ids, eventTime }) {
-  const idPart = ids && ids.length ? ids.join("|") : "no-id";
-  return `${symbol}|${hitType}|${idPart}|${String(eventTime || "")}`;
+function buildRecentHitKey({ symbol, hitType, refId, eventTime }) {
+  return `${symbol}|${hitType}|${refId}|${String(eventTime || "")}`;
 }
 
 function wasRecentHitSent(hitKey) {
@@ -839,6 +853,19 @@ function wasRecentHitSent(hitKey) {
 async function markRecentHit(hitKey) {
   recentHitKeys.set(hitKey, Date.now());
   await persistState();
+}
+
+function findTradeByRefId(refId) {
+  if (!refId) return null;
+
+  for (const [key, trade] of activeTrades.entries()) {
+    if (trade.hit) continue;
+    if (String(trade.refId) === String(refId)) {
+      return { key, trade, matchType: "ref_id", score: 2000 };
+    }
+  }
+
+  return null;
 }
 
 function findOpenTradeByCandidateIds(ids) {
@@ -952,22 +979,6 @@ function findBestOpenTradeByHitPrice(symbol, side, hitType, currentPrice, eventT
   }
 
   return best;
-}
-
-function findBestExplicitHitMatch({ symbol, side, candidateIds, currentPrice, eventTimeMs }) {
-  const matches = [
-    findOpenTradeByCandidateIds(candidateIds),
-    findBestOpenTradeByHitPrice(symbol, side, "TP", currentPrice, eventTimeMs),
-    findBestOpenTradeByHitPrice(symbol, side, "SL", currentPrice, eventTimeMs),
-    findLatestOpenTradeBySymbolAndSide(symbol, side),
-    findNearestOpenTradeBySymbolTime(symbol, eventTimeMs, side),
-    findLatestOpenTradeBySymbol(symbol),
-  ].filter(Boolean);
-
-  if (!matches.length) return null;
-
-  matches.sort((a, b) => (b.score || 0) - (a.score || 0));
-  return matches[0];
 }
 
 function getOpenTradesForSymbol(symbol) {
@@ -1115,14 +1126,18 @@ function buildAlertText({
   whyLine,
   chartLink,
   showChartLink,
+  refId,
+  tpPct,
 }) {
-  return `🚨 <b>ALERT • ${escapeHtml(symbol)} ${escapeHtml(side)}</b>
+  return `🚨 <b>ALERT • ${escapeHtml(symbol)}</b>
 
+<b>DIRECTION</b> ${escapeHtml(side)}
 <b>ENTRY</b> ${escapeHtml(fmtPrice(entry))}
-<b>TP</b> ${escapeHtml(fmtPrice(tp))}
+<b>TP</b> ${escapeHtml(fmtPrice(tp))} (${escapeHtml(fmtPct(tpPct))})
 <b>SL</b> ${escapeHtml(fmtPrice(sl))}
 <b>RR</b> ${escapeHtml(fmtRR(rr))}
-<b>LEV</b> ${escapeHtml(leverage)}
+<b>LEVERAGE</b> ${escapeHtml(leverage)}
+<b>REF</b> ${escapeHtml(refId)}
 
 <b>TIMEFRAME</b> 60M
 <b>UTC</b> ${escapeHtml(prettyTime)}
@@ -1147,19 +1162,21 @@ function buildHitText({
   const icon = hitType === "TP" ? "🎯" : "🛑";
   const status = hitType === "TP" ? "TP HIT" : "SL HIT";
 
-  return `${icon} <b>HIT • ${escapeHtml(trade.symbol)} ${escapeHtml(status)}</b>
+  return `${icon} <b>HIT • ${escapeHtml(trade.symbol)}</b>
 
+<b>STATUS</b> ${escapeHtml(status)}
+<b>DIRECTION</b> ${escapeHtml(trade.side)}
 <b>ENTRY</b> ${escapeHtml(fmtPrice(trade.entry))}
 <b>EXIT</b> ${escapeHtml(fmtPrice(exitPrice))}
 <b>TP</b> ${escapeHtml(fmtPrice(trade.tp))}
 <b>SL</b> ${escapeHtml(fmtPrice(trade.sl))}
 <b>MOVE</b> ${escapeHtml(fmtPct(movePct, { signed: true }))}
 <b>RR</b> ${escapeHtml(fmtRR(rr))}
-<b>LEV</b> ${escapeHtml(trade.leverage || "N/A")}
+<b>LEVERAGE</b> ${escapeHtml(trade.leverage || "N/A")}
+<b>REF</b> ${escapeHtml(trade.refId)}
 
 <b>TIMEFRAME</b> 60M
-<b>UTC</b> ${escapeHtml(formatUtc(hitTime))}
-<b>REF</b> ${escapeHtml(trade.refId)}${showChartLink ? `
+<b>UTC</b> ${escapeHtml(formatUtc(hitTime))}${showChartLink ? `
 
 <b>CHART</b> ${formatChartHtml(chartLink)}` : ""}
 
@@ -1177,6 +1194,7 @@ async function persistState() {
 
       const payload = {
         updatedAt: new Date().toISOString(),
+        nextRef,
         activeTrades: Array.from(activeTrades.entries()).map(([key, trade]) => [key, trade]),
         recentHitKeys: Array.from(recentHitKeys.entries()).map(([key, ts]) => [key, ts]),
       };
@@ -1199,6 +1217,10 @@ async function loadState() {
     const active = Array.isArray(parsed?.activeTrades) ? parsed.activeTrades : [];
     const hits = Array.isArray(parsed?.recentHitKeys) ? parsed.recentHitKeys : [];
     const now = Date.now();
+
+    if (Number.isFinite(Number(parsed?.nextRef))) {
+      nextRef = Math.max(100000, Math.min(999999, Number(parsed.nextRef)));
+    }
 
     for (const item of active) {
       if (!Array.isArray(item) || item.length !== 2) continue;
@@ -1223,6 +1245,7 @@ async function loadState() {
 
     console.log(`Loaded ${activeTrades.size} active trades from disk`);
     console.log(`Loaded ${recentHitKeys.size} recent hit keys from disk`);
+    console.log(`Loaded nextRef ${nextRef}`);
   } catch (err) {
     if (err.code === "ENOENT") {
       console.log("No state.json found yet, starting clean");
@@ -1344,6 +1367,7 @@ app.get("/health", (req, res) => {
     timestamp: new Date().toISOString(),
     activeTrades: activeTrades.size,
     recentHitKeys: recentHitKeys.size,
+    nextRef,
   });
 });
 
@@ -1457,25 +1481,18 @@ app.post("/webhook/tradingview", async (req, res) => {
 
     const validLevels = hasValidTradeLevels(side, entryParsed, tpParsed, slParsed);
     const rr = rrFromLevels(side, entryParsed, tpParsed, slParsed);
+    const tpPct = tpPctFromLevels(side, entryParsed, tpParsed);
 
-    const refId = makeRef6({
-      symbol,
-      side,
-      eventTime,
-      entry: entryParsed,
-      tp: tpParsed,
-      sl: slParsed,
-    });
+    const incomingRef = parseIncomingRef(body);
+    const explicitHitType = detectExplicitHitType(eventType, body);
 
-    const candidateIds = collectAllCandidateIds({
+    const candidateIdsBase = collectAllCandidateIds({
       body,
       symbol,
       side,
       eventTimeMs,
-      refId,
+      refId: incomingRef || "",
     });
-
-    const explicitHitType = detectExplicitHitType(eventType, body);
 
     if (!BOT_TOKEN || !CHAT_ID) {
       console.error("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID");
@@ -1487,31 +1504,32 @@ app.post("/webhook/tradingview", async (req, res) => {
 
     // ===== HANDLE EXPLICIT TP/SL HIT WEBHOOKS =====
     if (explicitHitType && symbol) {
-      const hitKey = buildRecentHitKey({
-        symbol,
-        hitType: explicitHitType,
-        ids: candidateIds,
-        eventTime,
-      });
-
-      if (wasRecentHitSent(hitKey)) {
-        console.log("DUPLICATE HIT IGNORED:", {
-          symbol,
-          explicitHitType,
-          candidateIds,
-          eventTime,
-        });
-        return;
-      }
-
       let matched =
-        findOpenTradeByCandidateIds(candidateIds) ||
+        findTradeByRefId(incomingRef) ||
+        findOpenTradeByCandidateIds(candidateIdsBase) ||
         findBestOpenTradeByHitPrice(symbol, side, explicitHitType, currentPrice, eventTimeMs) ||
         findLatestOpenTradeBySymbolAndSide(symbol, side) ||
         findNearestOpenTradeBySymbolTime(symbol, eventTimeMs, side) ||
         findLatestOpenTradeBySymbol(symbol);
 
       if (matched) {
+        const hitKey = buildRecentHitKey({
+          symbol,
+          hitType: explicitHitType,
+          refId: matched.trade.refId,
+          eventTime,
+        });
+
+        if (wasRecentHitSent(hitKey)) {
+          console.log("DUPLICATE HIT IGNORED:", {
+            symbol,
+            explicitHitType,
+            refId: matched.trade.refId,
+            eventTime,
+          });
+          return;
+        }
+
         matched.trade.hit = true;
         matched.trade.hitType = explicitHitType;
         matched.trade.hitAtMs = Date.now();
@@ -1526,7 +1544,9 @@ app.post("/webhook/tradingview", async (req, res) => {
         await markRecentHit(hitKey);
 
         console.log(`EXPLICIT HIT SENT (${matched.matchType}): ${symbol} ${explicitHitType} REF ${matched.trade.refId}`, {
-          incomingIds: candidateIds,
+          incomingRef,
+          tradeRef: matched.trade.refId,
+          incomingIds: candidateIdsBase,
           tradeIds: uniqueStrings(matched.trade.alertIds || []),
           hitTimeUtc: formatUtc(eventTimeMs),
           tradeTimeUtc: formatUtc(matched.trade.createdAtMs),
@@ -1541,7 +1561,8 @@ app.post("/webhook/tradingview", async (req, res) => {
         symbol,
         explicitHitType,
         incomingSide: side,
-        candidateIds,
+        incomingRef,
+        candidateIds: candidateIdsBase,
         eventTime,
         eventTimeUtc: formatUtc(eventTimeMs),
         currentPrice,
@@ -1618,6 +1639,13 @@ app.post("/webhook/tradingview", async (req, res) => {
       });
     }
 
+    const refId = incomingRef || allocNextRef();
+
+    const candidateIds = uniqueStrings([
+      ...candidateIdsBase,
+      refId,
+    ]);
+
     if (validLevels) {
       const tradeKey = buildTradeKey(symbol, side, refId);
 
@@ -1641,6 +1669,8 @@ app.post("/webhook/tradingview", async (req, res) => {
         chartLink,
         chartImageUrl,
       });
+    } else {
+      await persistState();
     }
 
     const whyLine = buildWhyLine({
@@ -1668,6 +1698,8 @@ app.post("/webhook/tradingview", async (req, res) => {
       whyLine,
       chartLink,
       showChartLink,
+      refId,
+      tpPct,
     });
 
     const sendResult = await sendTelegramAlert({
@@ -1682,6 +1714,7 @@ app.post("/webhook/tradingview", async (req, res) => {
       entry: fmtPrice(entryParsed),
       tp: fmtPrice(tpParsed),
       sl: fmtPrice(slParsed),
+      tpPct: fmtPct(tpPct),
       rr: fmtRR(rr),
       leverage,
       time: prettyTime,
@@ -1697,6 +1730,7 @@ app.post("/webhook/tradingview", async (req, res) => {
       strength,
       usedDynamicLevels: !validIncomingLevels && validLevels,
       whyLine,
+      nextRef,
     });
 
     if (!chartImageUrl) {
@@ -1704,7 +1738,7 @@ app.post("/webhook/tradingview", async (req, res) => {
         symbol,
         refId,
         chartLink,
-        note: "A TradingView chart page link is not an image. Telegram only shows a photo when it receives a real direct image URL.",
+        note: "Telegram can only show a chart image if it receives a real direct image URL like snapshot_url/chart_image_url or a mapped CHART_IMAGE_TEMPLATE/CHART_IMAGES URL.",
       });
     }
   } catch (err) {
