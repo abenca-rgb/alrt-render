@@ -69,6 +69,10 @@ function pick(...values) {
   return null;
 }
 
+function uniqueStrings(values) {
+  return [...new Set(values.filter(Boolean).map((v) => String(v).trim()).filter(Boolean))];
+}
+
 function parseNum(v) {
   if (v === null || v === undefined || v === "") return null;
   const n = Number(v);
@@ -106,7 +110,8 @@ function normalizeSymbol(v) {
     .toUpperCase()
     .replace(/\s+/g, "")
     .replace(".P", "")
-    .replace("BINANCE:", "");
+    .replace("BINANCE:", "")
+    .replace("/", "");
 }
 
 function normalizeSide(v) {
@@ -303,18 +308,18 @@ function getTargetProfile({ symbol, strength }) {
 
   if (strength === "A") {
     return major
-      ? { tpPct: 2.8, slPct: 1.20 }
-      : { tpPct: 3.0, slPct: 1.50 };
+      ? { tpPct: 2.8, slPct: 1.2 }
+      : { tpPct: 3.0, slPct: 1.5 };
   }
 
   if (strength === "B") {
     return major
-      ? { tpPct: 2.2, slPct: 1.10 }
+      ? { tpPct: 2.2, slPct: 1.1 }
       : { tpPct: 2.4, slPct: 1.35 };
   }
 
   return major
-    ? { tpPct: 1.6, slPct: 1.00 }
+    ? { tpPct: 1.6, slPct: 1.0 }
     : { tpPct: 1.8, slPct: 1.25 };
 }
 
@@ -713,8 +718,8 @@ function buildTradeKey(symbol, side, refId) {
   return `${symbol}|${side}|${refId}`;
 }
 
-function collectCandidateIds(body) {
-  return [
+function collectRawCandidateIds(body) {
+  return uniqueStrings([
     pick(body.alert_id),
     pick(body.source_alert_id),
     pick(body.signal_alert_id),
@@ -723,9 +728,27 @@ function collectCandidateIds(body) {
     pick(body.order_id),
     pick(body.id),
     pick(body.ref_id),
-  ]
-    .filter(Boolean)
-    .map((x) => String(x));
+  ]);
+}
+
+function buildSyntheticIds({ symbol, side, eventTimeMs, refId }) {
+  const ms = Number.isFinite(eventTimeMs) ? String(eventTimeMs) : "";
+  const sec = Number.isFinite(eventTimeMs) ? String(Math.floor(eventTimeMs / 1000)) : "";
+
+  const ids = [
+    refId ? String(refId) : null,
+    symbol && side && ms ? `${symbol}-${side}-${ms}` : null,
+    symbol && side && sec ? `${symbol}-${side}-${sec}` : null,
+  ];
+
+  return uniqueStrings(ids);
+}
+
+function collectAllCandidateIds({ body, symbol, side, eventTimeMs, refId }) {
+  return uniqueStrings([
+    ...collectRawCandidateIds(body),
+    ...buildSyntheticIds({ symbol, side, eventTimeMs, refId }),
+  ]);
 }
 
 function buildRecentHitKey({ symbol, hitType, ids, eventTime }) {
@@ -743,17 +766,17 @@ async function markRecentHit(hitKey) {
 }
 
 function findOpenTradeByCandidateIds(ids) {
-  const wanted = ids.filter(Boolean).map(String);
+  const wanted = uniqueStrings(ids);
   if (wanted.length === 0) return null;
 
   for (const [key, trade] of activeTrades.entries()) {
     if (trade.hit) continue;
 
-    const tradeIds = Array.isArray(trade.alertIds) ? trade.alertIds.map(String) : [];
+    const tradeIds = uniqueStrings(Array.isArray(trade.alertIds) ? trade.alertIds : []);
     const matched = tradeIds.some((id) => wanted.includes(id));
 
     if (matched) {
-      return { key, trade };
+      return { key, trade, matchType: "candidate_id" };
     }
   }
 
@@ -769,7 +792,7 @@ function findLatestOpenTradeBySymbolAndSide(symbol, side) {
     if (trade.hit) continue;
 
     if (!latest || trade.createdAtMs > latest.trade.createdAtMs) {
-      latest = { key, trade };
+      latest = { key, trade, matchType: "symbol_side_latest" };
     }
   }
 
@@ -784,11 +807,55 @@ function findLatestOpenTradeBySymbol(symbol) {
     if (trade.hit) continue;
 
     if (!latest || trade.createdAtMs > latest.trade.createdAtMs) {
-      latest = { key, trade };
+      latest = { key, trade, matchType: "symbol_latest" };
     }
   }
 
   return latest;
+}
+
+function findNearestOpenTradeBySymbolTime(symbol, hitTimeMs, side = "N/A") {
+  let nearest = null;
+
+  for (const [key, trade] of activeTrades.entries()) {
+    if (trade.symbol !== symbol) continue;
+    if (trade.hit) continue;
+    if (side !== "N/A" && trade.side !== side) continue;
+
+    const diff = Math.abs((trade.createdAtMs || 0) - hitTimeMs);
+
+    if (!nearest || diff < nearest.diff) {
+      nearest = {
+        key,
+        trade,
+        diff,
+        matchType: "symbol_time_nearest",
+      };
+    }
+  }
+
+  return nearest;
+}
+
+function getOpenTradesForSymbol(symbol) {
+  const items = [];
+
+  for (const [, trade] of activeTrades.entries()) {
+    if (trade.symbol !== symbol) continue;
+    if (trade.hit) continue;
+
+    items.push({
+      refId: trade.refId,
+      symbol: trade.symbol,
+      side: trade.side,
+      createdAtMs: trade.createdAtMs,
+      createdAtUtc: formatUtc(trade.createdAtMs),
+      alertIds: uniqueStrings(trade.alertIds || []),
+    });
+  }
+
+  items.sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0));
+  return items;
 }
 
 function shouldInferHit(trade, currentPrice) {
@@ -1163,8 +1230,6 @@ app.post("/webhook/tradingview", async (req, res) => {
       pick(body.price, body.close, body.last, body.last_price, body.market_price, body.hit_price)
     );
 
-    const candidateIds = collectCandidateIds(body);
-
     const setupType = deriveSetupType({
       body,
       side,
@@ -1207,6 +1272,14 @@ app.post("/webhook/tradingview", async (req, res) => {
       sl: slParsed,
     });
 
+    const candidateIds = collectAllCandidateIds({
+      body,
+      symbol,
+      side,
+      eventTimeMs,
+      refId,
+    });
+
     const explicitHitType = detectExplicitHitType(eventType, body);
 
     if (!BOT_TOKEN || !CHAT_ID) {
@@ -1227,19 +1300,28 @@ app.post("/webhook/tradingview", async (req, res) => {
       });
 
       if (wasRecentHitSent(hitKey)) {
-        console.log("DUPLICATE HIT IGNORED:", { symbol, explicitHitType, candidateIds, eventTime });
+        console.log("DUPLICATE HIT IGNORED:", {
+          symbol,
+          explicitHitType,
+          candidateIds,
+          eventTime,
+        });
         return;
       }
 
-      const exact = findOpenTradeByCandidateIds(candidateIds);
+      let matched =
+        findOpenTradeByCandidateIds(candidateIds) ||
+        findLatestOpenTradeBySymbolAndSide(symbol, side) ||
+        findNearestOpenTradeBySymbolTime(symbol, eventTimeMs, side) ||
+        findLatestOpenTradeBySymbol(symbol);
 
-      if (exact) {
-        exact.trade.hit = true;
-        exact.trade.hitType = explicitHitType;
-        exact.trade.hitAtMs = Date.now();
+      if (matched) {
+        matched.trade.hit = true;
+        matched.trade.hitType = explicitHitType;
+        matched.trade.hitAtMs = Date.now();
 
         await sendHitAlert({
-          trade: exact.trade,
+          trade: matched.trade,
           hitType: explicitHitType,
           hitTime: eventTimeMs,
           hitPrice: currentPrice,
@@ -1247,56 +1329,26 @@ app.post("/webhook/tradingview", async (req, res) => {
 
         await markRecentHit(hitKey);
 
-        console.log(`EXPLICIT HIT SENT (ID MATCH): ${symbol} ${explicitHitType} REF ${exact.trade.refId}`);
-        await removeTrade(exact.key);
-        return;
-      }
-
-      const sideFallback = findLatestOpenTradeBySymbolAndSide(symbol, side);
-      if (sideFallback) {
-        sideFallback.trade.hit = true;
-        sideFallback.trade.hitType = explicitHitType;
-        sideFallback.trade.hitAtMs = Date.now();
-
-        await sendHitAlert({
-          trade: sideFallback.trade,
-          hitType: explicitHitType,
-          hitTime: eventTimeMs,
-          hitPrice: currentPrice,
+        console.log(`EXPLICIT HIT SENT (${matched.matchType}): ${symbol} ${explicitHitType} REF ${matched.trade.refId}`, {
+          incomingIds: candidateIds,
+          tradeIds: uniqueStrings(matched.trade.alertIds || []),
+          hitTimeUtc: formatUtc(eventTimeMs),
+          tradeTimeUtc: formatUtc(matched.trade.createdAtMs),
         });
 
-        await markRecentHit(hitKey);
-
-        console.log(`EXPLICIT HIT SENT (SYMBOL+SIDE FALLBACK): ${symbol} ${explicitHitType} REF ${sideFallback.trade.refId}`);
-        await removeTrade(sideFallback.key);
-        return;
-      }
-
-      const symbolFallback = findLatestOpenTradeBySymbol(symbol);
-      if (symbolFallback) {
-        symbolFallback.trade.hit = true;
-        symbolFallback.trade.hitType = explicitHitType;
-        symbolFallback.trade.hitAtMs = Date.now();
-
-        await sendHitAlert({
-          trade: symbolFallback.trade,
-          hitType: explicitHitType,
-          hitTime: eventTimeMs,
-          hitPrice: currentPrice,
-        });
-
-        await markRecentHit(hitKey);
-
-        console.log(`EXPLICIT HIT SENT (SYMBOL FALLBACK): ${symbol} ${explicitHitType} REF ${symbolFallback.trade.refId}`);
-        await removeTrade(symbolFallback.key);
+        await removeTrade(matched.key);
         return;
       }
 
       console.log("EXPLICIT HIT RECEIVED BUT NO MATCHED TRADE FOUND - NOT SENT TO TELEGRAM:", {
         symbol,
         explicitHitType,
+        incomingSide: side,
         candidateIds,
         eventTime,
+        eventTimeUtc: formatUtc(eventTimeMs),
+        openTradesForSymbol: getOpenTradesForSymbol(symbol),
+        totalActiveTrades: activeTrades.size,
       });
 
       return;
@@ -1423,6 +1475,15 @@ app.post("/webhook/tradingview", async (req, res) => {
       usedDynamicLevels: !validIncomingLevels && validLevels,
       whyLine,
     });
+
+    if (!chartImageUrl) {
+      console.log("NO DIRECT CHART IMAGE URL AVAILABLE FOR THIS ALERT:", {
+        symbol,
+        refId,
+        chartLink,
+        note: "TradingView chart page links are not image URLs, so Telegram cannot show them as photos.",
+      });
+    }
   } catch (err) {
     console.error("ERROR:", err);
   }
