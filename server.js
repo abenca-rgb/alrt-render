@@ -1074,7 +1074,7 @@ function looksLikeDirectImageUrl(url) {
   return false;
 }
 
-function resolveChartImageUrl(body, symbol) {
+function resolveChartImageUrl(body, symbol, side = "LONG", refId = "", req = null) {
   const inline = pick(
     body.chart_image_url,
     body.image_url,
@@ -1101,7 +1101,12 @@ function resolveChartImageUrl(body, symbol) {
     }
   }
 
-  return null;
+  return buildLocalChartImageUrl({
+    req,
+    symbol,
+    side,
+    refId,
+  });
 }
 
 function escapeHtml(value) {
@@ -1410,13 +1415,6 @@ app.get("/chart-image", async (req, res) => {
     const ref = String(req.query.ref || "");
     const interval = String(req.query.interval || "60");
 
-    const baseUrl = getBaseUrl(req);
-    if (!baseUrl) {
-      return res.status(500).send("APP_BASE_URL missing");
-    }
-
-    const templateUrl = `${baseUrl}/chart-template?symbol=${encodeURIComponent(symbol)}&side=${encodeURIComponent(side)}&ref=${encodeURIComponent(ref)}&interval=${encodeURIComponent(interval)}`;
-
     browser = await chromium.launch({
       headless: true,
       args: ["--no-sandbox", "--disable-setuid-sandbox"],
@@ -1427,12 +1425,95 @@ app.get("/chart-image", async (req, res) => {
       deviceScaleFactor: 1,
     });
 
-    await page.goto(templateUrl, {
-      waitUntil: "networkidle",
+    const html = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>ALRT Chart</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: #0b1220;
+      width: 1280px;
+      height: 720px;
+      overflow: hidden;
+      font-family: Arial, sans-serif;
+    }
+    #wrap {
+      width: 1280px;
+      height: 720px;
+      position: relative;
+      background: #0b1220;
+    }
+    #tv_chart_container {
+      width: 1280px;
+      height: 720px;
+    }
+    .badge {
+      position: absolute;
+      top: 14px;
+      left: 14px;
+      z-index: 20;
+      background: rgba(10, 14, 25, 0.88);
+      color: white;
+      padding: 10px 14px;
+      border-radius: 12px;
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: 0.3px;
+      border: 1px solid rgba(255,255,255,0.08);
+      box-shadow: 0 8px 24px rgba(0,0,0,0.25);
+    }
+  </style>
+</head>
+<body>
+  <div id="wrap">
+    <div class="badge">${symbol} • ${side}${ref ? ` • REF ${ref}` : ""}</div>
+    <div id="tv_chart_container"></div>
+  </div>
+
+  <script src="https://s3.tradingview.com/tv.js"></script>
+  <script>
+    function startWidget() {
+      if (!window.TradingView) {
+        setTimeout(startWidget, 300);
+        return;
+      }
+
+      new TradingView.widget({
+        autosize: false,
+        width: 1280,
+        height: 720,
+        symbol: ${JSON.stringify(symbol)},
+        interval: ${JSON.stringify(interval)},
+        timezone: "Etc/UTC",
+        theme: "dark",
+        style: "1",
+        locale: "en",
+        hide_top_toolbar: false,
+        hide_legend: false,
+        allow_symbol_change: false,
+        save_image: false,
+        studies: [],
+        container_id: "tv_chart_container"
+      });
+    }
+
+    startWidget();
+  </script>
+</body>
+</html>
+    `;
+
+    await page.setContent(html, {
+      waitUntil: "load",
       timeout: 60000,
     });
 
-    await sleep(3500);
+    await sleep(6000);
 
     const png = await page.screenshot({
       type: "png",
@@ -1441,11 +1522,9 @@ app.get("/chart-image", async (req, res) => {
     res.setHeader("Content-Type", "image/png");
     res.setHeader("Cache-Control", "public, max-age=120");
     res.status(200).send(png);
-    } catch (err) {
+  } catch (err) {
     console.error("CHART IMAGE ERROR FULL:", err);
-    res
-      .status(500)
-      .send(`chart image error: ${err?.message || String(err)}`);
+    res.status(500).send(`chart image error: ${err?.message || String(err)}`);
   } finally {
     if (browser) {
       try {
@@ -1601,7 +1680,7 @@ app.post("/webhook/tradingview", async (req, res) => {
     }
 
     const chartLink = resolveChartLink(symbol);
-    const chartImageUrl = resolveChartImageUrl(body, symbol);
+    const chartImageUrl = resolveChartImageUrl(body, symbol, side, incomingRef || "", req);
 
     // ===== HANDLE EXPLICIT TP/SL HIT WEBHOOKS =====
     if (explicitHitType && symbol) {
@@ -1742,10 +1821,12 @@ app.post("/webhook/tradingview", async (req, res) => {
 
     const refId = incomingRef || allocNextRef();
 
-    const candidateIds = uniqueStrings([
-      ...candidateIdsBase,
-      refId,
-    ]);
+const candidateIds = uniqueStrings([
+  ...candidateIdsBase,
+  refId,
+]);
+
+const finalChartImageUrl = resolveChartImageUrl(body, symbol, side, refId, req);
 
     if (validLevels) {
       const tradeKey = buildTradeKey(symbol, side, refId);
@@ -1768,7 +1849,7 @@ app.post("/webhook/tradingview", async (req, res) => {
         strength,
         rr,
         chartLink,
-        chartImageUrl,
+chartImageUrl: finalChartImageUrl,
       });
     } else {
       await persistState();
@@ -1785,7 +1866,7 @@ app.post("/webhook/tradingview", async (req, res) => {
       refId,
     });
 
-    const showChartLink = !chartImageUrl;
+    const showChartLink = !finalChartImageUrl;
 
     const text = buildAlertText({
       symbol,
@@ -1804,9 +1885,9 @@ app.post("/webhook/tradingview", async (req, res) => {
     });
 
     const sendResult = await sendTelegramAlert({
-      text,
-      imageUrl: chartImageUrl,
-    });
+  text,
+  imageUrl: finalChartImageUrl,
+});
 
     console.log(`ALERT SENT: ${symbol} ${side} REF ${refId}`);
     console.log("ALERT DATA:", {
