@@ -4,6 +4,7 @@ import fetch from "node-fetch";
 import path from "path";
 import { fileURLToPath } from "url";
 import { promises as fs } from "fs";
+import { chromium } from "playwright";
 
 dotenv.config();
 
@@ -13,6 +14,10 @@ const PORT = process.env.PORT || 3000;
 // ===== CONFIG =====
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+
+// Zet dit in Render op je eigen service URL, bijvoorbeeld:
+// https://alrt-render.onrender.com
+const APP_BASE_URL = (process.env.APP_BASE_URL || "").replace(/\/+$/, "");
 
 // Optional:
 // CHART_IMAGE_TEMPLATE=https://your-domain.com/charts/{symbol}.png
@@ -185,7 +190,39 @@ function eventTimeToMs(ts) {
   const d = new Date(raw);
   return Number.isNaN(d.getTime()) ? Date.now() : d.getTime();
 }
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
+function toTvSymbol(symbol) {
+  const clean = normalizeSymbol(symbol);
+  if (!clean) return "BINANCE:BTCUSDT";
+  return `BINANCE:${clean}`;
+}
+
+function getBaseUrl(req = null) {
+  if (APP_BASE_URL) return APP_BASE_URL;
+  if (req) {
+    const proto = req.headers["x-forwarded-proto"] || req.protocol || "https";
+    const host = req.headers["x-forwarded-host"] || req.get("host");
+    if (host) return `${proto}://${host}`;
+  }
+  return "";
+}
+
+function buildLocalChartImageUrl({ req = null, symbol, side, refId }) {
+  const baseUrl = getBaseUrl(req);
+  if (!baseUrl || !symbol) return null;
+
+  const params = new URLSearchParams({
+    symbol: toTvSymbol(symbol),
+    side: String(side || "LONG"),
+    ref: String(refId || ""),
+    interval: "60",
+  });
+
+  return `${baseUrl}/chart-image?${params.toString()}`;
+}
 function stableHash(str) {
   let hash = 0;
   const input = String(str || "");
@@ -1352,7 +1389,69 @@ async function sendHitAlert({ trade, hitType, hitTime, hitPrice = null }) {
     imageUrl,
   });
 }
+app.get("/chart-template", async (req, res) => {
+  try {
+    const templatePath = path.join(__dirname, "chart-template.html");
+    const html = await fs.readFile(templatePath, "utf8");
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.status(200).send(html);
+  } catch (err) {
+    console.error("CHART TEMPLATE ERROR:", err);
+    res.status(500).send("chart template error");
+  }
+});
 
+app.get("/chart-image", async (req, res) => {
+  let browser;
+
+  try {
+    const symbol = String(req.query.symbol || "BINANCE:BTCUSDT");
+    const side = String(req.query.side || "LONG").toUpperCase();
+    const ref = String(req.query.ref || "");
+    const interval = String(req.query.interval || "60");
+
+    const baseUrl = getBaseUrl(req);
+    if (!baseUrl) {
+      return res.status(500).send("APP_BASE_URL missing");
+    }
+
+    const templateUrl = `${baseUrl}/chart-template?symbol=${encodeURIComponent(symbol)}&side=${encodeURIComponent(side)}&ref=${encodeURIComponent(ref)}&interval=${encodeURIComponent(interval)}`;
+
+    browser = await chromium.launch({
+      headless: true,
+      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    });
+
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 720 },
+      deviceScaleFactor: 1,
+    });
+
+    await page.goto(templateUrl, {
+      waitUntil: "networkidle",
+      timeout: 60000,
+    });
+
+    await sleep(3500);
+
+    const png = await page.screenshot({
+      type: "png",
+    });
+
+    res.setHeader("Content-Type", "image/png");
+    res.setHeader("Cache-Control", "public, max-age=120");
+    res.status(200).send(png);
+  } catch (err) {
+    console.error("CHART IMAGE ERROR:", err);
+    res.status(500).send("chart image error");
+  } finally {
+    if (browser) {
+      try {
+        await browser.close();
+      } catch {}
+    }
+  }
+});
 // ===== BASIC ROUTES =====
 app.get("/", (req, res) => {
   res.status(200).json({
