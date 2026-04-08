@@ -1441,9 +1441,11 @@ app.get("/chart-image", async (req, res) => {
     res.setHeader("Content-Type", "image/png");
     res.setHeader("Cache-Control", "public, max-age=120");
     res.status(200).send(png);
-  } catch (err) {
-    console.error("CHART IMAGE ERROR:", err);
-    res.status(500).send("chart image error");
+    } catch (err) {
+    console.error("CHART IMAGE ERROR FULL:", err);
+    res
+      .status(500)
+      .send(`chart image error: ${err?.message || String(err)}`);
   } finally {
     if (browser) {
       try {
