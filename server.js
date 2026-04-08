@@ -190,6 +190,7 @@ function eventTimeToMs(ts) {
   const d = new Date(raw);
   return Number.isNaN(d.getTime()) ? Date.now() : d.getTime();
 }
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -223,6 +224,7 @@ function buildLocalChartImageUrl({ req = null, symbol, side, refId }) {
 
   return `${baseUrl}/chart-image?${params.toString()}`;
 }
+
 function stableHash(str) {
   let hash = 0;
   const input = String(str || "");
@@ -1394,6 +1396,7 @@ async function sendHitAlert({ trade, hitType, hitTime, hitPrice = null }) {
     imageUrl,
   });
 }
+
 app.get("/chart-template", async (req, res) => {
   try {
     const templatePath = path.join(__dirname, "chart-template.html");
@@ -1533,6 +1536,7 @@ app.get("/chart-image", async (req, res) => {
     }
   }
 });
+
 // ===== BASIC ROUTES =====
 app.get("/", (req, res) => {
   res.status(200).json({
@@ -1680,7 +1684,6 @@ app.post("/webhook/tradingview", async (req, res) => {
     }
 
     const chartLink = resolveChartLink(symbol);
-    const chartImageUrl = resolveChartImageUrl(body, symbol, side, incomingRef || "", req);
 
     // ===== HANDLE EXPLICIT TP/SL HIT WEBHOOKS =====
     if (explicitHitType && symbol) {
@@ -1821,12 +1824,12 @@ app.post("/webhook/tradingview", async (req, res) => {
 
     const refId = incomingRef || allocNextRef();
 
-const candidateIds = uniqueStrings([
-  ...candidateIdsBase,
-  refId,
-]);
+    const candidateIds = uniqueStrings([
+      ...candidateIdsBase,
+      refId,
+    ]);
 
-const finalChartImageUrl = resolveChartImageUrl(body, symbol, side, refId, req);
+    const finalChartImageUrl = resolveChartImageUrl(body, symbol, side, refId, req);
 
     if (validLevels) {
       const tradeKey = buildTradeKey(symbol, side, refId);
@@ -1849,7 +1852,7 @@ const finalChartImageUrl = resolveChartImageUrl(body, symbol, side, refId, req);
         strength,
         rr,
         chartLink,
-chartImageUrl: finalChartImageUrl,
+        chartImageUrl: finalChartImageUrl,
       });
     } else {
       await persistState();
@@ -1885,9 +1888,9 @@ chartImageUrl: finalChartImageUrl,
     });
 
     const sendResult = await sendTelegramAlert({
-  text,
-  imageUrl: finalChartImageUrl,
-});
+      text,
+      imageUrl: finalChartImageUrl,
+    });
 
     console.log(`ALERT SENT: ${symbol} ${side} REF ${refId}`);
     console.log("ALERT DATA:", {
@@ -1902,7 +1905,7 @@ chartImageUrl: finalChartImageUrl,
       time: prettyTime,
       refId,
       imageUsed: sendResult.usedPhoto,
-      chartImageUrl,
+      chartImageUrl: finalChartImageUrl,
       chartLink,
       storedForHits: validLevels,
       activeTrades: activeTrades.size,
@@ -1915,7 +1918,7 @@ chartImageUrl: finalChartImageUrl,
       nextRef,
     });
 
-    if (!chartImageUrl) {
+    if (!finalChartImageUrl) {
       console.log("NO DIRECT CHART IMAGE URL AVAILABLE FOR THIS ALERT:", {
         symbol,
         refId,
