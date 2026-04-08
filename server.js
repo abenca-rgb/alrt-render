@@ -482,6 +482,10 @@ function getStrengthText(strength) {
   return strength;
 }
 
+function shouldSkipStrength(strength) {
+  return strength === "C";
+}
+
 function getWhyLeadPhrases({ setupType, side, atrBucket, rsiBucket }) {
   const bank = {
     COMPRESSION: {
@@ -2015,6 +2019,23 @@ app.post("/webhook/tradingview", async (req, res) => {
         eventType,
         eventTime: prettyTime,
       });
+    }
+
+    if (shouldSkipStrength(strength)) {
+      console.log("SIGNAL SKIPPED BY SAFE FILTER:", {
+        reason: "strength_c_filtered",
+        symbol,
+        side,
+        strength,
+        entry: fmtPrice(entryParsed),
+        tp: fmtPrice(tpParsed),
+        sl: fmtPrice(slParsed),
+        tpPct: fmtPct(tpPct),
+        rr: fmtRR(rr),
+        eventType,
+        time: prettyTime,
+      });
+      return;
     }
 
     const refId = incomingRef || allocNextRef();
