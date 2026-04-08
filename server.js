@@ -1130,6 +1130,7 @@ function buildAlertText({
   tpPct,
 }) {
   return `🚨 <b>ALERT • ${escapeHtml(symbol)}</b>
+<b>REF</b> ${escapeHtml(refId)}
 
 <b>DIRECTION</b> ${escapeHtml(side)}
 <b>ENTRY</b> ${escapeHtml(fmtPrice(entry))}
@@ -1137,7 +1138,6 @@ function buildAlertText({
 <b>SL</b> ${escapeHtml(fmtPrice(sl))}
 <b>RR</b> ${escapeHtml(fmtRR(rr))}
 <b>LEVERAGE</b> ${escapeHtml(leverage)}
-<b>REF</b> ${escapeHtml(refId)}
 
 <b>TIMEFRAME</b> 60M
 <b>UTC</b> ${escapeHtml(prettyTime)}
@@ -1163,6 +1163,7 @@ function buildHitText({
   const status = hitType === "TP" ? "TP HIT" : "SL HIT";
 
   return `${icon} <b>HIT • ${escapeHtml(trade.symbol)}</b>
+<b>REF</b> ${escapeHtml(trade.refId)}
 
 <b>STATUS</b> ${escapeHtml(status)}
 <b>DIRECTION</b> ${escapeHtml(trade.side)}
@@ -1173,7 +1174,6 @@ function buildHitText({
 <b>MOVE</b> ${escapeHtml(fmtPct(movePct, { signed: true }))}
 <b>RR</b> ${escapeHtml(fmtRR(rr))}
 <b>LEVERAGE</b> ${escapeHtml(trade.leverage || "N/A")}
-<b>REF</b> ${escapeHtml(trade.refId)}
 
 <b>TIMEFRAME</b> 60M
 <b>UTC</b> ${escapeHtml(formatUtc(hitTime))}${showChartLink ? `
