@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>ALRT Chart</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: #0b1220;
+      width: 1280px;
+      height: 720px;
+      overflow: hidden;
+      font-family: Arial, sans-serif;
+    }
+
+    #wrap {
+      width: 1280px;
+      height: 720px;
+      position: relative;
+      background: #0b1220;
+    }
+
+    #tv_chart_container {
+      width: 1280px;
+      height: 720px;
+    }
+
+    .badge {
+      position: absolute;
+      top: 14px;
+      left: 14px;
+      z-index: 20;
+      background: rgba(10, 14, 25, 0.88);
+      color: white;
+      padding: 10px 14px;
+      border-radius: 12px;
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: 0.3px;
+      border: 1px solid rgba(255,255,255,0.08);
+      box-shadow: 0 8px 24px rgba(0,0,0,0.25);
+    }
+  </style>
+</head>
+<body>
+  <div id="wrap">
+    <div class="badge" id="badge">ALRT Chart</div>
+    <div id="tv_chart_container"></div>
+  </div>
+
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const symbol = params.get("symbol") || "BINANCE:BTCUSDT";
+    const side = (params.get("side") || "LONG").toUpperCase();
+    const ref = params.get("ref") || "";
+    const interval = params.get("interval") || "60";
+
+    const badge = document.getElementById("badge");
+    badge.textContent = ref ? `${symbol} • ${side} • REF ${ref}` : `${symbol} • ${side}`;
+
+    window.tvWidgetSymbol = symbol;
+    window.tvWidgetInterval = interval;
+  </script>
+
+  <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+  <script>
+    new TradingView.widget({
+      autosize: false,
+      width: 1280,
+      height: 720,
+      symbol: window.tvWidgetSymbol,
+      interval: window.tvWidgetInterval,
+      timezone: "Etc/UTC",
+      theme: "dark",
+      style: "1",
+      locale: "en",
+      hide_top_toolbar: false,
+      hide_legend: false,
+      allow_symbol_change: false,
+      save_image: false,
+      studies: [],
+      container_id: "tv_chart_container"
+    });
+  </script>
+</body>
+</html>
