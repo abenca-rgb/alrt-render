@@ -1,6 +1,6 @@
 import express from "express";
 import dotenv from "dotenv";
-import fetch from "node-fetch";
+import fetch, { FormData, Blob } from "node-fetch";
 import path from "path";
 import { fileURLToPath } from "url";
 import { promises as fs } from "fs";
@@ -1076,6 +1076,22 @@ function looksLikeDirectImageUrl(url) {
   return false;
 }
 
+function isLocalChartImageUrl(url) {
+  const value = String(url || "").trim();
+  if (!value) return false;
+  if (!value.includes("/chart-image")) return false;
+
+  const baseUrl = getBaseUrl();
+  if (baseUrl && value.startsWith(baseUrl)) return true;
+
+  try {
+    const parsed = new URL(value);
+    return parsed.pathname === "/chart-image";
+  } catch {
+    return value.includes("/chart-image");
+  }
+}
+
 function resolveChartImageUrl(body, symbol, side = "LONG", refId = "", req = null) {
   const inline = pick(
     body.chart_image_url,
@@ -1227,6 +1243,14 @@ function buildHitText({
 NFA`;
 }
 
+function appendChartLinkIfMissing(text, chartLink) {
+  if (!chartLink || chartLink === "N/A") return text;
+  if (String(text).includes("<b>CHART</b>")) return text;
+  return `${text}
+
+<b>CHART</b> ${formatChartHtml(chartLink)}`;
+}
+
 async function ensureDataDir() {
   await fs.mkdir(DATA_DIR, { recursive: true });
 }
@@ -1311,113 +1335,15 @@ async function upsertTrade(tradeKey, trade) {
   await persistState();
 }
 
-// ===== TELEGRAM =====
-async function sendTelegramMessage(text) {
-  const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: CHAT_ID,
-      text,
-      parse_mode: "HTML",
-      disable_web_page_preview: true,
-    }),
-  });
-
-  const data = await response.json();
-  console.log("TELEGRAM MESSAGE RESPONSE:", data);
-
-  if (!response.ok || !data.ok) {
-    throw new Error(`Telegram sendMessage failed: ${JSON.stringify(data)}`);
-  }
-}
-
-async function sendTelegramPhoto(photoUrl, caption) {
-  const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: CHAT_ID,
-      photo: photoUrl,
-      caption,
-      parse_mode: "HTML",
-    }),
-  });
-
-  const data = await response.json();
-  console.log("TELEGRAM PHOTO RESPONSE:", data);
-
-  if (!response.ok || !data.ok) {
-    throw new Error(`Telegram sendPhoto failed: ${JSON.stringify(data)}`);
-  }
-}
-
-async function sendTelegramAlert({ text, imageUrl = null }) {
-  if (imageUrl) {
-    try {
-      await sendTelegramPhoto(imageUrl, text);
-      return { usedPhoto: true };
-    } catch (err) {
-      console.error("PHOTO SEND FAILED, FALLING BACK TO MESSAGE:", err.message);
-    }
-  }
-
-  await sendTelegramMessage(text);
-  return { usedPhoto: false };
-}
-
-async function sendHitAlert({ trade, hitType, hitTime, hitPrice = null }) {
-  const exitPrice =
-    hitType === "TP"
-      ? trade.tp
-      : hitType === "SL"
-      ? trade.sl
-      : hitPrice;
-
-  const rr = rrFromLevels(trade.side, trade.entry, trade.tp, trade.sl);
-  const movePct = pctMove(trade.side, trade.entry, exitPrice);
-  const chartLink = trade.chartLink || resolveChartLink(trade.symbol);
-  const imageUrl = trade.chartImageUrl || null;
-  const showChartLink = !imageUrl;
-
-  const hitText = buildHitText({
-    trade,
-    hitType,
-    hitTime,
-    exitPrice,
-    movePct,
-    rr,
-    chartLink,
-    showChartLink,
-  });
-
-  await sendTelegramAlert({
-    text: hitText,
-    imageUrl,
-  });
-}
-
-app.get("/chart-template", async (req, res) => {
-  try {
-    const templatePath = path.join(__dirname, "chart-template.html");
-    const html = await fs.readFile(templatePath, "utf8");
-    res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.status(200).send(html);
-  } catch (err) {
-    console.error("CHART TEMPLATE ERROR:", err);
-    res.status(500).send("chart template error");
-  }
-});
-
-app.get("/chart-image", async (req, res) => {
+async function renderChartImagePngBuffer({
+  symbol = "BINANCE:BTCUSDT",
+  side = "LONG",
+  ref = "",
+  interval = "60",
+}) {
   let browser;
 
   try {
-    const symbol = String(req.query.symbol || "BINANCE:BTCUSDT");
-    const side = String(req.query.side || "LONG").toUpperCase();
-    const ref = String(req.query.ref || "");
-    const interval = String(req.query.interval || "60");
-
     browser = await chromium.launch({
       headless: true,
       args: ["--no-sandbox", "--disable-setuid-sandbox"],
@@ -1522,18 +1448,225 @@ app.get("/chart-image", async (req, res) => {
       type: "png",
     });
 
-    res.setHeader("Content-Type", "image/png");
-    res.setHeader("Cache-Control", "public, max-age=120");
-    res.status(200).send(png);
-  } catch (err) {
-    console.error("CHART IMAGE ERROR FULL:", err);
-    res.status(500).send(`chart image error: ${err?.message || String(err)}`);
+    return png;
   } finally {
     if (browser) {
       try {
         await browser.close();
       } catch {}
     }
+  }
+}
+
+// ===== TELEGRAM =====
+async function sendTelegramMessage(text) {
+  const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: CHAT_ID,
+      text,
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+    }),
+  });
+
+  const data = await response.json();
+  console.log("TELEGRAM MESSAGE RESPONSE:", data);
+
+  if (!response.ok || !data.ok) {
+    throw new Error(`Telegram sendMessage failed: ${JSON.stringify(data)}`);
+  }
+}
+
+async function sendTelegramPhoto({ photoUrl = null, photoBuffer = null, filename = "chart.png", caption = "" }) {
+  let response;
+  let data;
+
+  if (photoBuffer) {
+    const form = new FormData();
+    form.append("chat_id", CHAT_ID);
+    form.append("caption", caption);
+    form.append("parse_mode", "HTML");
+    form.append("photo", new Blob([photoBuffer], { type: "image/png" }), filename);
+
+    response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
+      method: "POST",
+      body: form,
+    });
+  } else {
+    response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: CHAT_ID,
+        photo: photoUrl,
+        caption,
+        parse_mode: "HTML",
+      }),
+    });
+  }
+
+  data = await response.json();
+  console.log("TELEGRAM PHOTO RESPONSE:", data);
+
+  if (!response.ok || !data.ok) {
+    throw new Error(`Telegram sendPhoto failed: ${JSON.stringify(data)}`);
+  }
+}
+
+async function sendTelegramAlert({
+  text,
+  imageUrl = null,
+  imageBuffer = null,
+  imageFilename = "chart.png",
+  fallbackChartLink = "N/A",
+}) {
+  if (imageBuffer || imageUrl) {
+    try {
+      await sendTelegramPhoto({
+        photoUrl: imageUrl,
+        photoBuffer: imageBuffer,
+        filename: imageFilename,
+        caption: text,
+      });
+      return { usedPhoto: true };
+    } catch (err) {
+      console.error("PHOTO SEND FAILED, FALLING BACK TO MESSAGE:", err.message);
+      const fallbackText = appendChartLinkIfMissing(text, fallbackChartLink);
+      await sendTelegramMessage(fallbackText);
+      return { usedPhoto: false, photoFailed: true };
+    }
+  }
+
+  const fallbackText = appendChartLinkIfMissing(text, fallbackChartLink);
+  await sendTelegramMessage(fallbackText);
+  return { usedPhoto: false };
+}
+
+async function buildChartDeliveryAssets({
+  symbol,
+  side,
+  refId,
+  req = null,
+  inlineBody = null,
+}) {
+  const imageUrl = resolveChartImageUrl(inlineBody || {}, symbol, side, refId, req);
+
+  if (!imageUrl) {
+    return {
+      imageUrl: null,
+      imageBuffer: null,
+      imageFilename: `${symbol || "chart"}-${refId || "alert"}.png`,
+    };
+  }
+
+  if (isLocalChartImageUrl(imageUrl)) {
+    try {
+      const pngBuffer = await renderChartImagePngBuffer({
+        symbol: toTvSymbol(symbol),
+        side,
+        ref: refId,
+        interval: "60",
+      });
+
+      return {
+        imageUrl,
+        imageBuffer: pngBuffer,
+        imageFilename: `${symbol || "chart"}-${refId || "alert"}.png`,
+      };
+    } catch (err) {
+      console.error("LOCAL CHART RENDER FOR TELEGRAM FAILED:", err);
+      return {
+        imageUrl,
+        imageBuffer: null,
+        imageFilename: `${symbol || "chart"}-${refId || "alert"}.png`,
+      };
+    }
+  }
+
+  return {
+    imageUrl,
+    imageBuffer: null,
+    imageFilename: `${symbol || "chart"}-${refId || "alert"}.png`,
+  };
+}
+
+async function sendHitAlert({ trade, hitType, hitTime, hitPrice = null }) {
+  const exitPrice =
+    hitType === "TP"
+      ? trade.tp
+      : hitType === "SL"
+      ? trade.sl
+      : hitPrice;
+
+  const rr = rrFromLevels(trade.side, trade.entry, trade.tp, trade.sl);
+  const movePct = pctMove(trade.side, trade.entry, exitPrice);
+  const chartLink = trade.chartLink || resolveChartLink(trade.symbol);
+
+  const chartAssets = await buildChartDeliveryAssets({
+    symbol: trade.symbol,
+    side: trade.side,
+    refId: trade.refId,
+    inlineBody: {
+      chart_image_url: trade.chartImageUrl,
+    },
+  });
+
+  const showChartLink = !chartAssets.imageUrl && !chartAssets.imageBuffer;
+
+  const hitText = buildHitText({
+    trade,
+    hitType,
+    hitTime,
+    exitPrice,
+    movePct,
+    rr,
+    chartLink,
+    showChartLink,
+  });
+
+  await sendTelegramAlert({
+    text: hitText,
+    imageUrl: chartAssets.imageUrl,
+    imageBuffer: chartAssets.imageBuffer,
+    imageFilename: chartAssets.imageFilename,
+    fallbackChartLink: chartLink,
+  });
+}
+
+app.get("/chart-template", async (req, res) => {
+  try {
+    const templatePath = path.join(__dirname, "chart-template.html");
+    const html = await fs.readFile(templatePath, "utf8");
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.status(200).send(html);
+  } catch (err) {
+    console.error("CHART TEMPLATE ERROR:", err);
+    res.status(500).send("chart template error");
+  }
+});
+
+app.get("/chart-image", async (req, res) => {
+  try {
+    const symbol = String(req.query.symbol || "BINANCE:BTCUSDT");
+    const side = String(req.query.side || "LONG").toUpperCase();
+    const ref = String(req.query.ref || "");
+    const interval = String(req.query.interval || "60");
+
+    const png = await renderChartImagePngBuffer({
+      symbol,
+      side,
+      ref,
+      interval,
+    });
+
+    res.setHeader("Content-Type", "image/png");
+    res.setHeader("Cache-Control", "public, max-age=120");
+    res.status(200).send(png);
+  } catch (err) {
+    console.error("CHART IMAGE ERROR FULL:", err);
+    res.status(500).send(`chart image error: ${err?.message || String(err)}`);
   }
 });
 
@@ -1829,7 +1962,13 @@ app.post("/webhook/tradingview", async (req, res) => {
       refId,
     ]);
 
-    const finalChartImageUrl = resolveChartImageUrl(body, symbol, side, refId, req);
+    const chartAssets = await buildChartDeliveryAssets({
+      symbol,
+      side,
+      refId,
+      req,
+      inlineBody: body,
+    });
 
     if (validLevels) {
       const tradeKey = buildTradeKey(symbol, side, refId);
@@ -1852,7 +1991,7 @@ app.post("/webhook/tradingview", async (req, res) => {
         strength,
         rr,
         chartLink,
-        chartImageUrl: finalChartImageUrl,
+        chartImageUrl: chartAssets.imageUrl,
       });
     } else {
       await persistState();
@@ -1869,7 +2008,7 @@ app.post("/webhook/tradingview", async (req, res) => {
       refId,
     });
 
-    const showChartLink = !finalChartImageUrl;
+    const showChartLink = !chartAssets.imageUrl && !chartAssets.imageBuffer;
 
     const text = buildAlertText({
       symbol,
@@ -1889,7 +2028,10 @@ app.post("/webhook/tradingview", async (req, res) => {
 
     const sendResult = await sendTelegramAlert({
       text,
-      imageUrl: finalChartImageUrl,
+      imageUrl: chartAssets.imageUrl,
+      imageBuffer: chartAssets.imageBuffer,
+      imageFilename: chartAssets.imageFilename,
+      fallbackChartLink: chartLink,
     });
 
     console.log(`ALERT SENT: ${symbol} ${side} REF ${refId}`);
@@ -1905,7 +2047,8 @@ app.post("/webhook/tradingview", async (req, res) => {
       time: prettyTime,
       refId,
       imageUsed: sendResult.usedPhoto,
-      chartImageUrl: finalChartImageUrl,
+      chartImageUrl: chartAssets.imageUrl,
+      chartBufferBuilt: Boolean(chartAssets.imageBuffer),
       chartLink,
       storedForHits: validLevels,
       activeTrades: activeTrades.size,
@@ -1918,12 +2061,11 @@ app.post("/webhook/tradingview", async (req, res) => {
       nextRef,
     });
 
-    if (!finalChartImageUrl) {
-      console.log("NO DIRECT CHART IMAGE URL AVAILABLE FOR THIS ALERT:", {
+    if (!chartAssets.imageUrl && !chartAssets.imageBuffer) {
+      console.log("NO DIRECT CHART IMAGE AVAILABLE FOR THIS ALERT:", {
         symbol,
         refId,
         chartLink,
-        note: "Telegram can only show a chart image if it receives a real direct image URL like snapshot_url/chart_image_url or a mapped CHART_IMAGE_TEMPLATE/CHART_IMAGES URL.",
       });
     }
   } catch (err) {
