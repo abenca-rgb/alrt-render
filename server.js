@@ -2155,6 +2155,10 @@ app.use((req, res) => {
 // ===== START =====
 async function startServer() {
   await loadState();
+  await persistState();
+
+  console.log("STATE FILE PATH:", STATE_FILE);
+  console.log("DATA DIR:", DATA_DIR);
 
   app.listen(PORT, () => {
     console.log(`ALRT-Render running on port ${PORT}`);
