@@ -834,7 +834,7 @@ function buildWhyLine({ symbol, side, setupType, strength, rsi, atrPct, eventTim
     getWhyTailPhrases({ setupType, side, strength, rsiBucket })
   );
 
-  const finalWhy = `${ensurePeriod(lead)} ${ensurePeriod(context)} ${ensurePeriod(tail)}`.trim();
+  const finalWhy = `${lead}. ${context}. ${tail}`.toUpperCase();
   return cleanSentence(finalWhy);
 }
 
@@ -1288,15 +1288,14 @@ function buildHitText({
   const status = isTp ? "TP HIT" : "SL HIT";
   const pnlLabel = isTp ? "PROFIT" : "LOSS";
 
-  return `${icon} <b>${escapeHtml(status)} • ${escapeHtml(trade.symbol)}</b>
-<b>${escapeHtml(trade.side)}</b> • <b>${escapeHtml(fmtPct(movePct, { signed: true }))}</b>
+  return `${icon} <b>${escapeHtml(trade.symbol)} ${escapeHtml(trade.side)}</b>
+
+<b>${escapeHtml(status)}</b> → ${escapeHtml(fmtPct(movePct, { signed: true }))}
 
 <b>ENTRY</b> ${escapeHtml(fmtPrice(trade.entry))}
 <b>EXIT</b> ${escapeHtml(fmtPrice(exitPrice))}
-<b>${escapeHtml(pnlLabel)}</b> ${escapeHtml(fmtPct(movePct, { signed: true }))}
-<b>REF</b> ${escapeHtml(trade.refId)}${showChartLink ? `
 
-<b>CHART</b> ${formatChartHtml(chartLink)}` : ""}`;
+<b>REF</b> ${escapeHtml(trade.refId)}`;
 }
 
 function appendChartLinkIfMissing(text, chartLink) {
