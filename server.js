@@ -1286,18 +1286,19 @@ function buildHitText({
   const isTp = hitType === "TP";
   const icon = isTp ? "🎯" : "🛑";
   const status = isTp ? "TP HIT" : "SL HIT";
-  const pnlLabel = isTp ? "PROFIT" : "LOSS";
+  const resultWord = isTp ? "PROFIT" : "LOSS";
 
   return `${icon} <b>${escapeHtml(trade.symbol)} ${escapeHtml(trade.side)}</b>
 
-<b>${escapeHtml(status)}</b> → ${escapeHtml(fmtPct(movePct, { signed: true }))}
+<b>${escapeHtml(status)}</b> • <b>${escapeHtml(fmtPct(movePct, { signed: true }))}</b>
 
 <b>ENTRY</b> ${escapeHtml(fmtPrice(trade.entry))}
 <b>EXIT</b> ${escapeHtml(fmtPrice(exitPrice))}
+<b>${escapeHtml(resultWord)}</b> ${escapeHtml(fmtPct(movePct, { signed: true }))}
+<b>REF</b> ${escapeHtml(trade.refId)}${showChartLink ? `
 
-<b>REF</b> ${escapeHtml(trade.refId)}`;
+<b>CHART</b> ${formatChartHtml(chartLink)}` : ""}`;
 }
-
 function appendChartLinkIfMissing(text, chartLink) {
   if (!chartLink || chartLink === "N/A") return text;
   if (String(text).includes("<b>CHART</b>")) return text;
