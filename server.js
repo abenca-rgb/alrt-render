@@ -200,14 +200,12 @@ function toTvSymbol(symbol) {
   return `BINANCE:${clean}`;
 }
 
-function getBaseUrl(req = null) {
-  if (APP_BASE_URL) return APP_BASE_URL;
-  if (req) {
-    const proto = req.headers["x-forwarded-proto"] || req.protocol || "https";
-    const host = req.headers["x-forwarded-host"] || req.get("host");
-    if (host) return `${proto}://${host}`;
+function getBaseUrl() {
+  if (!APP_BASE_URL) {
+    console.error("APP_BASE_URL ontbreekt");
+    return "";
   }
-  return "";
+  return APP_BASE_URL;
 }
 
 function buildLocalChartImageUrl({ req = null, symbol, side, refId }) {
@@ -1617,7 +1615,12 @@ async function buildChartDeliveryAssets({
   inlineBody = null,
 }) {
   const imageUrl = resolveChartImageUrl(inlineBody || {}, symbol, side, refId, req);
-
+console.log("CHART ASSET INPUT:", {
+  symbol,
+  side,
+  refId,
+  imageUrl,
+});
   if (!imageUrl) {
     return {
       imageUrl: null,
