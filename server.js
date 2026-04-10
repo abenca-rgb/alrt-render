@@ -1505,7 +1505,7 @@ async function renderChartImagePngBuffer({
       timeout: 60000,
     });
 
-    await sleep(6000);
+    await sleep(8000);
 
     const png = await page.screenshot({
       type: "png",
