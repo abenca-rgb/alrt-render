@@ -1284,29 +1284,20 @@ function buildHitText({
   chartLink,
   showChartLink,
 }) {
-  const icon = hitType === "TP" ? "🎯" : "🛑";
-  const status = hitType === "TP" ? "TP HIT" : "SL HIT";
+  const isTp = hitType === "TP";
+  const icon = isTp ? "🎯" : "🛑";
+  const status = isTp ? "TP HIT" : "SL HIT";
+  const pnlLabel = isTp ? "PROFIT" : "LOSS";
 
-  return `${icon} <b>HIT • ${escapeHtml(trade.symbol)}</b>
-<b>REF</b> ${escapeHtml(trade.refId)}
+  return `${icon} <b>${escapeHtml(status)} • ${escapeHtml(trade.symbol)}</b>
+<b>${escapeHtml(trade.side)}</b> • <b>${escapeHtml(fmtPct(movePct, { signed: true }))}</b>
 
-<b>STATUS</b> ${escapeHtml(status)}
-<b>DIRECTION</b> ${escapeHtml(trade.side)}
 <b>ENTRY</b> ${escapeHtml(fmtPrice(trade.entry))}
 <b>EXIT</b> ${escapeHtml(fmtPrice(exitPrice))}
-<b>TP</b> ${escapeHtml(fmtPrice(trade.tp))}
-<b>SL</b> ${escapeHtml(fmtPrice(trade.sl))}
-<b>MOVE</b> ${escapeHtml(fmtPct(movePct, { signed: true }))}
-<b>RR</b> ${escapeHtml(fmtRR(rr))}
-<b>STRENGTH</b> ${escapeHtml(getStrengthText(trade.strength))}
-<b>LEVERAGE</b> ${escapeHtml(trade.leverage || "N/A")}
+<b>${escapeHtml(pnlLabel)}</b> ${escapeHtml(fmtPct(movePct, { signed: true }))}
+<b>REF</b> ${escapeHtml(trade.refId)}${showChartLink ? `
 
-<b>TIMEFRAME</b> 60M
-<b>UTC</b> ${escapeHtml(formatUtc(hitTime))}${showChartLink ? `
-
-<b>CHART</b> ${formatChartHtml(chartLink)}` : ""}
-
-NFA`;
+<b>CHART</b> ${formatChartHtml(chartLink)}` : ""}`;
 }
 
 function appendChartLinkIfMissing(text, chartLink) {
