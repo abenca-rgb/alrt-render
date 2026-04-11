@@ -2037,70 +2037,70 @@ app.post("/webhook/tradingview", async (req, res) => {
       inlineBody: body,
     });
 
-    if (validLevels) {
-      const tradeKey = buildTradeKey(symbol, side, refId);
-
-      await upsertTrade(tradeKey, {
-        tradeKey,
-        refId,
-        symbol,
-        side,
-        entry: entryParsed,
-        tp: tpParsed,
-        sl: slParsed,
-        leverage,
-        createdAtMs: eventTimeMs,
-        hit: false,
-        hitType: null,
-        hitAtMs: null,
-        alertIds: candidateIds,
-        setupType,
-        strength,
-        rr,
-        chartLink,
-        chartImageUrl: chartAssets.imageUrl,
-      });
-    } else {
-      await persistState();
-    }
-
     const whyLine = buildWhyLine({
-      symbol,
-      side,
-      setupType,
-      strength,
-      rsi,
-      atrPct,
-      eventTime,
-      refId,
-    });
+  symbol,
+  side,
+  setupType,
+  strength,
+  rsi,
+  atrPct,
+  eventTime,
+  refId,
+});
 
-    const showChartLink = !chartAssets.imageUrl && !chartAssets.imageBuffer;
+const showChartLink = !chartAssets.imageUrl && !chartAssets.imageBuffer;
 
-    const text = buildAlertText({
-      symbol,
-      side,
-      entry: entryParsed,
-      tp: tpParsed,
-      sl: slParsed,
-      rr,
-      leverage,
-      strength,
-      prettyTime,
-      whyLine,
-      chartLink,
-      showChartLink,
-      refId,
-      tpPct,
-    });
+const text = buildAlertText({
+  symbol,
+  side,
+  entry: entryParsed,
+  tp: tpParsed,
+  sl: slParsed,
+  rr,
+  leverage,
+  strength,
+  prettyTime,
+  whyLine,
+  chartLink,
+  showChartLink,
+  refId,
+  tpPct,
+});
 
-    const sendResult = await sendTelegramAlert({
-      text,
-      imageUrl: chartAssets.imageUrl,
-      imageBuffer: chartAssets.imageBuffer,
-      imageFilename: chartAssets.imageFilename,
-      fallbackChartLink: chartLink,
-    });
+const sendResult = await sendTelegramAlert({
+  text,
+  imageUrl: chartAssets.imageUrl,
+  imageBuffer: chartAssets.imageBuffer,
+  imageFilename: chartAssets.imageFilename,
+  fallbackChartLink: chartLink,
+});
+
+if (validLevels) {
+  const tradeKey = buildTradeKey(symbol, side, refId);
+
+  await upsertTrade(tradeKey, {
+    tradeKey,
+    refId,
+    symbol,
+    side,
+    entry: entryParsed,
+    tp: tpParsed,
+    sl: slParsed,
+    leverage,
+    createdAtMs: eventTimeMs,
+    hit: false,
+    hitType: null,
+    hitAtMs: null,
+    alertIds: candidateIds,
+    setupType,
+    strength,
+    rr,
+    chartLink,
+    chartImageUrl: chartAssets.imageUrl,
+  });
+} else {
+  await persistState();
+}
 
     console.log(`ALERT SENT: ${symbol} ${side} REF ${refId}`);
     console.log("ALERT DATA:", {
