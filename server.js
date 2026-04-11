@@ -487,86 +487,86 @@ function getWhyLeadPhrases({ setupType, side, atrBucket, rsiBucket }) {
   const bank = {
     COMPRESSION: {
       LONG: [
-        "Price is starting to squeeze higher out of a tight range",
-        "This looks like a clean upside release from compression",
-        "Buyers are starting to force price out of a compact base",
-        "The range is tightening and beginning to break upward",
+        "Tight range, now trying to break higher",
+        "Compression is starting to release upward",
+        "Price is squeezing and trying to expand higher",
+        "This looks like a clean upside release from a tight base",
       ],
       SHORT: [
-        "Price is starting to squeeze lower out of a tight range",
-        "This looks like a clean downside release from compression",
-        "Sellers are starting to force price out of a compact base",
-        "The range is tightening and beginning to break lower",
+        "Tight range, now trying to break lower",
+        "Compression is starting to release downward",
+        "Price is squeezing and trying to expand lower",
+        "This looks like a clean downside release from a tight base",
       ],
     },
     PULLBACK: {
       LONG: [
-        "This still looks like a healthy pullback inside the move up",
-        "Buyers are holding the reset without damaging structure",
-        "The retrace looks controlled and still favors continuation",
-        "Price is pulling back cleanly without losing the bullish shape",
+        "Clean pullback into support",
+        "This still looks like a healthy reset in the uptrend",
+        "Buyers are absorbing the dip without breaking structure",
+        "Price pulled back, but the trend shape is still intact",
       ],
       SHORT: [
-        "This still looks like a weak rebound inside the move down",
-        "Sellers are holding the bounce without losing control",
-        "The rebound looks corrective and still favors continuation lower",
-        "Price is bouncing, but the structure still leans bearish",
+        "Weak bounce into resistance",
+        "This still looks like a bearish reset, not a reversal",
+        "Sellers are absorbing the bounce without losing structure",
+        "Price bounced, but the structure still leans lower",
       ],
     },
     TREND: {
       LONG: [
-        "The trend still looks strong and orderly here",
-        "Buyers still control the structure on this move",
-        "This is still behaving like trend continuation higher",
-        "Price is still moving in a clean bullish structure",
+        "Trend still looks strong here",
+        "Buyers still control the bigger move",
+        "This still behaves like continuation higher",
+        "The structure is still clearly bullish here",
       ],
       SHORT: [
-        "The trend still looks weak and orderly here",
-        "Sellers still control the structure on this move",
-        "This is still behaving like trend continuation lower",
-        "Price is still moving in a clean bearish structure",
+        "Trend still looks weak here",
+        "Sellers still control the bigger move",
+        "This still behaves like continuation lower",
+        "The structure is still clearly bearish here",
       ],
     },
     BREAKOUT: {
       LONG: [
-        "Price is trying to push through and hold above the breakout zone",
-        "This breakout still has room if buyers keep control here",
-        "The upside break looks active and not exhausted yet",
-        "Buyers are trying to turn this break into continuation",
+        "Price is trying to hold after the breakout",
+        "The break is active and can still extend",
+        "Buyers are trying to turn the breakout into continuation",
+        "This breakout still has room if price holds up here",
       ],
       SHORT: [
-        "Price is trying to push through and hold below the breakdown zone",
-        "This breakdown still has room if sellers keep control here",
-        "The downside break looks active and not exhausted yet",
-        "Sellers are trying to turn this break into continuation",
+        "Price is trying to hold after the breakdown",
+        "The break is active and can still extend lower",
+        "Sellers are trying to turn the breakdown into continuation",
+        "This breakdown still has room if price holds down here",
       ],
     },
     REVERSAL: {
       LONG: [
-        "This looks more like an early turn than simple continuation",
-        "Buyers are starting to shift the structure back upward",
-        "The market is trying to reverse after prior weakness",
-        "There is a visible attempt to rebuild bullish structure here",
+        "There is an early turn higher here",
+        "This looks more like a reversal attempt than pure continuation",
+        "Buyers are trying to shift momentum back up",
+        "The market is trying to rebuild bullish structure",
       ],
       SHORT: [
-        "This looks more like an early turn lower than simple continuation",
-        "Sellers are starting to shift the structure back downward",
-        "The market is trying to reverse after prior strength",
-        "There is a visible attempt to rebuild bearish structure here",
+        "There is an early turn lower here",
+        "This looks more like a reversal attempt than pure continuation",
+        "Sellers are trying to shift momentum back down",
+        "The market is trying to rebuild bearish structure",
       ],
     },
     MOMENTUM: {
       LONG: [
-        "Momentum is still carrying this move higher",
-        "Buyers still have pressure behind this push",
-        "This move still has real upside drive behind it",
-        "Price is pushing higher with momentum still active",
+        "Momentum is still behind this move",
+        "Buyers are still pressing price higher",
+        "This move still has real upside drive",
+        "Price is pushing up with momentum still active",
       ],
       SHORT: [
-        "Momentum is still carrying this move lower",
-        "Sellers still have pressure behind this push",
-        "This move still has real downside drive behind it",
-        "Price is pushing lower with momentum still active",
+        "Momentum is still behind this move",
+        "Sellers are still pressing price lower",
+        "This move still has real downside drive",
+        "Price is pushing down with momentum still active",
       ],
     },
   };
@@ -578,12 +578,12 @@ function getWhyLeadPhrases({ setupType, side, atrBucket, rsiBucket }) {
     phrases = phrases.concat(
       side === "LONG"
         ? [
-            "The structure is tight, which gives the move room to expand",
-            "The chart is still tight enough to support a cleaner push higher",
+            "Structure is tight, which helps the upside case",
+            "Still tight enough to expand higher if buyers push",
           ]
         : [
-            "The structure is tight, which gives the move room to expand lower",
-            "The chart is still tight enough to support a cleaner push lower",
+            "Structure is tight, which helps the downside case",
+            "Still tight enough to expand lower if sellers push",
           ]
     );
   }
@@ -592,12 +592,12 @@ function getWhyLeadPhrases({ setupType, side, atrBucket, rsiBucket }) {
     phrases = phrases.concat(
       side === "LONG"
         ? [
-            "Momentum is strong enough to keep buyers in control for now",
-            "The move still has enough strength to continue if price holds",
+            "Momentum is strong enough to keep this moving",
+            "The push still has strength behind it",
           ]
         : [
-            "Momentum is strong enough to keep sellers in control for now",
-            "The move still has enough strength to continue if price holds",
+            "Momentum is strong enough to keep this moving",
+            "The push still has strength behind it",
           ]
     );
   }
@@ -610,78 +610,78 @@ function getWhyContextPhrases({ setupType, side, strength, atrBucket, rsiBucket,
 
   const general = {
     LONG: [
-      "Buyers still look in control of the bigger structure",
-      "The 1H picture still supports continuation higher",
-      "The move still looks technically clean for now",
-      "There is not much damage in the structure yet",
+      "Buyers still look in control",
+      "The 1H structure still supports continuation",
+      "So far, nothing really damaged the bullish shape",
+      "The chart still looks orderly enough for continuation",
     ],
     SHORT: [
-      "Sellers still look in control of the bigger structure",
-      "The 1H picture still supports continuation lower",
-      "The move still looks technically clean for now",
-      "There is not much damage in the structure yet",
+      "Sellers still look in control",
+      "The 1H structure still supports continuation lower",
+      "So far, nothing really damaged the bearish shape",
+      "The chart still looks orderly enough for continuation",
     ],
   };
 
   const setupSpecific = {
     COMPRESSION: {
       LONG: [
-        "This usually improves when price keeps opening up after the squeeze",
-        "As long as the range keeps releasing, the upside stays interesting",
+        "If the squeeze keeps opening up, this can move fast",
+        "The key now is whether price can keep expanding",
       ],
       SHORT: [
-        "This usually improves when price keeps opening up after the squeeze",
-        "As long as the range keeps releasing, the downside stays interesting",
+        "If the squeeze keeps opening up, this can move fast",
+        "The key now is whether price can keep expanding lower",
       ],
     },
     PULLBACK: {
       LONG: [
-        "The reset still looks shallow enough to keep the trend intact",
-        "So far this still behaves more like a reset than a breakdown",
+        "This works as long as the pullback stays controlled",
+        "The idea is simple: hold support and continue",
       ],
       SHORT: [
-        "The bounce still looks weak enough to keep the trend intact",
-        "So far this still behaves more like a reset than a reversal",
+        "This works as long as the bounce stays weak",
+        "The idea is simple: reject resistance and continue lower",
       ],
     },
     TREND: {
       LONG: [
-        "The higher-low behavior still matters here",
-        "As long as this structure holds, buyers have the edge",
+        "Higher-lows still matter here",
+        "As long as this structure holds, buyers keep the edge",
       ],
       SHORT: [
-        "The lower-high behavior still matters here",
-        "As long as this structure holds, sellers have the edge",
+        "Lower-highs still matter here",
+        "As long as this structure holds, sellers keep the edge",
       ],
     },
     BREAKOUT: {
       LONG: [
-        "The main thing now is whether price can hold after the push",
-        "If the break holds, the move can extend faster from here",
+        "Now it becomes a hold-or-fail situation after the break",
+        "If the breakout sticks, this can continue cleanly",
       ],
       SHORT: [
-        "The main thing now is whether price can hold after the push",
-        "If the break holds, the move can extend faster from here",
+        "Now it becomes a hold-or-fail situation after the break",
+        "If the breakdown sticks, this can continue cleanly",
       ],
     },
     REVERSAL: {
       LONG: [
         "It still needs follow-through, but the shift is visible",
-        "This gets better if buyers keep reclaiming the structure",
+        "This gets better if buyers keep reclaiming levels",
       ],
       SHORT: [
         "It still needs follow-through, but the shift is visible",
-        "This gets better if sellers keep reclaiming the structure",
+        "This gets better if sellers keep reclaiming levels",
       ],
     },
     MOMENTUM: {
       LONG: [
-        "The move still looks driven, not random",
-        "This works best if buyers keep the pressure on without stalling",
+        "This works best if buyers do not stall here",
+        "As long as pressure stays on, the move can keep going",
       ],
       SHORT: [
-        "The move still looks driven, not random",
-        "This works best if sellers keep the pressure on without stalling",
+        "This works best if sellers do not stall here",
+        "As long as pressure stays on, the move can keep going",
       ],
     },
   };
@@ -691,38 +691,44 @@ function getWhyContextPhrases({ setupType, side, strength, atrBucket, rsiBucket,
     ...(general[side] || []),
   ];
 
-  if (strength === "A+" || strength === "A") {
+  if (strength === "A+") {
     phrases = phrases.concat(
       side === "LONG"
         ? [
-            "This is one of the cleaner long profiles when follow-through appears",
-            "Quality is above average compared with the weaker setups",
+            "This is one of the cleaner long profiles",
+            "This is closer to the kind of long setup you actually want",
           ]
         : [
-            "This is one of the cleaner short profiles when follow-through appears",
-            "Quality is above average compared with the weaker setups",
+            "This is one of the cleaner short profiles",
+            "This is closer to the kind of short setup you actually want",
           ]
     );
   }
 
+  if (strength === "A") {
+    phrases = phrases.concat([
+      "Quality is good enough to pay attention here",
+    ]);
+  }
+
   if (atrBucket === "CONTROLLED" || atrBucket === "TIGHT") {
     phrases = phrases.concat([
-      "The candle structure is still controlled, which helps",
-      "The move is not overly chaotic yet, which is a positive",
+      "Volatility still looks controlled",
+      "The move is not getting messy yet",
     ]);
   }
 
   if (atrBucket === "EXPANDED") {
     phrases = phrases.concat([
-      "Candle expansion is wider now, so follow-through matters more",
-      "Volatility is broader here, so structure matters more than ever",
+      "Volatility is wider here, so follow-through matters",
+      "Candle expansion is bigger now, so price needs to confirm",
     ]);
   }
 
   if (major && (rsiBucket === "STEADY" || rsiBucket === "STRONG")) {
     phrases = phrases.concat([
-      "For a major, this still looks stable enough structurally",
-      "This has the steadier feel you want to see on majors",
+      "For a major, this still looks structurally stable",
+      "This has the steadier look you want on majors",
     ]);
   }
 
@@ -732,48 +738,48 @@ function getWhyContextPhrases({ setupType, side, strength, atrBucket, rsiBucket,
 function getWhyTailPhrases({ setupType, side, strength, rsiBucket }) {
   const base = {
     LONG: [
-      "If this structure stays intact, the upside is still there.",
-      "As long as buyers hold this shape, continuation makes sense.",
-      "The long idea stays valid while this structure keeps holding.",
-      "This remains attractive as long as price does not lose structure.",
+      "If price holds here, the upside is still there",
+      "As long as structure holds, this long still makes sense",
+      "The idea stays valid while buyers defend this area",
+      "This remains attractive as long as price does not lose shape",
     ],
     SHORT: [
-      "If this structure stays intact, the downside is still there.",
-      "As long as sellers hold this shape, continuation makes sense.",
-      "The short idea stays valid while this structure keeps holding.",
-      "This remains attractive as long as price does not lose structure.",
+      "If price holds here, the downside is still there",
+      "As long as structure holds, this short still makes sense",
+      "The idea stays valid while sellers defend this area",
+      "This remains attractive as long as price does not lose shape",
     ],
   };
 
   const setupTails = {
     BREAKOUT: {
       LONG: [
-        "The move improves a lot if price can hold after the break.",
-        "The next part depends on whether the breakout sticks.",
+        "The next step is simple: hold the breakout and continue",
+        "This gets stronger if the breakout starts acting like support",
       ],
       SHORT: [
-        "The move improves a lot if price can hold after the break.",
-        "The next part depends on whether the breakdown sticks.",
+        "The next step is simple: hold the breakdown and continue",
+        "This gets stronger if the breakdown starts acting like resistance",
       ],
     },
     REVERSAL: {
       LONG: [
-        "The setup gets better if buyers keep reclaiming levels.",
-        "This only gets stronger if the turn continues to build.",
+        "This needs continuation now, not hesitation",
+        "The reversal idea improves if price keeps reclaiming",
       ],
       SHORT: [
-        "The setup gets better if sellers keep reclaiming levels.",
-        "This only gets stronger if the turn continues to build.",
+        "This needs continuation now, not hesitation",
+        "The reversal idea improves if price keeps rolling over",
       ],
     },
     COMPRESSION: {
       LONG: [
-        "This can accelerate if the squeeze keeps releasing higher.",
-        "The best version of this move comes when expansion follows through.",
+        "If expansion follows through, this can accelerate",
+        "This gets interesting if the squeeze really opens up",
       ],
       SHORT: [
-        "This can accelerate if the squeeze keeps releasing lower.",
-        "The best version of this move comes when expansion follows through.",
+        "If expansion follows through, this can accelerate",
+        "This gets interesting if the squeeze really opens up lower",
       ],
     },
   };
@@ -783,38 +789,13 @@ function getWhyTailPhrases({ setupType, side, strength, rsiBucket }) {
     ...(base[side] || []),
   ];
 
-  if (strength === "A+") {
-    phrases = phrases.concat(
-      side === "LONG"
-        ? [
-            "This is close to the kind of long profile you actually want to pay attention to.",
-          ]
-        : [
-            "This is close to the kind of short profile you actually want to pay attention to.",
-          ]
-    );
-  }
-
   if (rsiBucket === "HOT") {
     phrases = phrases.concat([
-      "Momentum is already there, so now it becomes a follow-through question.",
+      "Momentum is already there, so now it is about follow-through",
     ]);
   }
 
   return phrases;
-}
-
-function cleanSentence(text) {
-  return String(text || "")
-    .replace(/\s+/g, " ")
-    .replace(/\s+\./g, ".")
-    .trim();
-}
-
-function ensurePeriod(text) {
-  const t = cleanSentence(text);
-  if (!t) return "";
-  return /[.!?]$/.test(t) ? t : `${t}.`;
 }
 
 function buildWhyLine({ symbol, side, setupType, strength, rsi, atrPct, eventTime, refId }) {
@@ -837,14 +818,15 @@ function buildWhyLine({ symbol, side, setupType, strength, rsi, atrPct, eventTim
     getWhyTailPhrases({ setupType, side, strength, rsiBucket })
   );
 
-  const why = [lead, context, tail]
-    .filter(Boolean)
-    .map((x) => ensurePeriod(x))
-    .join(" ");
+  const parts = [lead, context, tail].filter(Boolean);
+  let why = parts.join(". ");
+
+  if (why && !/[.!?]$/.test(why)) {
+    why += ".";
+  }
 
   return cleanSentence(why);
 }
-
 function cleanupState() {
   const now = Date.now();
   let changed = false;
