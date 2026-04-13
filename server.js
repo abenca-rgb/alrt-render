@@ -1872,6 +1872,21 @@ async function handleTradingViewWebhook(req, res) {
       return;
     }
 
+    console.log("TELEGRAM CONFIG CHECK:", {
+  hasBotToken: Boolean(BOT_TOKEN),
+  hasChatId: Boolean(CHAT_ID),
+  chatId: CHAT_ID ? String(CHAT_ID) : null,
+});
+    console.log("WEBHOOK RECEIVED:", {
+  symbol,
+  side,
+  eventType,
+  eventTime: prettyTime,
+  entryRaw,
+  tpRaw,
+  slRaw,
+});
+
     const chartLink = resolveChartLink(symbol);
 
     // ===== HANDLE EXPLICIT TP/SL HIT WEBHOOKS =====
@@ -2073,40 +2088,53 @@ async function handleTradingViewWebhook(req, res) {
       tpPct,
     });
 
-    const sendResult = await sendTelegramAlert({
-      text,
-      imageUrl: chartAssets.imageUrl,
-      imageBuffer: chartAssets.imageBuffer,
-      imageFilename: chartAssets.imageFilename,
-      fallbackChartLink: chartLink,
-    });
+    let tradeKey = null;
 
-    if (validLevels) {
-      const tradeKey = buildTradeKey(symbol, side, refId);
+if (validLevels) {
+  tradeKey = buildTradeKey(symbol, side, refId);
 
-      await upsertTrade(tradeKey, {
-        tradeKey,
-        refId,
-        symbol,
-        side,
-        entry: entryParsed,
-        tp: tpParsed,
-        sl: slParsed,
-        leverage,
-        createdAtMs: eventTimeMs,
-        hit: false,
-        hitType: null,
-        hitAtMs: null,
-        alertIds: candidateIds,
-        setupType,
-        strength,
-        rr,
-        chartLink,
-        chartImageUrl: chartAssets.imageUrl,
-      });
-    } else {
-      await persistState();
-    }
+  await upsertTrade(tradeKey, {
+    tradeKey,
+    refId,
+    symbol,
+    side,
+    entry: entryParsed,
+    tp: tpParsed,
+    sl: slParsed,
+    leverage,
+    createdAtMs: eventTimeMs,
+    hit: false,
+    hitType: null,
+    hitAtMs: null,
+    alertIds: candidateIds,
+    setupType,
+    strength,
+    rr,
+    chartLink,
+    chartImageUrl: chartAssets.imageUrl,
+  });
+} else {
+  await persistState();
+}
+
+let sendResult = { usedPhoto: false };
+
+try {
+  sendResult = await sendTelegramAlert({
+    text,
+    imageUrl: chartAssets.imageUrl,
+    imageBuffer: chartAssets.imageBuffer,
+    imageFilename: chartAssets.imageFilename,
+    fallbackChartLink: chartLink,
+  });
+} catch (err) {
+  console.error("TELEGRAM ALERT SEND FAILED:", {
+    symbol,
+    side,
+    refId,
+    error: err?.message || String(err),
+  });
+}
 
     console.log(`ALERT SENT: ${symbol} ${side} REF ${refId}`);
     console.log("ALERT DATA:", {
