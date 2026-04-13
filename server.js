@@ -26,7 +26,7 @@ const CHART_IMAGE_TEMPLATE = process.env.CHART_IMAGE_TEMPLATE || "";
 // ===== PATHS =====
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const DATA_DIR = process.env.RENDER_DISK_PATH || "/var/data";
+const DATA_DIR = process.env.RENDER_DISK_PATH || "/tmp/alrt-data";
 const STATE_FILE = path.join(DATA_DIR, "state.json");
 // ===== STATE =====
 const activeTrades = new Map();
