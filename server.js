@@ -473,6 +473,12 @@ function chooseVariant(seed, variants) {
   const index = stableHash(seed) % variants.length;
   return variants[index];
 }
+function cleanSentence(text) {
+  return String(text || "")
+    .replace(/\s+/g, " ")
+    .replace(/\s+\./g, ".")
+    .trim();
+}
 
 function getStrengthText(strength) {
   if (!strength) return "N/A";
@@ -1738,8 +1744,8 @@ app.get("/health", (req, res) => {
   });
 });
 
-// ===== WEBHOOK =====
-app.post("/webhook/tradingview", async (req, res) => {
+// ===== WEBHOOK HANDLER =====
+async function handleTradingViewWebhook(req, res) {
   const body = req.body || {};
   res.status(200).json({ ok: true });
 
@@ -2038,69 +2044,69 @@ app.post("/webhook/tradingview", async (req, res) => {
     });
 
     const whyLine = buildWhyLine({
-  symbol,
-  side,
-  setupType,
-  strength,
-  rsi,
-  atrPct,
-  eventTime,
-  refId,
-});
+      symbol,
+      side,
+      setupType,
+      strength,
+      rsi,
+      atrPct,
+      eventTime,
+      refId,
+    });
 
-const showChartLink = !chartAssets.imageUrl && !chartAssets.imageBuffer;
+    const showChartLink = !chartAssets.imageUrl && !chartAssets.imageBuffer;
 
-const text = buildAlertText({
-  symbol,
-  side,
-  entry: entryParsed,
-  tp: tpParsed,
-  sl: slParsed,
-  rr,
-  leverage,
-  strength,
-  prettyTime,
-  whyLine,
-  chartLink,
-  showChartLink,
-  refId,
-  tpPct,
-});
+    const text = buildAlertText({
+      symbol,
+      side,
+      entry: entryParsed,
+      tp: tpParsed,
+      sl: slParsed,
+      rr,
+      leverage,
+      strength,
+      prettyTime,
+      whyLine,
+      chartLink,
+      showChartLink,
+      refId,
+      tpPct,
+    });
 
-const sendResult = await sendTelegramAlert({
-  text,
-  imageUrl: chartAssets.imageUrl,
-  imageBuffer: chartAssets.imageBuffer,
-  imageFilename: chartAssets.imageFilename,
-  fallbackChartLink: chartLink,
-});
+    const sendResult = await sendTelegramAlert({
+      text,
+      imageUrl: chartAssets.imageUrl,
+      imageBuffer: chartAssets.imageBuffer,
+      imageFilename: chartAssets.imageFilename,
+      fallbackChartLink: chartLink,
+    });
 
-if (validLevels) {
-  const tradeKey = buildTradeKey(symbol, side, refId);
+    if (validLevels) {
+      const tradeKey = buildTradeKey(symbol, side, refId);
 
-  await upsertTrade(tradeKey, {
-    tradeKey,
-    refId,
-    symbol,
-    side,
-    entry: entryParsed,
-    tp: tpParsed,
-    sl: slParsed,
-    leverage,
-    createdAtMs: eventTimeMs,
-    hit: false,
-    hitType: null,
-    hitAtMs: null,
-    alertIds: candidateIds,
-    setupType,
-    strength,
-    rr,
-    chartLink,
-    chartImageUrl: chartAssets.imageUrl,
-  });
-} else {
-  await persistState();
-}
+      await upsertTrade(tradeKey, {
+        tradeKey,
+        refId,
+        symbol,
+        side,
+        entry: entryParsed,
+        tp: tpParsed,
+        sl: slParsed,
+        leverage,
+        createdAtMs: eventTimeMs,
+        hit: false,
+        hitType: null,
+        hitAtMs: null,
+        alertIds: candidateIds,
+        setupType,
+        strength,
+        rr,
+        chartLink,
+        chartImageUrl: chartAssets.imageUrl,
+      });
+    } else {
+      await persistState();
+    }
 
     console.log(`ALERT SENT: ${symbol} ${side} REF ${refId}`);
     console.log("ALERT DATA:", {
@@ -2139,8 +2145,11 @@ if (validLevels) {
   } catch (err) {
     console.error("ERROR:", err);
   }
-});
+}
 
+// accepteer beide webhook URLs
+app.post("/webhook", handleTradingViewWebhook);
+app.post("/webhook/tradingview", handleTradingViewWebhook);
 // ===== 404 =====
 app.use((req, res) => {
   res.status(404).json({ ok: false, error: "Not found" });
