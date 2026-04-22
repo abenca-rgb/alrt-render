@@ -28,6 +28,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const DATA_DIR = process.env.DATA_DIR || process.env.RENDER_DISK_PATH || "/tmp";
 const STATE_FILE = path.join(DATA_DIR, "state.json");
+
 // ===== STATE =====
 const activeTrades = new Map();
 const recentHitKeys = new Map();
@@ -473,6 +474,7 @@ function chooseVariant(seed, variants) {
   const index = stableHash(seed) % variants.length;
   return variants[index];
 }
+
 function cleanSentence(text) {
   return String(text || "")
     .replace(/\s+/g, " ")
@@ -833,6 +835,7 @@ function buildWhyLine({ symbol, side, setupType, strength, rsi, atrPct, eventTim
 
   return cleanSentence(why);
 }
+
 function cleanupState() {
   const now = Date.now();
   let changed = false;
@@ -920,6 +923,18 @@ function collectRawCandidateIds(body) {
   ]);
 }
 
+function collectSignalIds(body) {
+  return uniqueStrings([
+    pick(body.alert_id),
+    pick(body.signal_alert_id),
+    pick(body.parent_alert_id),
+    pick(body.source_alert_id),
+    pick(body.strategy_order_id),
+    pick(body.order_id),
+    pick(body.id),
+  ]);
+}
+
 function buildSyntheticIds({ symbol, side, eventTimeMs, refId }) {
   const ms = Number.isFinite(eventTimeMs) ? String(eventTimeMs) : "";
   const sec = Number.isFinite(eventTimeMs) ? String(Math.floor(eventTimeMs / 1000)) : "";
@@ -971,7 +986,11 @@ function findOpenTradeByCandidateIds(ids) {
   for (const [key, trade] of activeTrades.entries()) {
     if (trade.hit) continue;
 
-    const tradeIds = uniqueStrings(Array.isArray(trade.alertIds) ? trade.alertIds : []);
+    const tradeIds = uniqueStrings([
+      trade.primaryAlertId,
+      ...(Array.isArray(trade.alertIds) ? trade.alertIds : []),
+    ]);
+
     const matched = tradeIds.some((id) => wanted.includes(id));
 
     if (matched) {
@@ -1093,6 +1112,7 @@ function getOpenTradesForSymbol(symbol) {
       sl: trade.sl,
       createdAtMs: trade.createdAtMs,
       createdAtUtc: formatUtc(trade.createdAtMs),
+      primaryAlertId: trade.primaryAlertId || null,
       alertIds: uniqueStrings(trade.alertIds || []),
     });
   }
@@ -1294,6 +1314,7 @@ function buildHitText({
 
 <b>CHART</b> ${formatChartHtml(chartLink)}` : ""}`;
 }
+
 function appendChartLinkIfMissing(text, chartLink) {
   if (!chartLink || chartLink === "N/A") return text;
   if (String(text).includes("<b>CHART</b>")) return text;
@@ -1603,12 +1624,14 @@ async function buildChartDeliveryAssets({
   inlineBody = null,
 }) {
   const imageUrl = resolveChartImageUrl(inlineBody || {}, symbol, side, refId, req);
-console.log("CHART ASSET INPUT:", {
-  symbol,
-  side,
-  refId,
-  imageUrl,
-});
+
+  console.log("CHART ASSET INPUT:", {
+    symbol,
+    side,
+    refId,
+    imageUrl,
+  });
+
   if (!imageUrl) {
     return {
       imageUrl: null,
@@ -1743,7 +1766,6 @@ app.get("/health", (req, res) => {
     nextRef,
   });
 });
-
 // ===== WEBHOOK HANDLER =====
 async function handleTradingViewWebhook(req, res) {
   const body = req.body || {};
@@ -1867,36 +1889,41 @@ async function handleTradingViewWebhook(req, res) {
       refId: incomingRef || "",
     });
 
+    const signalIds = collectSignalIds(body);
+
     if (!BOT_TOKEN || !CHAT_ID) {
       console.error("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID");
       return;
     }
 
     console.log("TELEGRAM CONFIG CHECK:", {
-  hasBotToken: Boolean(BOT_TOKEN),
-  hasChatId: Boolean(CHAT_ID),
-  chatId: CHAT_ID ? String(CHAT_ID) : null,
-});
+      hasBotToken: Boolean(BOT_TOKEN),
+      hasChatId: Boolean(CHAT_ID),
+      chatId: CHAT_ID ? String(CHAT_ID) : null,
+    });
+
     console.log("WEBHOOK RECEIVED:", {
-  symbol,
-  side,
-  eventType,
-  eventTime: prettyTime,
-  entryRaw,
-  tpRaw,
-  slRaw,
-});
+      symbol,
+      side,
+      eventType,
+      eventTime: prettyTime,
+      entryRaw,
+      tpRaw,
+      slRaw,
+      incomingRef,
+      signalIds,
+      candidateIdsBase,
+    });
 
     const chartLink = resolveChartLink(symbol);
 
     // ===== HANDLE EXPLICIT TP/SL HIT WEBHOOKS =====
     if (explicitHitType && symbol) {
       let matched =
+        findOpenTradeByCandidateIds(signalIds) ||
         findTradeByRefId(incomingRef) ||
         findOpenTradeByCandidateIds(candidateIdsBase) ||
-        findBestOpenTradeByHitPrice(symbol, side, explicitHitType, currentPrice, eventTimeMs) ||
-        findLatestOpenTradeBySymbolAndSide(symbol, side) ||
-        findNearestOpenTradeBySymbolTime(symbol, eventTimeMs, side) ||
+        findBestOpenTradeByHitPrice(symbol, "N/A", explicitHitType, currentPrice, eventTimeMs) ||
         findLatestOpenTradeBySymbol(symbol);
 
       if (matched) {
@@ -1933,8 +1960,13 @@ async function handleTradingViewWebhook(req, res) {
         console.log(`EXPLICIT HIT SENT (${matched.matchType}): ${symbol} ${explicitHitType} REF ${matched.trade.refId}`, {
           incomingRef,
           tradeRef: matched.trade.refId,
+          primaryAlertId: matched.trade.primaryAlertId || null,
+          incomingSignalIds: signalIds,
           incomingIds: candidateIdsBase,
-          tradeIds: uniqueStrings(matched.trade.alertIds || []),
+          tradeIds: uniqueStrings([
+            matched.trade.primaryAlertId,
+            ...(matched.trade.alertIds || []),
+          ]),
           hitTimeUtc: formatUtc(eventTimeMs),
           tradeTimeUtc: formatUtc(matched.trade.createdAtMs),
           currentPrice,
@@ -1949,6 +1981,7 @@ async function handleTradingViewWebhook(req, res) {
         explicitHitType,
         incomingSide: side,
         incomingRef,
+        incomingSignalIds: signalIds,
         candidateIds: candidateIdsBase,
         eventTime,
         eventTimeUtc: formatUtc(eventTimeMs),
@@ -1992,6 +2025,11 @@ async function handleTradingViewWebhook(req, res) {
           tp: trade.tp,
           sl: trade.sl,
           side: trade.side,
+          primaryAlertId: trade.primaryAlertId || null,
+          tradeIds: uniqueStrings([
+            trade.primaryAlertId,
+            ...(trade.alertIds || []),
+          ]),
         });
 
         hitKeysToRemove.push(key);
@@ -2046,9 +2084,12 @@ async function handleTradingViewWebhook(req, res) {
     const refId = incomingRef || allocNextRef();
 
     const candidateIds = uniqueStrings([
+      ...signalIds,
       ...candidateIdsBase,
       refId,
     ]);
+
+    const primaryAlertId = signalIds[0] || candidateIds[0] || refId;
 
     const chartAssets = await buildChartDeliveryAssets({
       symbol,
@@ -2090,51 +2131,67 @@ async function handleTradingViewWebhook(req, res) {
 
     let tradeKey = null;
 
-if (validLevels) {
-  tradeKey = buildTradeKey(symbol, side, refId);
+    if (validLevels) {
+      tradeKey = buildTradeKey(symbol, side, refId);
 
-  await upsertTrade(tradeKey, {
-    tradeKey,
-    refId,
-    symbol,
-    side,
-    entry: entryParsed,
-    tp: tpParsed,
-    sl: slParsed,
-    leverage,
-    createdAtMs: eventTimeMs,
-    hit: false,
-    hitType: null,
-    hitAtMs: null,
-    alertIds: candidateIds,
-    setupType,
-    strength,
-    rr,
-    chartLink,
-    chartImageUrl: chartAssets.imageUrl,
-  });
-} else {
-  await persistState();
-}
+      await upsertTrade(tradeKey, {
+        tradeKey,
+        refId,
+        symbol,
+        side,
+        entry: entryParsed,
+        tp: tpParsed,
+        sl: slParsed,
+        leverage,
+        createdAtMs: eventTimeMs,
+        hit: false,
+        hitType: null,
+        hitAtMs: null,
+        primaryAlertId,
+        alertIds: uniqueStrings([
+          ...signalIds,
+          ...candidateIds,
+          refId,
+        ]),
+        setupType,
+        strength,
+        rr,
+        chartLink,
+        chartImageUrl: chartAssets.imageUrl,
+      });
 
-let sendResult = { usedPhoto: false };
+      console.log("SIGNAL STORED:", {
+        symbol,
+        side,
+        refId,
+        primaryAlertId,
+        signalIds,
+        candidateIds,
+        activeTrades: activeTrades.size,
+        createdAtUtc: formatUtc(eventTimeMs),
+      });
+    } else {
+      await persistState();
+    }
 
-try {
-  sendResult = await sendTelegramAlert({
-    text,
-    imageUrl: chartAssets.imageUrl,
-    imageBuffer: chartAssets.imageBuffer,
-    imageFilename: chartAssets.imageFilename,
-    fallbackChartLink: chartLink,
-  });
-} catch (err) {
-  console.error("TELEGRAM ALERT SEND FAILED:", {
-    symbol,
-    side,
-    refId,
-    error: err?.message || String(err),
-  });
-}
+    let sendResult = { usedPhoto: false };
+
+    try {
+      sendResult = await sendTelegramAlert({
+        text,
+        imageUrl: chartAssets.imageUrl,
+        imageBuffer: chartAssets.imageBuffer,
+        imageFilename: chartAssets.imageFilename,
+        fallbackChartLink: chartLink,
+      });
+    } catch (err) {
+      console.error("TELEGRAM ALERT SEND FAILED:", {
+        symbol,
+        side,
+        refId,
+        error: err?.message || String(err),
+      });
+    }
 
     console.log(`ALERT SENT: ${symbol} ${side} REF ${refId}`);
     console.log("ALERT DATA:", {
@@ -2149,6 +2206,7 @@ try {
       strength,
       time: prettyTime,
       refId,
+      primaryAlertId,
       imageUsed: sendResult.usedPhoto,
       chartImageUrl: chartAssets.imageUrl,
       chartBufferBuilt: Boolean(chartAssets.imageBuffer),
@@ -2156,6 +2214,7 @@ try {
       storedForHits: validLevels,
       activeTrades: activeTrades.size,
       eventType,
+      signalIds,
       candidateIds,
       setupType,
       usedDynamicLevels: !validIncomingLevels && validLevels,
@@ -2178,6 +2237,7 @@ try {
 // accepteer beide webhook URLs
 app.post("/webhook", handleTradingViewWebhook);
 app.post("/webhook/tradingview", handleTradingViewWebhook);
+
 // ===== 404 =====
 app.use((req, res) => {
   res.status(404).json({ ok: false, error: "Not found" });
