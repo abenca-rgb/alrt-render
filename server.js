@@ -11,6 +11,7 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// ===== CONFIG =====
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const FREE_CHAT_ID = process.env.FREE_TELEGRAM_CHAT_ID || "";
@@ -18,14 +19,22 @@ const FREE_CHAT_ID = process.env.FREE_TELEGRAM_CHAT_ID || "";
 const APP_BASE_URL = (process.env.APP_BASE_URL || "").replace(/\/+$/, "");
 const CHART_IMAGE_TEMPLATE = process.env.CHART_IMAGE_TEMPLATE || "";
 
+// Daily summary settings
+const DAILY_SUMMARY_ENABLED = String(process.env.DAILY_SUMMARY_ENABLED || "true").toLowerCase() !== "false";
+const DAILY_SUMMARY_UTC_HOUR = Number(process.env.DAILY_SUMMARY_UTC_HOUR || 23);
+const DAILY_SUMMARY_UTC_MINUTE = Number(process.env.DAILY_SUMMARY_UTC_MINUTE || 59);
+
+// ===== PATHS =====
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const DATA_DIR = process.env.RENDER_DISK_PATH || "/var/data";
 const STATE_FILE = path.join(DATA_DIR, "state.json");
 
+// ===== STATE =====
 const activeTrades = new Map();
 const recentHitKeys = new Map();
 const freeSharedRefs = new Map();
+const dailyStats = new Map();
 
 const MAX_TRADE_AGE_MS = 24 * 60 * 60 * 1000;
 const HIT_DEDUP_TTL_MS = 36 * 60 * 60 * 1000;
@@ -36,9 +45,11 @@ let nextRef = 100000;
 let savePromise = Promise.resolve();
 let freePostDate = "";
 let freePostsToday = 0;
+let lastSummarySentDate = "";
 
 app.use(express.json({ limit: "2mb" }));
 
+// ===== CHART LINKS =====
 const CHARTS = {
   BTCUSDT: "https://www.tradingview.com/chart/?symbol=BINANCE:BTCUSDT",
   ETHUSDT: "https://www.tradingview.com/chart/?symbol=BINANCE:ETHUSDT",
@@ -58,6 +69,7 @@ const CHARTS = {
 
 const CHART_IMAGES = {};
 
+// ===== BASIC HELPERS =====
 function pick(...values) {
   for (const v of values) {
     if (v !== undefined && v !== null && String(v).trim() !== "") return v;
@@ -135,6 +147,7 @@ function normalizeSetupType(v) {
 
 function formatUtc(ts) {
   let d;
+
   if (ts === null || ts === undefined || ts === "") {
     d = new Date();
   } else {
@@ -238,6 +251,7 @@ function isMajorSymbol(symbol) {
   return ["BTCUSDT", "ETHUSDT"].includes(symbol);
 }
 
+// ===== TRADE MATH =====
 function hasValidTradeLevels(side, entry, tp, sl) {
   const e = parseNum(entry);
   const t = parseNum(tp);
@@ -257,7 +271,6 @@ function pctMove(side, entry, price) {
   const p = parseNum(price);
 
   if (!Number.isFinite(e) || !Number.isFinite(p) || e <= 0) return null;
-
   if (side === "LONG") return ((p - e) / e) * 100;
   if (side === "SHORT") return ((e - p) / e) * 100;
 
@@ -269,7 +282,6 @@ function tpPctFromLevels(side, entry, tp) {
   const t = parseNum(tp);
 
   if (!Number.isFinite(e) || !Number.isFinite(t) || e <= 0) return null;
-
   if (side === "LONG") return ((t - e) / e) * 100;
   if (side === "SHORT") return ((e - t) / e) * 100;
 
@@ -298,6 +310,7 @@ function rrFromLevels(side, entry, tp, sl) {
   return reward / risk;
 }
 
+// ===== QUALITY / PROMPT STRATEGY HELPERS =====
 function getStrengthBucket({ symbol, side, rsi, atrPct, score, risk }) {
   const numericScore = parseNum(score);
   const numericRisk = parseNum(risk);
@@ -572,7 +585,6 @@ function buildWhyLine({ symbol, side, setupType, strength, rsi, atrPct, eventTim
 }
 function resetFreeCounterIfNeeded(nowMs = Date.now()) {
   const today = getUtcDateKey(nowMs);
-
   if (freePostDate !== today) {
     freePostDate = today;
     freePostsToday = 0;
@@ -606,12 +618,145 @@ function wasSharedToFree(refId) {
   return freeSharedRefs.has(String(refId));
 }
 
+function getDailyStat(dateKey = getUtcDateKey(Date.now())) {
+  if (!dailyStats.has(dateKey)) {
+    dailyStats.set(dateKey, {
+      date: dateKey,
+      alerts: 0,
+      tp: 0,
+      sl: 0,
+      expired: 0,
+      freeAlerts: 0,
+      bySymbol: {},
+      byRef: {},
+    });
+  }
+
+  return dailyStats.get(dateKey);
+}
+
+function ensureSymbolStats(stat, symbol) {
+  if (!stat.bySymbol[symbol]) {
+    stat.bySymbol[symbol] = {
+      alerts: 0,
+      tp: 0,
+      sl: 0,
+      expired: 0,
+    };
+  }
+
+  return stat.bySymbol[symbol];
+}
+
+async function recordSignalStat({ refId, symbol, side, strength, setupType, entry, tp, sl, rr, sharedToFree, ts = Date.now() }) {
+  const dateKey = getUtcDateKey(ts);
+  const stat = getDailyStat(dateKey);
+  const symbolStat = ensureSymbolStats(stat, symbol);
+
+  stat.alerts += 1;
+  symbolStat.alerts += 1;
+
+  if (sharedToFree) {
+    stat.freeAlerts += 1;
+  }
+
+  stat.byRef[String(refId)] = {
+    refId: String(refId),
+    symbol,
+    side,
+    strength,
+    setupType,
+    entry,
+    tp,
+    sl,
+    rr,
+    sharedToFree: Boolean(sharedToFree),
+    openedAtMs: ts,
+    openedAtUtc: formatUtc(ts),
+    result: "OPEN",
+    closedAtMs: null,
+    closedAtUtc: null,
+  };
+
+  await persistState();
+}
+
+async function recordHitStat({ refId, symbol, hitType, ts = Date.now() }) {
+  const todayKey = getUtcDateKey(ts);
+  let stat = getDailyStat(todayKey);
+
+  let item = stat.byRef[String(refId)];
+
+  if (!item) {
+    for (const [, dayStat] of dailyStats.entries()) {
+      const found = dayStat?.byRef?.[String(refId)];
+      if (found) {
+        stat = dayStat;
+        item = found;
+        break;
+      }
+    }
+  }
+
+  const symbolStat = ensureSymbolStats(stat, symbol);
+
+  if (hitType === "TP") {
+    stat.tp += 1;
+    symbolStat.tp += 1;
+  }
+
+  if (hitType === "SL") {
+    stat.sl += 1;
+    symbolStat.sl += 1;
+  }
+
+  if (item) {
+    item.result = hitType;
+    item.closedAtMs = ts;
+    item.closedAtUtc = formatUtc(ts);
+  }
+
+  await persistState();
+}
+
+async function recordExpiredTrade(trade, ts = Date.now()) {
+  const todayKey = getUtcDateKey(ts);
+  let stat = getDailyStat(todayKey);
+
+  let item = stat.byRef[String(trade.refId)];
+
+  if (!item) {
+    for (const [, dayStat] of dailyStats.entries()) {
+      const found = dayStat?.byRef?.[String(trade.refId)];
+      if (found) {
+        stat = dayStat;
+        item = found;
+        break;
+      }
+    }
+  }
+
+  const symbolStat = ensureSymbolStats(stat, trade.symbol);
+
+  stat.expired += 1;
+  symbolStat.expired += 1;
+
+  if (item) {
+    item.result = "EXPIRED";
+    item.closedAtMs = ts;
+    item.closedAtUtc = formatUtc(ts);
+  }
+
+  await persistState();
+}
+
 function cleanupState() {
   const now = Date.now();
   let changed = false;
 
   for (const [key, trade] of activeTrades.entries()) {
     if (!trade?.createdAtMs || now - trade.createdAtMs > MAX_TRADE_AGE_MS) {
+      void recordExpiredTrade(trade, now);
       activeTrades.delete(key);
       changed = true;
     }
@@ -631,14 +776,16 @@ function cleanupState() {
     }
   }
 
-  const beforeDate = freePostDate;
-  const beforeCount = freePostsToday;
+  const keepAfterMs = now - 10 * 24 * 60 * 60 * 1000;
+  for (const [dateKey, stat] of dailyStats.entries()) {
+    const statDateMs = Date.parse(`${dateKey}T00:00:00Z`);
+    if (Number.isFinite(statDateMs) && statDateMs < keepAfterMs) {
+      dailyStats.delete(dateKey);
+      changed = true;
+    }
+  }
 
   resetFreeCounterIfNeeded(now);
-
-  if (beforeDate !== freePostDate || beforeCount !== freePostsToday) {
-    changed = true;
-  }
 
   if (changed) {
     void persistState();
@@ -756,7 +903,6 @@ function findTradeByRefId(refId) {
 
 function findOpenTradeByCandidateIds(ids) {
   const wanted = uniqueStrings(ids);
-
   if (wanted.length === 0) return null;
 
   for (const [key, trade] of activeTrades.entries()) {
@@ -833,7 +979,6 @@ function levelDistancePct(expected, actual) {
   const a = parseNum(actual);
 
   if (!Number.isFinite(e) || !Number.isFinite(a) || e <= 0) return null;
-
   return Math.abs((a - e) / e) * 100;
 }
 
@@ -849,7 +994,6 @@ function findBestOpenTradeByHitPrice(symbol, side, hitType, currentPrice, eventT
 
     const expected = hitType === "TP" ? trade.tp : trade.sl;
     const distPct = levelDistancePct(expected, currentPrice);
-
     if (!Number.isFinite(distPct)) continue;
 
     const timeDiff = Math.abs((trade.createdAtMs || 0) - eventTimeMs);
@@ -894,7 +1038,6 @@ function getOpenTradesForSymbol(symbol) {
   }
 
   items.sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0));
-
   return items;
 }
 
@@ -1115,6 +1258,73 @@ function appendChartLinkIfMissing(text, chartLink) {
 <b>CHART</b> ${formatChartHtml(chartLink)}`;
 }
 
+function buildDailySummaryText(dateKey) {
+  const stat = getDailyStat(dateKey);
+  const closed = stat.tp + stat.sl;
+  const winrate = closed > 0 ? (stat.tp / closed) * 100 : null;
+  const openCount = Array.from(activeTrades.values()).filter((t) => !t.hit).length;
+
+  const symbols = Object.entries(stat.bySymbol || {})
+    .sort((a, b) => (b[1].alerts || 0) - (a[1].alerts || 0))
+    .slice(0, 8)
+    .map(([symbol, s]) => {
+      return `${symbol}: ${s.alerts || 0} alerts | TP ${s.tp || 0} | SL ${s.sl || 0} | EXP ${s.expired || 0}`;
+    });
+
+  return `📊 <b>D-ALRT DAILY OVERVIEW</b>
+<b>UTC DATE</b> ${escapeHtml(dateKey)}
+
+<b>ALERTS</b> ${stat.alerts}
+<b>TP HITS</b> ${stat.tp}
+<b>SL HITS</b> ${stat.sl}
+<b>EXPIRED</b> ${stat.expired}
+<b>WINRATE</b> ${closed > 0 ? escapeHtml(fmtPct(winrate)) : "N/A"}
+<b>OPEN TRADES</b> ${openCount}
+
+<b>FREE POSTS</b> ${stat.freeAlerts}/${FREE_DAILY_LIMIT}
+
+${symbols.length ? `<b>BY SYMBOL</b>\n${escapeHtml(symbols.join("\n"))}` : "<b>BY SYMBOL</b>\nN/A"}
+
+NFA`;
+}
+
+async function sendDailySummary(dateKey, force = false) {
+  if (!DAILY_SUMMARY_ENABLED && !force) return false;
+  if (!force && lastSummarySentDate === dateKey) return false;
+
+  const text = buildDailySummaryText(dateKey);
+
+  await sendTelegramMessage(text, CHAT_ID);
+
+  if (FREE_CHAT_ID) {
+    await sendTelegramMessage(text, FREE_CHAT_ID);
+  }
+
+  lastSummarySentDate = dateKey;
+  await persistState();
+
+  console.log("DAILY SUMMARY SENT:", {
+    dateKey,
+    force,
+    lastSummarySentDate,
+  });
+
+  return true;
+}
+
+async function maybeSendDailySummary() {
+  if (!DAILY_SUMMARY_ENABLED) return;
+
+  const now = new Date();
+  const hour = now.getUTCHours();
+  const minute = now.getUTCMinutes();
+
+  if (hour !== DAILY_SUMMARY_UTC_HOUR || minute !== DAILY_SUMMARY_UTC_MINUTE) return;
+
+  const dateKey = getUtcDateKey(Date.now());
+  await sendDailySummary(dateKey, false);
+}
+
 async function ensureDataDir() {
   await fs.mkdir(DATA_DIR, { recursive: true });
 }
@@ -1132,6 +1342,8 @@ async function persistState() {
         freePostDate,
         freePostsToday,
         freeSharedRefs: Array.from(freeSharedRefs.entries()).map(([refId, info]) => [refId, info]),
+        dailyStats: Array.from(dailyStats.entries()).map(([dateKey, stat]) => [dateKey, stat]),
+        lastSummarySentDate,
       };
 
       await fs.writeFile(STATE_FILE, JSON.stringify(payload, null, 2), "utf8");
@@ -1153,21 +1365,16 @@ async function loadState() {
     const active = Array.isArray(parsed?.activeTrades) ? parsed.activeTrades : [];
     const hits = Array.isArray(parsed?.recentHitKeys) ? parsed.recentHitKeys : [];
     const freeRefs = Array.isArray(parsed?.freeSharedRefs) ? parsed.freeSharedRefs : [];
+    const stats = Array.isArray(parsed?.dailyStats) ? parsed.dailyStats : [];
     const now = Date.now();
 
     if (Number.isFinite(Number(parsed?.nextRef))) {
       nextRef = Math.max(100000, Math.min(999999, Number(parsed.nextRef)));
     }
 
-    freePostDate =
-      typeof parsed?.freePostDate === "string"
-        ? parsed.freePostDate
-        : getUtcDateKey(now);
-
-    freePostsToday =
-      Number.isFinite(Number(parsed?.freePostsToday))
-        ? Math.max(0, Number(parsed.freePostsToday))
-        : 0;
+    freePostDate = typeof parsed?.freePostDate === "string" ? parsed.freePostDate : getUtcDateKey(now);
+    freePostsToday = Number.isFinite(Number(parsed?.freePostsToday)) ? Math.max(0, Number(parsed.freePostsToday)) : 0;
+    lastSummarySentDate = typeof parsed?.lastSummarySentDate === "string" ? parsed.lastSummarySentDate : "";
 
     resetFreeCounterIfNeeded(now);
 
@@ -1205,16 +1412,31 @@ async function loadState() {
       freeSharedRefs.set(String(refId), info);
     }
 
+    for (const item of stats) {
+      if (!Array.isArray(item) || item.length !== 2) continue;
+
+      const [dateKey, stat] = item;
+      if (!dateKey || !stat || typeof stat !== "object") continue;
+
+      dailyStats.set(String(dateKey), stat);
+    }
+
+    getDailyStat(getUtcDateKey(now));
+
     console.log(`Loaded ${activeTrades.size} active trades from disk`);
     console.log(`Loaded ${recentHitKeys.size} recent hit keys from disk`);
     console.log(`Loaded ${freeSharedRefs.size} free shared refs from disk`);
+    console.log(`Loaded ${dailyStats.size} daily stat days from disk`);
     console.log(`Loaded free counter ${freePostsToday}/${FREE_DAILY_LIMIT} for ${freePostDate}`);
     console.log(`Loaded nextRef ${nextRef}`);
+    console.log(`Loaded lastSummarySentDate ${lastSummarySentDate || "none"}`);
   } catch (err) {
     if (err.code === "ENOENT") {
       console.log("No state.json found yet, starting clean");
       freePostDate = getUtcDateKey(Date.now());
       freePostsToday = 0;
+      lastSummarySentDate = "";
+      getDailyStat(freePostDate);
       return;
     }
 
@@ -1377,7 +1599,6 @@ async function sendTelegramMessage(text, chatId = CHAT_ID) {
     throw new Error(`Telegram sendMessage failed: ${JSON.stringify(data)}`);
   }
 }
-
 async function sendTelegramPhoto({
   photoUrl = null,
   photoBuffer = null,
@@ -1448,7 +1669,6 @@ async function sendTelegramAlert({
       console.error("PHOTO SEND FAILED, FALLING BACK TO MESSAGE:", err.message);
 
       const fallbackText = appendChartLinkIfMissing(text, fallbackChartLink);
-
       await sendTelegramMessage(fallbackText, chatId);
 
       return { usedPhoto: false, photoFailed: true };
@@ -1456,7 +1676,6 @@ async function sendTelegramAlert({
   }
 
   const fallbackText = appendChartLinkIfMissing(text, fallbackChartLink);
-
   await sendTelegramMessage(fallbackText, chatId);
 
   return { usedPhoto: false };
@@ -1625,7 +1844,23 @@ app.get("/health", (req, res) => {
     freePostsToday,
     freeDailyLimit: FREE_DAILY_LIMIT,
     freeSharedRefs: freeSharedRefs.size,
+    dailyStatsDays: dailyStats.size,
+    lastSummarySentDate,
+    dailySummaryEnabled: DAILY_SUMMARY_ENABLED,
+    dailySummaryUtcHour: DAILY_SUMMARY_UTC_HOUR,
+    dailySummaryUtcMinute: DAILY_SUMMARY_UTC_MINUTE,
   });
+});
+
+app.post("/summary/send-now", async (req, res) => {
+  res.status(200).json({ ok: true, message: "summary send requested" });
+
+  try {
+    const dateKey = getUtcDateKey(Date.now());
+    await sendDailySummary(dateKey, true);
+  } catch (err) {
+    console.error("MANUAL SUMMARY ERROR:", err);
+  }
 });
 
 async function handleTradingViewWebhook(req, res) {
@@ -1733,7 +1968,6 @@ async function handleTradingViewWebhook(req, res) {
 
     if (!validIncomingLevels && Number.isFinite(entryParsed) && (side === "LONG" || side === "SHORT")) {
       const derived = applyProfileLevels(side, entryParsed, profile.tpPct, profile.slPct);
-
       tpParsed = derived.tp;
       slParsed = derived.sl;
     }
@@ -1784,7 +2018,6 @@ async function handleTradingViewWebhook(req, res) {
             refId: matched.trade.refId,
             eventTime,
           });
-
           return;
         }
 
@@ -1820,6 +2053,13 @@ async function handleTradingViewWebhook(req, res) {
           }
         }
 
+        await recordHitStat({
+          refId: matched.trade.refId,
+          symbol: matched.trade.symbol,
+          hitType: explicitHitType,
+          ts: receivedAtMs,
+        });
+
         await markRecentHit(hitKey);
 
         console.log(`EXPLICIT HIT SENT (${matched.matchType}): ${symbol} ${explicitHitType} REF ${matched.trade.refId}`, {
@@ -1831,7 +2071,6 @@ async function handleTradingViewWebhook(req, res) {
         });
 
         await removeTrade(matched.key);
-
         return;
       }
 
@@ -1860,11 +2099,9 @@ async function handleTradingViewWebhook(req, res) {
         if (trade.hit) continue;
 
         const inferredHit = shouldInferHit(trade, currentPrice);
-
         if (!inferredHit) continue;
 
         const inferredHitKey = `${symbol}|${trade.refId}|${inferredHit}|${Math.floor(receivedAtMs / 60000)}`;
-
         if (wasRecentHitSent(inferredHitKey)) continue;
 
         trade.hit = true;
@@ -1899,6 +2136,13 @@ async function handleTradingViewWebhook(req, res) {
           }
         }
 
+        await recordHitStat({
+          refId: trade.refId,
+          symbol: trade.symbol,
+          hitType: inferredHit,
+          ts: receivedAtMs,
+        });
+
         await markRecentHit(inferredHitKey);
 
         console.log(`INFERRED HIT SENT: ${symbol} ${inferredHit} REF ${trade.refId}`, {
@@ -1925,7 +2169,6 @@ async function handleTradingViewWebhook(req, res) {
         side,
         eventType,
       });
-
       return;
     }
 
@@ -1955,7 +2198,6 @@ async function handleTradingViewWebhook(req, res) {
         eventType,
         time: prettyTime,
       });
-
       return;
     }
 
@@ -2013,33 +2255,7 @@ async function handleTradingViewWebhook(req, res) {
       chatId: CHAT_ID,
     });
 
-    if (validLevels) {
-      const tradeKey = buildTradeKey(symbol, side, refId);
-
-      await upsertTrade(tradeKey, {
-        tradeKey,
-        refId,
-        symbol,
-        side,
-        entry: entryParsed,
-        tp: tpParsed,
-        sl: slParsed,
-        leverage,
-        createdAtMs: receivedAtMs,
-        hit: false,
-        hitType: null,
-        hitAtMs: null,
-        alertIds: candidateIds,
-        setupType,
-        strength,
-        rr,
-        chartLink,
-        chartImageUrl: chartAssets.imageUrl,
-        postedUtc: prettyTime,
-      });
-    } else {
-      await persistState();
-    }
+    let sharedToFree = false;
 
     if (validLevels && canSendFreeSignal(receivedAtMs)) {
       try {
@@ -2058,6 +2274,8 @@ async function handleTradingViewWebhook(req, res) {
           side,
           sharedAtMs: receivedAtMs,
         });
+
+        sharedToFree = true;
 
         console.log(`FREE SIGNAL SENT: ${symbol} ${side} REF ${refId}`, {
           freePostsToday,
@@ -2086,6 +2304,48 @@ async function handleTradingViewWebhook(req, res) {
         freeDailyLimit: FREE_DAILY_LIMIT,
         freePostDate,
       });
+    }
+
+    if (validLevels) {
+      const tradeKey = buildTradeKey(symbol, side, refId);
+
+      await upsertTrade(tradeKey, {
+        tradeKey,
+        refId,
+        symbol,
+        side,
+        entry: entryParsed,
+        tp: tpParsed,
+        sl: slParsed,
+        leverage,
+        createdAtMs: receivedAtMs,
+        hit: false,
+        hitType: null,
+        hitAtMs: null,
+        alertIds: candidateIds,
+        setupType,
+        strength,
+        rr,
+        chartLink,
+        chartImageUrl: chartAssets.imageUrl,
+        postedUtc: prettyTime,
+      });
+
+      await recordSignalStat({
+        refId,
+        symbol,
+        side,
+        strength,
+        setupType,
+        entry: entryParsed,
+        tp: tpParsed,
+        sl: slParsed,
+        rr,
+        sharedToFree,
+        ts: receivedAtMs,
+      });
+    } else {
+      await persistState();
     }
 
     console.log(`ALERT SENT: ${symbol} ${side} REF ${refId}`);
@@ -2117,15 +2377,8 @@ async function handleTradingViewWebhook(req, res) {
       freeEnabled: Boolean(FREE_CHAT_ID),
       freePostsToday,
       freePostDate,
+      sharedToFree,
     });
-
-    if (!chartAssets.imageUrl && !chartAssets.imageBuffer) {
-      console.log("NO DIRECT CHART IMAGE AVAILABLE FOR THIS ALERT:", {
-        symbol,
-        refId,
-        chartLink,
-      });
-    }
   } catch (err) {
     console.error("ERROR:", err);
   }
@@ -2154,6 +2407,18 @@ async function startServer() {
     freeDailyLimit: FREE_DAILY_LIMIT,
     freeSharedRefs: freeSharedRefs.size,
   });
+  console.log("DAILY SUMMARY:", {
+    enabled: DAILY_SUMMARY_ENABLED,
+    utcHour: DAILY_SUMMARY_UTC_HOUR,
+    utcMinute: DAILY_SUMMARY_UTC_MINUTE,
+    lastSummarySentDate,
+  });
+
+  setInterval(() => {
+    maybeSendDailySummary().catch((err) => {
+      console.error("DAILY SUMMARY INTERVAL ERROR:", err);
+    });
+  }, 30 * 1000);
 
   app.listen(PORT, () => {
     console.log(`ALRT-Render running on port ${PORT}`);
