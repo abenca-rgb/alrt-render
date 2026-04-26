@@ -40,6 +40,7 @@ const MAX_TRADE_AGE_MS = 24 * 60 * 60 * 1000;
 const HIT_DEDUP_TTL_MS = 36 * 60 * 60 * 1000;
 const FREE_REF_TTL_MS = 48 * 60 * 60 * 1000;
 const FREE_DAILY_LIMIT = 2;
+const MIN_RR_TO_SEND = 1.8;
 
 let nextRef = 100000;
 let savePromise = Promise.resolve();
@@ -1039,6 +1040,15 @@ function getOpenTradesForSymbol(symbol) {
 
   items.sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0));
   return items;
+}
+function hasOpenTradeForSymbol(symbol) {
+  for (const [, trade] of activeTrades.entries()) {
+    if (!trade) continue;
+    if (trade.hit) continue;
+    if (trade.symbol === symbol) return true;
+  }
+
+  return false;
 }
 
 function shouldInferHit(trade, currentPrice) {
@@ -2200,6 +2210,38 @@ async function handleTradingViewWebhook(req, res) {
       });
       return;
     }
+    if (hasOpenTradeForSymbol(symbol)) {
+  console.log("SIGNAL SKIPPED BY OPEN TRADE FILTER:", {
+    reason: "open_trade_already_exists_for_symbol",
+    symbol,
+    side,
+    entry: fmtPrice(entryParsed),
+    tp: fmtPrice(tpParsed),
+    sl: fmtPrice(slParsed),
+    rr: fmtRR(rr),
+    eventType,
+    time: prettyTime,
+  });
+
+  return;
+}
+
+if (!Number.isFinite(rr) || rr < MIN_RR_TO_SEND) {
+  console.log("SIGNAL SKIPPED BY MIN RR FILTER:", {
+    reason: "rr_too_low",
+    minRequired: MIN_RR_TO_SEND,
+    symbol,
+    side,
+    entry: fmtPrice(entryParsed),
+    tp: fmtPrice(tpParsed),
+    sl: fmtPrice(slParsed),
+    rr: fmtRR(rr),
+    eventType,
+    time: prettyTime,
+  });
+
+  return;
+}
 
     const refId = incomingRef || allocNextRef();
 
