@@ -14,34 +14,51 @@ const PORT = process.env.PORT || 3000;
 // ===== CONFIG =====
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+const FREE_CHAT_ID = process.env.FREE_TELEGRAM_CHAT_ID || "";
 
-// Zet dit in Render op je eigen service URL, bijvoorbeeld:
-// https://alrt-render.onrender.com
 const APP_BASE_URL = (process.env.APP_BASE_URL || "").replace(/\/+$/, "");
-
-// Optional:
-// CHART_IMAGE_TEMPLATE=https://your-domain.com/charts/{symbol}.png
 const CHART_IMAGE_TEMPLATE = process.env.CHART_IMAGE_TEMPLATE || "";
+
+// Daily summary settings
+const DAILY_SUMMARY_ENABLED =
+  String(process.env.DAILY_SUMMARY_ENABLED || "true").toLowerCase() !== "false";
+const DAILY_SUMMARY_UTC_HOUR = Number(process.env.DAILY_SUMMARY_UTC_HOUR || 23);
+const DAILY_SUMMARY_UTC_MINUTE = Number(process.env.DAILY_SUMMARY_UTC_MINUTE || 59);
 
 // ===== PATHS =====
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const DATA_DIR = process.env.DATA_DIR || process.env.RENDER_DISK_PATH || "/tmp";
+
+// IMPORTANT:
+// Voor staging mag /tmp, maar beter is een Render disk.
+// Als je staging refs/state wil bewaren na deploys, zet RENDER_DISK_PATH goed.
+const DATA_DIR = process.env.RENDER_DISK_PATH || process.env.DATA_DIR || "/tmp";
 const STATE_FILE = path.join(DATA_DIR, "state.json");
 
 // ===== STATE =====
 const activeTrades = new Map();
 const recentHitKeys = new Map();
+const freeSharedRefs = new Map();
+const dailyStats = new Map();
 
 const MAX_TRADE_AGE_MS = 24 * 60 * 60 * 1000;
 const HIT_DEDUP_TTL_MS = 36 * 60 * 60 * 1000;
+const FREE_REF_TTL_MS = 48 * 60 * 60 * 1000;
+const FREE_DAILY_LIMIT = 2;
+
+// HARD QUALITY FILTERS
+const MIN_RR_TO_SEND = Number(process.env.MIN_RR_TO_SEND || 1.8);
+const MAX_OPEN_TRADES_PER_SYMBOL = 1;
 
 let nextRef = 100000;
 let savePromise = Promise.resolve();
+let freePostDate = "";
+let freePostsToday = 0;
+let lastSummarySentDate = "";
 
 app.use(express.json({ limit: "2mb" }));
 
-// ===== CHART PAGE LINKS =====
+// ===== CHART LINKS =====
 const CHARTS = {
   BTCUSDT: "https://www.tradingview.com/chart/?symbol=BINANCE:BTCUSDT",
   ETHUSDT: "https://www.tradingview.com/chart/?symbol=BINANCE:ETHUSDT",
@@ -59,18 +76,12 @@ const CHARTS = {
   SHIBUSDT: "https://www.tradingview.com/chart/?symbol=BINANCE:SHIBUSDT",
 };
 
-// ===== OPTIONAL DIRECT IMAGE LINKS =====
-const CHART_IMAGES = {
-  // BTCUSDT: "https://your-domain.com/charts/BTCUSDT.png",
-  // ETHUSDT: "https://your-domain.com/charts/ETHUSDT.png",
-};
+const CHART_IMAGES = {};
 
-// ===== HELPERS =====
+// ===== BASIC HELPERS =====
 function pick(...values) {
   for (const v of values) {
-    if (v !== undefined && v !== null && String(v).trim() !== "") {
-      return v;
-    }
+    if (v !== undefined && v !== null && String(v).trim() !== "") return v;
   }
   return null;
 }
@@ -87,10 +98,8 @@ function parseNum(v) {
 
 function fmtPrice(v) {
   if (v === null || v === undefined || v === "") return "N/A";
-
   const n = Number(v);
   if (!Number.isFinite(n)) return String(v);
-
   if (n >= 1000) return n.toFixed(2);
   if (n >= 1) return n.toFixed(4);
   if (n >= 0.01) return n.toFixed(5);
@@ -130,17 +139,12 @@ function normalizeSide(v) {
 }
 
 function normalizeEventType(v) {
-  return String(v || "")
-    .toLowerCase()
-    .trim()
-    .replace(/\s+/g, "_");
+  return String(v || "").toLowerCase().trim().replace(/\s+/g, "_");
 }
 
 function normalizeSetupType(v) {
   const x = String(v || "").toLowerCase().trim();
-
   if (!x) return "";
-
   if (x.includes("break")) return "BREAKOUT";
   if (x.includes("pull")) return "PULLBACK";
   if (x.includes("trend")) return "TREND";
@@ -157,7 +161,6 @@ function formatUtc(ts) {
     d = new Date();
   } else {
     const raw = String(ts).trim();
-
     if (/^\d+$/.test(raw)) {
       const num = Number(raw);
       d = raw.length <= 10 ? new Date(num * 1000) : new Date(num);
@@ -177,9 +180,16 @@ function formatUtc(ts) {
   return `${y}-${m}-${day} ${hh}:${mm} UTC`;
 }
 
+function getUtcDateKey(ts = Date.now()) {
+  const d = new Date(ts);
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
 function eventTimeToMs(ts) {
   if (ts === null || ts === undefined || ts === "") return Date.now();
-
   const raw = String(ts).trim();
 
   if (/^\d+$/.test(raw)) {
@@ -241,7 +251,6 @@ function allocNextRef() {
 function parseIncomingRef(body) {
   const raw = pick(body.ref_id, body.ref, body.reference, body.alert_ref);
   if (!raw) return null;
-
   const digits = String(raw).replace(/\D/g, "");
   if (digits.length === 6) return digits;
   return null;
@@ -251,6 +260,7 @@ function isMajorSymbol(symbol) {
   return ["BTCUSDT", "ETHUSDT"].includes(symbol);
 }
 
+// ===== TRADE MATH =====
 function hasValidTradeLevels(side, entry, tp, sl) {
   const e = parseNum(entry);
   const t = parseNum(tp);
@@ -270,7 +280,6 @@ function pctMove(side, entry, price) {
   const p = parseNum(price);
 
   if (!Number.isFinite(e) || !Number.isFinite(p) || e <= 0) return null;
-
   if (side === "LONG") return ((p - e) / e) * 100;
   if (side === "SHORT") return ((e - p) / e) * 100;
 
@@ -282,7 +291,6 @@ function tpPctFromLevels(side, entry, tp) {
   const t = parseNum(tp);
 
   if (!Number.isFinite(e) || !Number.isFinite(t) || e <= 0) return null;
-
   if (side === "LONG") return ((t - e) / e) * 100;
   if (side === "SHORT") return ((e - t) / e) * 100;
 
@@ -311,7 +319,13 @@ function rrFromLevels(side, entry, tp, sl) {
   return reward / risk;
 }
 
-function getStrengthBucket({ symbol, side, rsi, atrPct, score, risk }) {
+// ===== QUALITY HELPERS =====
+function getStrengthBucket({ symbol, side, rsi, atrPct, score, risk, incomingStrength }) {
+  const explicitStrength = String(incomingStrength || "").trim().toUpperCase();
+  if (explicitStrength === "A+" || explicitStrength === "A" || explicitStrength === "B" || explicitStrength === "C") {
+    return explicitStrength;
+  }
+
   const numericScore = parseNum(score);
   const numericRisk = parseNum(risk);
   const numericRsi = parseNum(rsi);
@@ -330,22 +344,18 @@ function getStrengthBucket({ symbol, side, rsi, atrPct, score, risk }) {
     return "C";
   }
 
-  if (side === "LONG") {
-    if (Number.isFinite(numericRsi)) {
-      if (numericRsi >= 60 && numericAtr <= 2.8) return "A+";
-      if (numericRsi >= 56 && numericAtr <= 3.2) return "A";
-      if (numericRsi >= 50) return "B";
-      return "C";
-    }
+  if (side === "LONG" && Number.isFinite(numericRsi)) {
+    if (numericRsi >= 60 && numericAtr <= 2.8) return "A+";
+    if (numericRsi >= 56 && numericAtr <= 3.2) return "A";
+    if (numericRsi >= 50) return "B";
+    return "C";
   }
 
-  if (side === "SHORT") {
-    if (Number.isFinite(numericRsi)) {
-      if (numericRsi <= 40 && numericAtr <= 2.8) return "A+";
-      if (numericRsi <= 44 && numericAtr <= 3.2) return "A";
-      if (numericRsi <= 50) return "B";
-      return "C";
-    }
+  if (side === "SHORT" && Number.isFinite(numericRsi)) {
+    if (numericRsi <= 40 && numericAtr <= 2.8) return "A+";
+    if (numericRsi <= 44 && numericAtr <= 3.2) return "A";
+    if (numericRsi <= 50) return "B";
+    return "C";
   }
 
   if (isMajorSymbol(symbol)) return "B";
@@ -356,33 +366,23 @@ function getTargetProfile({ symbol, strength }) {
   const major = isMajorSymbol(symbol);
 
   if (strength === "A+") {
-    return major
-      ? { tpPct: 3.6, slPct: 1.2 }
-      : { tpPct: 4.2, slPct: 1.5 };
+    return major ? { tpPct: 3.4, slPct: 1.45 } : { tpPct: 3.9, slPct: 1.65 };
   }
 
   if (strength === "A") {
-    return major
-      ? { tpPct: 3.1, slPct: 1.2 }
-      : { tpPct: 3.5, slPct: 1.45 };
+    return major ? { tpPct: 2.8, slPct: 1.45 } : { tpPct: 3.2, slPct: 1.65 };
   }
 
   if (strength === "B") {
-    return major
-      ? { tpPct: 2.4, slPct: 1.1 }
-      : { tpPct: 2.8, slPct: 1.35 };
+    return major ? { tpPct: 2.6, slPct: 1.45 } : { tpPct: 3.0, slPct: 1.65 };
   }
 
-  return major
-    ? { tpPct: 1.7, slPct: 1.0 }
-    : { tpPct: 1.9, slPct: 1.2 };
+  return major ? { tpPct: 2.3, slPct: 1.45 } : { tpPct: 2.7, slPct: 1.65 };
 }
 
 function applyProfileLevels(side, entry, tpPct, slPct) {
   const e = parseNum(entry);
-  if (!Number.isFinite(e) || e <= 0) {
-    return { tp: null, sl: null };
-  }
+  if (!Number.isFinite(e) || e <= 0) return { tp: null, sl: null };
 
   if (side === "LONG") {
     return {
@@ -403,14 +403,7 @@ function applyProfileLevels(side, entry, tpPct, slPct) {
 
 function deriveSetupType({ body, side, rsi, atrPct }) {
   const explicit = normalizeSetupType(
-    pick(
-      body.setup_type,
-      body.reason_type,
-      body.setup,
-      body.pattern,
-      body.signal_name,
-      body.strategy_name
-    )
+    pick(body.setup_type, body.reason_type, body.setup, body.pattern, body.signal_name, body.strategy_name)
   );
 
   if (explicit) return explicit;
@@ -459,7 +452,6 @@ function getRsiBucket(side, rsi) {
 
   return "UNKNOWN";
 }
-
 function getAtrBucket(atrPct) {
   const a = parseNum(atrPct);
   if (!Number.isFinite(a)) return "UNKNOWN";
@@ -493,88 +485,64 @@ function shouldSkipStrength(strength) {
 
 function getWhyLeadPhrases({ setupType, side, atrBucket, rsiBucket }) {
   const bank = {
-    COMPRESSION: {
+    BREAKOUT: {
       LONG: [
-        "Tight range, now trying to break higher",
-        "Compression is starting to release upward",
-        "Price is squeezing and trying to expand higher",
-        "This looks like a clean upside release from a tight base",
+        "Price is trying to hold after the breakout",
+        "The break is active and can still extend",
       ],
       SHORT: [
-        "Tight range, now trying to break lower",
-        "Compression is starting to release downward",
-        "Price is squeezing and trying to expand lower",
-        "This looks like a clean downside release from a tight base",
+        "Price is trying to hold after the breakdown",
+        "The break is active and can still extend lower",
       ],
     },
     PULLBACK: {
       LONG: [
         "Clean pullback into support",
-        "This still looks like a healthy reset in the uptrend",
         "Buyers are absorbing the dip without breaking structure",
-        "Price pulled back, but the trend shape is still intact",
       ],
       SHORT: [
         "Weak bounce into resistance",
-        "This still looks like a bearish reset, not a reversal",
         "Sellers are absorbing the bounce without losing structure",
-        "Price bounced, but the structure still leans lower",
       ],
     },
     TREND: {
       LONG: [
         "Trend still looks strong here",
         "Buyers still control the bigger move",
-        "This still behaves like continuation higher",
-        "The structure is still clearly bullish here",
       ],
       SHORT: [
         "Trend still looks weak here",
         "Sellers still control the bigger move",
-        "This still behaves like continuation lower",
-        "The structure is still clearly bearish here",
       ],
     },
-    BREAKOUT: {
+    COMPRESSION: {
       LONG: [
-        "Price is trying to hold after the breakout",
-        "The break is active and can still extend",
-        "Buyers are trying to turn the breakout into continuation",
-        "This breakout still has room if price holds up here",
+        "Tight range, now trying to break higher",
+        "Compression is starting to release upward",
       ],
       SHORT: [
-        "Price is trying to hold after the breakdown",
-        "The break is active and can still extend lower",
-        "Sellers are trying to turn the breakdown into continuation",
-        "This breakdown still has room if price holds down here",
+        "Tight range, now trying to break lower",
+        "Compression is starting to release downward",
       ],
     },
     REVERSAL: {
       LONG: [
         "There is an early turn higher here",
-        "This looks more like a reversal attempt than pure continuation",
         "Buyers are trying to shift momentum back up",
-        "The market is trying to rebuild bullish structure",
       ],
       SHORT: [
         "There is an early turn lower here",
-        "This looks more like a reversal attempt than pure continuation",
         "Sellers are trying to shift momentum back down",
-        "The market is trying to rebuild bearish structure",
       ],
     },
     MOMENTUM: {
       LONG: [
         "Momentum is still behind this move",
         "Buyers are still pressing price higher",
-        "This move still has real upside drive",
-        "Price is pushing up with momentum still active",
       ],
       SHORT: [
         "Momentum is still behind this move",
         "Sellers are still pressing price lower",
-        "This move still has real downside drive",
-        "Price is pushing down with momentum still active",
       ],
     },
   };
@@ -585,222 +553,78 @@ function getWhyLeadPhrases({ setupType, side, atrBucket, rsiBucket }) {
   if (atrBucket === "TIGHT") {
     phrases = phrases.concat(
       side === "LONG"
-        ? [
-            "Structure is tight, which helps the upside case",
-            "Still tight enough to expand higher if buyers push",
-          ]
-        : [
-            "Structure is tight, which helps the downside case",
-            "Still tight enough to expand lower if sellers push",
-          ]
+        ? ["Still tight enough to expand higher if buyers push"]
+        : ["Still tight enough to expand lower if sellers push"]
     );
   }
 
   if (rsiBucket === "HOT" || rsiBucket === "STRONG") {
-    phrases = phrases.concat(
-      side === "LONG"
-        ? [
-            "Momentum is strong enough to keep this moving",
-            "The push still has strength behind it",
-          ]
-        : [
-            "Momentum is strong enough to keep this moving",
-            "The push still has strength behind it",
-          ]
-    );
+    phrases = phrases.concat(["Momentum is strong enough to keep this moving"]);
   }
 
   return phrases;
 }
 
-function getWhyContextPhrases({ setupType, side, strength, atrBucket, rsiBucket, symbol }) {
-  const major = isMajorSymbol(symbol);
-
+function getWhyContextPhrases({ side, strength, atrBucket }) {
   const general = {
     LONG: [
       "Buyers still look in control",
-      "The 1H structure still supports continuation",
-      "So far, nothing really damaged the bullish shape",
       "The chart still looks orderly enough for continuation",
     ],
     SHORT: [
       "Sellers still look in control",
       "The 1H structure still supports continuation lower",
-      "So far, nothing really damaged the bearish shape",
-      "The chart still looks orderly enough for continuation",
     ],
   };
 
-  const setupSpecific = {
-    COMPRESSION: {
-      LONG: [
-        "If the squeeze keeps opening up, this can move fast",
-        "The key now is whether price can keep expanding",
-      ],
-      SHORT: [
-        "If the squeeze keeps opening up, this can move fast",
-        "The key now is whether price can keep expanding lower",
-      ],
-    },
-    PULLBACK: {
-      LONG: [
-        "This works as long as the pullback stays controlled",
-        "The idea is simple: hold support and continue",
-      ],
-      SHORT: [
-        "This works as long as the bounce stays weak",
-        "The idea is simple: reject resistance and continue lower",
-      ],
-    },
-    TREND: {
-      LONG: [
-        "Higher-lows still matter here",
-        "As long as this structure holds, buyers keep the edge",
-      ],
-      SHORT: [
-        "Lower-highs still matter here",
-        "As long as this structure holds, sellers keep the edge",
-      ],
-    },
-    BREAKOUT: {
-      LONG: [
-        "Now it becomes a hold-or-fail situation after the break",
-        "If the breakout sticks, this can continue cleanly",
-      ],
-      SHORT: [
-        "Now it becomes a hold-or-fail situation after the break",
-        "If the breakdown sticks, this can continue cleanly",
-      ],
-    },
-    REVERSAL: {
-      LONG: [
-        "It still needs follow-through, but the shift is visible",
-        "This gets better if buyers keep reclaiming levels",
-      ],
-      SHORT: [
-        "It still needs follow-through, but the shift is visible",
-        "This gets better if sellers keep reclaiming levels",
-      ],
-    },
-    MOMENTUM: {
-      LONG: [
-        "This works best if buyers do not stall here",
-        "As long as pressure stays on, the move can keep going",
-      ],
-      SHORT: [
-        "This works best if sellers do not stall here",
-        "As long as pressure stays on, the move can keep going",
-      ],
-    },
-  };
-
-  let phrases = [
-    ...(setupSpecific[setupType]?.[side] || []),
-    ...(general[side] || []),
-  ];
+  let phrases = [...(general[side] || [])];
 
   if (strength === "A+") {
     phrases = phrases.concat(
       side === "LONG"
-        ? [
-            "This is one of the cleaner long profiles",
-            "This is closer to the kind of long setup you actually want",
-          ]
-        : [
-            "This is one of the cleaner short profiles",
-            "This is closer to the kind of short setup you actually want",
-          ]
+        ? ["This is one of the cleaner long profiles"]
+        : ["This is one of the cleaner short profiles"]
     );
   }
 
   if (strength === "A") {
-    phrases = phrases.concat([
-      "Quality is good enough to pay attention here",
-    ]);
+    phrases = phrases.concat(["Quality is good enough to pay attention here"]);
   }
 
   if (atrBucket === "CONTROLLED" || atrBucket === "TIGHT") {
-    phrases = phrases.concat([
-      "Volatility still looks controlled",
-      "The move is not getting messy yet",
-    ]);
-  }
-
-  if (atrBucket === "EXPANDED") {
-    phrases = phrases.concat([
-      "Volatility is wider here, so follow-through matters",
-      "Candle expansion is bigger now, so price needs to confirm",
-    ]);
-  }
-
-  if (major && (rsiBucket === "STEADY" || rsiBucket === "STRONG")) {
-    phrases = phrases.concat([
-      "For a major, this still looks structurally stable",
-      "This has the steadier look you want on majors",
-    ]);
+    phrases = phrases.concat(["Volatility still looks controlled"]);
   }
 
   return phrases;
 }
 
-function getWhyTailPhrases({ setupType, side, strength, rsiBucket }) {
+function getWhyTailPhrases({ setupType, side, rsiBucket }) {
   const base = {
     LONG: [
       "If price holds here, the upside is still there",
-      "As long as structure holds, this long still makes sense",
       "The idea stays valid while buyers defend this area",
-      "This remains attractive as long as price does not lose shape",
     ],
     SHORT: [
       "If price holds here, the downside is still there",
-      "As long as structure holds, this short still makes sense",
       "The idea stays valid while sellers defend this area",
-      "This remains attractive as long as price does not lose shape",
     ],
   };
 
   const setupTails = {
     BREAKOUT: {
-      LONG: [
-        "The next step is simple: hold the breakout and continue",
-        "This gets stronger if the breakout starts acting like support",
-      ],
-      SHORT: [
-        "The next step is simple: hold the breakdown and continue",
-        "This gets stronger if the breakdown starts acting like resistance",
-      ],
-    },
-    REVERSAL: {
-      LONG: [
-        "This needs continuation now, not hesitation",
-        "The reversal idea improves if price keeps reclaiming",
-      ],
-      SHORT: [
-        "This needs continuation now, not hesitation",
-        "The reversal idea improves if price keeps rolling over",
-      ],
+      LONG: ["This gets stronger if the breakout starts acting like support"],
+      SHORT: ["This gets stronger if the breakdown starts acting like resistance"],
     },
     COMPRESSION: {
-      LONG: [
-        "If expansion follows through, this can accelerate",
-        "This gets interesting if the squeeze really opens up",
-      ],
-      SHORT: [
-        "If expansion follows through, this can accelerate",
-        "This gets interesting if the squeeze really opens up lower",
-      ],
+      LONG: ["This gets interesting if the squeeze really opens up"],
+      SHORT: ["This gets interesting if the squeeze really opens up lower"],
     },
   };
 
-  let phrases = [
-    ...(setupTails[setupType]?.[side] || []),
-    ...(base[side] || []),
-  ];
+  let phrases = [...(setupTails[setupType]?.[side] || []), ...(base[side] || [])];
 
   if (rsiBucket === "HOT") {
-    phrases = phrases.concat([
-      "Momentum is already there, so now it is about follow-through",
-    ]);
+    phrases = phrases.concat(["Momentum is already there, so now it is about follow-through"]);
   }
 
   return phrases;
@@ -818,30 +642,209 @@ function buildWhyLine({ symbol, side, setupType, strength, rsi, atrPct, eventTim
 
   const context = chooseVariant(
     `${seedBase}|context`,
-    getWhyContextPhrases({ setupType, side, strength, atrBucket, rsiBucket, symbol })
+    getWhyContextPhrases({ side, strength, atrBucket })
   );
 
   const tail = chooseVariant(
     `${seedBase}|tail`,
-    getWhyTailPhrases({ setupType, side, strength, rsiBucket })
+    getWhyTailPhrases({ setupType, side, rsiBucket })
   );
 
   const parts = [lead, context, tail].filter(Boolean);
   let why = parts.join(". ");
-
-  if (why && !/[.!?]$/.test(why)) {
-    why += ".";
-  }
-
+  if (why && !/[.!?]$/.test(why)) why += ".";
   return cleanSentence(why);
 }
 
+// ===== FREE CHANNEL HELPERS =====
+function resetFreeCounterIfNeeded(nowMs = Date.now()) {
+  const today = getUtcDateKey(nowMs);
+  if (freePostDate !== today) {
+    freePostDate = today;
+    freePostsToday = 0;
+  }
+}
+
+function canSendFreeSignal(nowMs = Date.now()) {
+  resetFreeCounterIfNeeded(nowMs);
+  return Boolean(FREE_CHAT_ID) && freePostsToday < FREE_DAILY_LIMIT;
+}
+
+async function markFreeSignalShared({ refId, symbol, side, sharedAtMs = Date.now() }) {
+  if (!refId) return;
+
+  resetFreeCounterIfNeeded(sharedAtMs);
+  freePostsToday += 1;
+
+  freeSharedRefs.set(String(refId), {
+    refId: String(refId),
+    symbol,
+    side,
+    sharedAtMs,
+    sharedAtUtc: formatUtc(sharedAtMs),
+  });
+
+  await persistState();
+}
+
+function wasSharedToFree(refId) {
+  if (!refId) return false;
+  return freeSharedRefs.has(String(refId));
+}
+
+// ===== DAILY STATS =====
+function getDailyStat(dateKey = getUtcDateKey(Date.now())) {
+  if (!dailyStats.has(dateKey)) {
+    dailyStats.set(dateKey, {
+      date: dateKey,
+      alerts: 0,
+      tp: 0,
+      sl: 0,
+      expired: 0,
+      freeAlerts: 0,
+      bySymbol: {},
+      byRef: {},
+    });
+  }
+
+  return dailyStats.get(dateKey);
+}
+
+function ensureSymbolStats(stat, symbol) {
+  if (!stat.bySymbol[symbol]) {
+    stat.bySymbol[symbol] = {
+      alerts: 0,
+      tp: 0,
+      sl: 0,
+      expired: 0,
+    };
+  }
+
+  return stat.bySymbol[symbol];
+}
+
+async function recordSignalStat({
+  refId,
+  symbol,
+  side,
+  strength,
+  setupType,
+  entry,
+  tp,
+  sl,
+  rr,
+  sharedToFree,
+  ts = Date.now(),
+}) {
+  const dateKey = getUtcDateKey(ts);
+  const stat = getDailyStat(dateKey);
+  const symbolStat = ensureSymbolStats(stat, symbol);
+
+  stat.alerts += 1;
+  symbolStat.alerts += 1;
+
+  if (sharedToFree) {
+    stat.freeAlerts += 1;
+  }
+
+  stat.byRef[String(refId)] = {
+    refId: String(refId),
+    symbol,
+    side,
+    strength,
+    setupType,
+    entry,
+    tp,
+    sl,
+    rr,
+    sharedToFree: Boolean(sharedToFree),
+    openedAtMs: ts,
+    openedAtUtc: formatUtc(ts),
+    result: "OPEN",
+    closedAtMs: null,
+    closedAtUtc: null,
+  };
+
+  await persistState();
+}
+
+async function recordHitStat({ refId, symbol, hitType, ts = Date.now() }) {
+  const todayKey = getUtcDateKey(ts);
+  let stat = getDailyStat(todayKey);
+
+  let item = stat.byRef[String(refId)];
+
+  if (!item) {
+    for (const [, dayStat] of dailyStats.entries()) {
+      const found = dayStat?.byRef?.[String(refId)];
+      if (found) {
+        stat = dayStat;
+        item = found;
+        break;
+      }
+    }
+  }
+
+  const symbolStat = ensureSymbolStats(stat, symbol);
+
+  if (hitType === "TP") {
+    stat.tp += 1;
+    symbolStat.tp += 1;
+  }
+
+  if (hitType === "SL") {
+    stat.sl += 1;
+    symbolStat.sl += 1;
+  }
+
+  if (item) {
+    item.result = hitType;
+    item.closedAtMs = ts;
+    item.closedAtUtc = formatUtc(ts);
+  }
+
+  await persistState();
+}
+
+async function recordExpiredTrade(trade, ts = Date.now()) {
+  const todayKey = getUtcDateKey(ts);
+  let stat = getDailyStat(todayKey);
+
+  let item = stat.byRef[String(trade.refId)];
+
+  if (!item) {
+    for (const [, dayStat] of dailyStats.entries()) {
+      const found = dayStat?.byRef?.[String(trade.refId)];
+      if (found) {
+        stat = dayStat;
+        item = found;
+        break;
+      }
+    }
+  }
+
+  const symbolStat = ensureSymbolStats(stat, trade.symbol);
+
+  stat.expired += 1;
+  symbolStat.expired += 1;
+
+  if (item) {
+    item.result = "EXPIRED";
+    item.closedAtMs = ts;
+    item.closedAtUtc = formatUtc(ts);
+  }
+
+  await persistState();
+}
+
+// ===== STATE CLEANUP =====
 function cleanupState() {
   const now = Date.now();
   let changed = false;
 
   for (const [key, trade] of activeTrades.entries()) {
     if (!trade?.createdAtMs || now - trade.createdAtMs > MAX_TRADE_AGE_MS) {
+      void recordExpiredTrade(trade, now);
       activeTrades.delete(key);
       changed = true;
     }
@@ -854,11 +857,30 @@ function cleanupState() {
     }
   }
 
+  for (const [refId, info] of freeSharedRefs.entries()) {
+    if (!info?.sharedAtMs || now - info.sharedAtMs > FREE_REF_TTL_MS) {
+      freeSharedRefs.delete(refId);
+      changed = true;
+    }
+  }
+
+  const keepAfterMs = now - 10 * 24 * 60 * 60 * 1000;
+  for (const [dateKey] of dailyStats.entries()) {
+    const statDateMs = Date.parse(`${dateKey}T00:00:00Z`);
+    if (Number.isFinite(statDateMs) && statDateMs < keepAfterMs) {
+      dailyStats.delete(dateKey);
+      changed = true;
+    }
+  }
+
+  resetFreeCounterIfNeeded(now);
+
   if (changed) {
     void persistState();
   }
 }
 
+// ===== SIGNAL / HIT DETECTION HELPERS =====
 function detectExplicitHitType(eventType, body) {
   const normalized = normalizeEventType(eventType);
   const rawText = JSON.stringify(body).toLowerCase();
@@ -1079,7 +1101,10 @@ function findBestOpenTradeByHitPrice(symbol, side, hitType, currentPrice, eventT
     if (!Number.isFinite(distPct)) continue;
 
     const timeDiff = Math.abs((trade.createdAtMs || 0) - eventTimeMs);
-    const score = 800 - Math.min(600, Math.floor(distPct * 100)) - Math.min(180, Math.floor(timeDiff / 60000));
+    const score =
+      800 -
+      Math.min(600, Math.floor(distPct * 100)) -
+      Math.min(180, Math.floor(timeDiff / 60000));
 
     if (!best || score > best.score) {
       best = {
@@ -1121,6 +1146,22 @@ function getOpenTradesForSymbol(symbol) {
   return items;
 }
 
+function countOpenTradesForSymbol(symbol) {
+  let count = 0;
+
+  for (const [, trade] of activeTrades.entries()) {
+    if (!trade) continue;
+    if (trade.hit) continue;
+    if (trade.symbol === symbol) count += 1;
+  }
+
+  return count;
+}
+
+function hasOpenTradeForSymbol(symbol) {
+  return countOpenTradesForSymbol(symbol) >= MAX_OPEN_TRADES_PER_SYMBOL;
+}
+
 function shouldInferHit(trade, currentPrice) {
   if (!Number.isFinite(currentPrice)) return null;
   if (trade.hit) return null;
@@ -1138,27 +1179,32 @@ function shouldInferHit(trade, currentPrice) {
   return null;
 }
 
+// ===== CHART HELPERS =====
 function resolveChartLink(symbol) {
   return CHARTS[symbol] || "N/A";
 }
 
 function looksLikeDirectImageUrl(url) {
   const value = String(url || "").trim();
+
   if (!/^https?:\/\//i.test(value)) return false;
   if (/\.(png|jpg|jpeg|webp)(\?.*)?$/i.test(value)) return true;
   if (value.includes("/image")) return true;
   if (value.includes("/images/")) return true;
   if (value.includes("chart-image")) return true;
   if (value.includes("snapshot")) return true;
+
   return false;
 }
 
 function isLocalChartImageUrl(url) {
   const value = String(url || "").trim();
+
   if (!value) return false;
   if (!value.includes("/chart-image")) return false;
 
   const baseUrl = getBaseUrl();
+
   if (baseUrl && value.startsWith(baseUrl)) return true;
 
   try {
@@ -1185,12 +1231,14 @@ function resolveChartImageUrl(body, symbol, side = "LONG", refId = "", req = nul
   }
 
   const mapped = CHART_IMAGES[symbol];
+
   if (mapped && looksLikeDirectImageUrl(mapped)) {
     return String(mapped).trim();
   }
 
   if (CHART_IMAGE_TEMPLATE && CHART_IMAGE_TEMPLATE.includes("{symbol}")) {
     const built = CHART_IMAGE_TEMPLATE.replace("{symbol}", symbol);
+
     if (looksLikeDirectImageUrl(built)) {
       return built;
     }
@@ -1203,7 +1251,7 @@ function resolveChartImageUrl(body, symbol, side = "LONG", refId = "", req = nul
     refId,
   });
 }
-
+// ===== HTML / TELEGRAM TEXT HELPERS =====
 function escapeHtml(value) {
   return String(value ?? "")
     .replace(/&/g, "&amp;")
@@ -1219,7 +1267,11 @@ function escapeAttr(value) {
 
 function formatChartHtml(chartLink) {
   if (!chartLink || chartLink === "N/A") return "N/A";
-  if (!/^https?:\/\//i.test(String(chartLink))) return escapeHtml(chartLink);
+
+  if (!/^https?:\/\//i.test(String(chartLink))) {
+    return escapeHtml(chartLink);
+  }
+
   return `<a href="${escapeAttr(chartLink)}">Open chart</a>`;
 }
 
@@ -1227,9 +1279,11 @@ function inferLeverage(symbol, strength) {
   if (strength === "A+" || strength === "A") {
     return isMajorSymbol(symbol) ? "5x" : "4x";
   }
+
   if (strength === "B") {
     return isMajorSymbol(symbol) ? "4x" : "3x";
   }
+
   return isMajorSymbol(symbol) ? "3x" : "2x";
 }
 
@@ -1243,8 +1297,10 @@ function resolveLeverage(body, symbol, strength) {
 
   if (raw) {
     const txt = String(raw).trim().toLowerCase().replace(/\s+/g, "");
+
     if (/^\d+(\.\d+)?x$/.test(txt)) return txt.toUpperCase();
     if (/^\d+(\.\d+)?$/.test(txt)) return `${txt}x`;
+
     return String(raw).trim();
   }
 
@@ -1291,10 +1347,8 @@ NFA`;
 function buildHitText({
   trade,
   hitType,
-  hitTime,
   exitPrice,
   movePct,
-  rr,
   chartLink,
   showChartLink,
 }) {
@@ -1318,11 +1372,80 @@ function buildHitText({
 function appendChartLinkIfMissing(text, chartLink) {
   if (!chartLink || chartLink === "N/A") return text;
   if (String(text).includes("<b>CHART</b>")) return text;
+
   return `${text}
 
 <b>CHART</b> ${formatChartHtml(chartLink)}`;
 }
 
+function buildDailySummaryText(dateKey) {
+  const stat = getDailyStat(dateKey);
+  const closed = stat.tp + stat.sl;
+  const winrate = closed > 0 ? (stat.tp / closed) * 100 : null;
+  const openCount = Array.from(activeTrades.values()).filter((t) => !t.hit).length;
+
+  const symbols = Object.entries(stat.bySymbol || {})
+    .sort((a, b) => (b[1].alerts || 0) - (a[1].alerts || 0))
+    .slice(0, 8)
+    .map(([symbol, s]) => {
+      return `${symbol}: ${s.alerts || 0} alerts | TP ${s.tp || 0} | SL ${s.sl || 0} | EXP ${s.expired || 0}`;
+    });
+
+  return `📊 <b>D-ALRT DAILY OVERVIEW</b>
+<b>UTC DATE</b> ${escapeHtml(dateKey)}
+
+<b>ALERTS</b> ${stat.alerts}
+<b>TP HITS</b> ${stat.tp}
+<b>SL HITS</b> ${stat.sl}
+<b>EXPIRED</b> ${stat.expired}
+<b>WINRATE</b> ${closed > 0 ? escapeHtml(fmtPct(winrate)) : "N/A"}
+<b>OPEN TRADES</b> ${openCount}
+
+<b>FREE POSTS</b> ${stat.freeAlerts}/${FREE_DAILY_LIMIT}
+
+${symbols.length ? `<b>BY SYMBOL</b>\n${escapeHtml(symbols.join("\n"))}` : "<b>BY SYMBOL</b>\nN/A"}
+
+NFA`;
+}
+
+async function sendDailySummary(dateKey, force = false) {
+  if (!DAILY_SUMMARY_ENABLED && !force) return false;
+  if (!force && lastSummarySentDate === dateKey) return false;
+
+  const text = buildDailySummaryText(dateKey);
+
+  await sendTelegramMessage(text, CHAT_ID);
+
+  if (FREE_CHAT_ID) {
+    await sendTelegramMessage(text, FREE_CHAT_ID);
+  }
+
+  lastSummarySentDate = dateKey;
+  await persistState();
+
+  console.log("DAILY SUMMARY SENT:", {
+    dateKey,
+    force,
+    lastSummarySentDate,
+  });
+
+  return true;
+}
+
+async function maybeSendDailySummary() {
+  if (!DAILY_SUMMARY_ENABLED) return;
+
+  const now = new Date();
+  const hour = now.getUTCHours();
+  const minute = now.getUTCMinutes();
+
+  if (hour !== DAILY_SUMMARY_UTC_HOUR || minute !== DAILY_SUMMARY_UTC_MINUTE) return;
+
+  const dateKey = getUtcDateKey(Date.now());
+  await sendDailySummary(dateKey, false);
+}
+
+// ===== PERSISTENCE =====
 async function ensureDataDir() {
   await fs.mkdir(DATA_DIR, { recursive: true });
 }
@@ -1337,6 +1460,11 @@ async function persistState() {
         nextRef,
         activeTrades: Array.from(activeTrades.entries()).map(([key, trade]) => [key, trade]),
         recentHitKeys: Array.from(recentHitKeys.entries()).map(([key, ts]) => [key, ts]),
+        freePostDate,
+        freePostsToday,
+        freeSharedRefs: Array.from(freeSharedRefs.entries()).map(([refId, info]) => [refId, info]),
+        dailyStats: Array.from(dailyStats.entries()).map(([dateKey, stat]) => [dateKey, stat]),
+        lastSummarySentDate,
       };
 
       await fs.writeFile(STATE_FILE, JSON.stringify(payload, null, 2), "utf8");
@@ -1351,21 +1479,42 @@ async function persistState() {
 async function loadState() {
   try {
     await ensureDataDir();
+
     const raw = await fs.readFile(STATE_FILE, "utf8");
     const parsed = JSON.parse(raw);
 
     const active = Array.isArray(parsed?.activeTrades) ? parsed.activeTrades : [];
     const hits = Array.isArray(parsed?.recentHitKeys) ? parsed.recentHitKeys : [];
+    const freeRefs = Array.isArray(parsed?.freeSharedRefs) ? parsed.freeSharedRefs : [];
+    const stats = Array.isArray(parsed?.dailyStats) ? parsed.dailyStats : [];
     const now = Date.now();
 
     if (Number.isFinite(Number(parsed?.nextRef))) {
       nextRef = Math.max(100000, Math.min(999999, Number(parsed.nextRef)));
     }
 
+    freePostDate =
+      typeof parsed?.freePostDate === "string"
+        ? parsed.freePostDate
+        : getUtcDateKey(now);
+
+    freePostsToday =
+      Number.isFinite(Number(parsed?.freePostsToday))
+        ? Math.max(0, Number(parsed.freePostsToday))
+        : 0;
+
+    lastSummarySentDate =
+      typeof parsed?.lastSummarySentDate === "string"
+        ? parsed.lastSummarySentDate
+        : "";
+
+    resetFreeCounterIfNeeded(now);
+
     for (const item of active) {
       if (!Array.isArray(item) || item.length !== 2) continue;
 
       const [key, trade] = item;
+
       if (!trade || typeof trade !== "object") continue;
       if (!trade.createdAtMs) continue;
       if (now - trade.createdAtMs > MAX_TRADE_AGE_MS) continue;
@@ -1378,17 +1527,48 @@ async function loadState() {
       if (!Array.isArray(item) || item.length !== 2) continue;
 
       const [key, ts] = item;
+
       if (!ts || now - ts > HIT_DEDUP_TTL_MS) continue;
 
       recentHitKeys.set(key, ts);
     }
 
+    for (const item of freeRefs) {
+      if (!Array.isArray(item) || item.length !== 2) continue;
+
+      const [refId, info] = item;
+
+      if (!refId || !info?.sharedAtMs) continue;
+      if (now - info.sharedAtMs > FREE_REF_TTL_MS) continue;
+
+      freeSharedRefs.set(String(refId), info);
+    }
+
+    for (const item of stats) {
+      if (!Array.isArray(item) || item.length !== 2) continue;
+
+      const [dateKey, stat] = item;
+      if (!dateKey || !stat || typeof stat !== "object") continue;
+
+      dailyStats.set(String(dateKey), stat);
+    }
+
+    getDailyStat(getUtcDateKey(now));
+
     console.log(`Loaded ${activeTrades.size} active trades from disk`);
     console.log(`Loaded ${recentHitKeys.size} recent hit keys from disk`);
+    console.log(`Loaded ${freeSharedRefs.size} free shared refs from disk`);
+    console.log(`Loaded ${dailyStats.size} daily stat days from disk`);
+    console.log(`Loaded free counter ${freePostsToday}/${FREE_DAILY_LIMIT} for ${freePostDate}`);
     console.log(`Loaded nextRef ${nextRef}`);
+    console.log(`Loaded lastSummarySentDate ${lastSummarySentDate || "none"}`);
   } catch (err) {
     if (err.code === "ENOENT") {
       console.log("No state.json found yet, starting clean");
+      freePostDate = getUtcDateKey(Date.now());
+      freePostsToday = 0;
+      lastSummarySentDate = "";
+      getDailyStat(freePostDate);
       return;
     }
 
@@ -1407,6 +1587,7 @@ async function upsertTrade(tradeKey, trade) {
   await persistState();
 }
 
+// ===== CHART RENDER =====
 async function renderChartImagePngBuffer({
   symbol = "BINANCE:BTCUSDT",
   side = "LONG",
@@ -1516,11 +1697,9 @@ async function renderChartImagePngBuffer({
 
     await sleep(8000);
 
-    const png = await page.screenshot({
+    return await page.screenshot({
       type: "png",
     });
-
-    return png;
   } finally {
     if (browser) {
       try {
@@ -1531,12 +1710,12 @@ async function renderChartImagePngBuffer({
 }
 
 // ===== TELEGRAM =====
-async function sendTelegramMessage(text) {
+async function sendTelegramMessage(text, chatId = CHAT_ID) {
   const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      chat_id: CHAT_ID,
+      chat_id: chatId,
       text,
       parse_mode: "HTML",
       disable_web_page_preview: true,
@@ -1544,20 +1723,31 @@ async function sendTelegramMessage(text) {
   });
 
   const data = await response.json();
-  console.log("TELEGRAM MESSAGE RESPONSE:", data);
+
+  console.log("TELEGRAM MESSAGE RESPONSE:", {
+    chatId,
+    data,
+  });
 
   if (!response.ok || !data.ok) {
     throw new Error(`Telegram sendMessage failed: ${JSON.stringify(data)}`);
   }
 }
 
-async function sendTelegramPhoto({ photoUrl = null, photoBuffer = null, filename = "chart.png", caption = "" }) {
+async function sendTelegramPhoto({
+  photoUrl = null,
+  photoBuffer = null,
+  filename = "chart.png",
+  caption = "",
+  chatId = CHAT_ID,
+}) {
   let response;
   let data;
 
   if (photoBuffer) {
     const form = new FormData();
-    form.append("chat_id", CHAT_ID);
+
+    form.append("chat_id", chatId);
     form.append("caption", caption);
     form.append("parse_mode", "HTML");
     form.append("photo", new Blob([photoBuffer], { type: "image/png" }), filename);
@@ -1571,7 +1761,7 @@ async function sendTelegramPhoto({ photoUrl = null, photoBuffer = null, filename
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        chat_id: CHAT_ID,
+        chat_id: chatId,
         photo: photoUrl,
         caption,
         parse_mode: "HTML",
@@ -1580,7 +1770,11 @@ async function sendTelegramPhoto({ photoUrl = null, photoBuffer = null, filename
   }
 
   data = await response.json();
-  console.log("TELEGRAM PHOTO RESPONSE:", data);
+
+  console.log("TELEGRAM PHOTO RESPONSE:", {
+    chatId,
+    data,
+  });
 
   if (!response.ok || !data.ok) {
     throw new Error(`Telegram sendPhoto failed: ${JSON.stringify(data)}`);
@@ -1593,6 +1787,7 @@ async function sendTelegramAlert({
   imageBuffer = null,
   imageFilename = "chart.png",
   fallbackChartLink = "N/A",
+  chatId = CHAT_ID,
 }) {
   if (imageBuffer || imageUrl) {
     try {
@@ -1601,18 +1796,23 @@ async function sendTelegramAlert({
         photoBuffer: imageBuffer,
         filename: imageFilename,
         caption: text,
+        chatId,
       });
+
       return { usedPhoto: true };
     } catch (err) {
       console.error("PHOTO SEND FAILED, FALLING BACK TO MESSAGE:", err.message);
+
       const fallbackText = appendChartLinkIfMissing(text, fallbackChartLink);
-      await sendTelegramMessage(fallbackText);
+      await sendTelegramMessage(fallbackText, chatId);
+
       return { usedPhoto: false, photoFailed: true };
     }
   }
 
   const fallbackText = appendChartLinkIfMissing(text, fallbackChartLink);
-  await sendTelegramMessage(fallbackText);
+  await sendTelegramMessage(fallbackText, chatId);
+
   return { usedPhoto: false };
 }
 
@@ -1656,6 +1856,7 @@ async function buildChartDeliveryAssets({
       };
     } catch (err) {
       console.error("LOCAL CHART RENDER FOR TELEGRAM FAILED:", err);
+
       return {
         imageUrl,
         imageBuffer: null,
@@ -1671,7 +1872,13 @@ async function buildChartDeliveryAssets({
   };
 }
 
-async function sendHitAlert({ trade, hitType, hitTime, hitPrice = null }) {
+async function sendHitAlert({
+  trade,
+  hitType,
+  hitTime,
+  hitPrice = null,
+  chatId = CHAT_ID,
+}) {
   const exitPrice =
     hitType === "TP"
       ? trade.tp
@@ -1679,7 +1886,6 @@ async function sendHitAlert({ trade, hitType, hitTime, hitPrice = null }) {
       ? trade.sl
       : hitPrice;
 
-  const rr = rrFromLevels(trade.side, trade.entry, trade.tp, trade.sl);
   const movePct = pctMove(trade.side, trade.entry, exitPrice);
   const chartLink = trade.chartLink || resolveChartLink(trade.symbol);
 
@@ -1697,10 +1903,8 @@ async function sendHitAlert({ trade, hitType, hitTime, hitPrice = null }) {
   const hitText = buildHitText({
     trade,
     hitType,
-    hitTime,
     exitPrice,
     movePct,
-    rr,
     chartLink,
     showChartLink,
   });
@@ -1711,13 +1915,16 @@ async function sendHitAlert({ trade, hitType, hitTime, hitPrice = null }) {
     imageBuffer: chartAssets.imageBuffer,
     imageFilename: chartAssets.imageFilename,
     fallbackChartLink: chartLink,
+    chatId,
   });
 }
 
+// ===== ROUTES =====
 app.get("/chart-template", async (req, res) => {
   try {
     const templatePath = path.join(__dirname, "chart-template.html");
     const html = await fs.readFile(templatePath, "utf8");
+
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.status(200).send(html);
   } catch (err) {
@@ -1749,26 +1956,54 @@ app.get("/chart-image", async (req, res) => {
   }
 });
 
-// ===== BASIC ROUTES =====
 app.get("/", (req, res) => {
   res.status(200).json({
     ok: true,
-    service: "ALRT-Render",
+    service: "ALRT-Render-STAGING",
   });
 });
 
 app.get("/health", (req, res) => {
+  resetFreeCounterIfNeeded(Date.now());
+
   res.status(200).json({
     ok: true,
     timestamp: new Date().toISOString(),
     activeTrades: activeTrades.size,
     recentHitKeys: recentHitKeys.size,
     nextRef,
+    minRrToSend: MIN_RR_TO_SEND,
+    maxOpenTradesPerSymbol: MAX_OPEN_TRADES_PER_SYMBOL,
+    freeEnabled: Boolean(FREE_CHAT_ID),
+    freePostDate,
+    freePostsToday,
+    freeDailyLimit: FREE_DAILY_LIMIT,
+    freeSharedRefs: freeSharedRefs.size,
+    dailyStatsDays: dailyStats.size,
+    lastSummarySentDate,
+    dailySummaryEnabled: DAILY_SUMMARY_ENABLED,
+    dailySummaryUtcHour: DAILY_SUMMARY_UTC_HOUR,
+    dailySummaryUtcMinute: DAILY_SUMMARY_UTC_MINUTE,
   });
 });
+
+app.post("/summary/send-now", async (req, res) => {
+  res.status(200).json({ ok: true, message: "summary send requested" });
+
+  try {
+    const dateKey = getUtcDateKey(Date.now());
+    await sendDailySummary(dateKey, true);
+  } catch (err) {
+    console.error("MANUAL SUMMARY ERROR:", err);
+  }
+});
+
 // ===== WEBHOOK HANDLER =====
 async function handleTradingViewWebhook(req, res) {
   const body = req.body || {};
+  const receivedAtMs = Date.now();
+  const prettyTime = formatUtc(receivedAtMs);
+
   res.status(200).json({ ok: true });
 
   try {
@@ -1818,17 +2053,17 @@ async function handleTradingViewWebhook(req, res) {
     const atrPct = pick(body.atr_pct, body.atrPercent, body.atr_percent);
     const score = pick(body.score, body.strength_score, body.setup_score);
     const risk = pick(body.risk, body.risk_score);
+    const incomingStrength = pick(body.strength, body.grade, body.quality);
 
     const eventTime = pick(
       body.time_close,
       body.bar_close_time,
       body.timestamp,
       body.time,
-      Date.now()
+      receivedAtMs
     );
 
     const eventTimeMs = eventTimeToMs(eventTime);
-    const prettyTime = formatUtc(eventTime);
 
     const eventType = pick(
       body.event,
@@ -1857,6 +2092,7 @@ async function handleTradingViewWebhook(req, res) {
       atrPct,
       score,
       risk,
+      incomingStrength,
     });
 
     const leverage = resolveLeverage(body, symbol, strength);
@@ -1896,12 +2132,6 @@ async function handleTradingViewWebhook(req, res) {
       return;
     }
 
-    console.log("TELEGRAM CONFIG CHECK:", {
-      hasBotToken: Boolean(BOT_TOKEN),
-      hasChatId: Boolean(CHAT_ID),
-      chatId: CHAT_ID ? String(CHAT_ID) : null,
-    });
-
     console.log("WEBHOOK RECEIVED:", {
       symbol,
       side,
@@ -1913,6 +2143,8 @@ async function handleTradingViewWebhook(req, res) {
       incomingRef,
       signalIds,
       candidateIdsBase,
+      rr: fmtRR(rr),
+      strength,
     });
 
     const chartLink = resolveChartLink(symbol);
@@ -1946,13 +2178,41 @@ async function handleTradingViewWebhook(req, res) {
 
         matched.trade.hit = true;
         matched.trade.hitType = explicitHitType;
-        matched.trade.hitAtMs = Date.now();
+        matched.trade.hitAtMs = receivedAtMs;
 
         await sendHitAlert({
           trade: matched.trade,
           hitType: explicitHitType,
-          hitTime: eventTimeMs,
+          hitTime: receivedAtMs,
           hitPrice: currentPrice,
+          chatId: CHAT_ID,
+        });
+
+        if (wasSharedToFree(matched.trade.refId)) {
+          try {
+            await sendHitAlert({
+              trade: matched.trade,
+              hitType: explicitHitType,
+              hitTime: receivedAtMs,
+              hitPrice: currentPrice,
+              chatId: FREE_CHAT_ID,
+            });
+
+            console.log(`FREE HIT SENT: ${symbol} ${explicitHitType} REF ${matched.trade.refId}`);
+          } catch (err) {
+            console.error("FREE HIT SEND FAILED:", {
+              symbol,
+              refId: matched.trade.refId,
+              error: err?.message || String(err),
+            });
+          }
+        }
+
+        await recordHitStat({
+          refId: matched.trade.refId,
+          symbol: matched.trade.symbol,
+          hitType: explicitHitType,
+          ts: receivedAtMs,
         });
 
         await markRecentHit(hitKey);
@@ -1960,16 +2220,9 @@ async function handleTradingViewWebhook(req, res) {
         console.log(`EXPLICIT HIT SENT (${matched.matchType}): ${symbol} ${explicitHitType} REF ${matched.trade.refId}`, {
           incomingRef,
           tradeRef: matched.trade.refId,
-          primaryAlertId: matched.trade.primaryAlertId || null,
-          incomingSignalIds: signalIds,
-          incomingIds: candidateIdsBase,
-          tradeIds: uniqueStrings([
-            matched.trade.primaryAlertId,
-            ...(matched.trade.alertIds || []),
-          ]),
-          hitTimeUtc: formatUtc(eventTimeMs),
-          tradeTimeUtc: formatUtc(matched.trade.createdAtMs),
+          hitTimeUtc: formatUtc(receivedAtMs),
           currentPrice,
+          freeForwarded: wasSharedToFree(matched.trade.refId),
         });
 
         await removeTrade(matched.key);
@@ -1981,10 +2234,11 @@ async function handleTradingViewWebhook(req, res) {
         explicitHitType,
         incomingSide: side,
         incomingRef,
-        incomingSignalIds: signalIds,
         candidateIds: candidateIdsBase,
+        signalIds,
         eventTime,
         eventTimeUtc: formatUtc(eventTimeMs),
+        receivedAtUtc: prettyTime,
         currentPrice,
         openTradesForSymbol: getOpenTradesForSymbol(symbol),
         totalActiveTrades: activeTrades.size,
@@ -2004,18 +2258,46 @@ async function handleTradingViewWebhook(req, res) {
         const inferredHit = shouldInferHit(trade, currentPrice);
         if (!inferredHit) continue;
 
-        const inferredHitKey = `${symbol}|${trade.refId}|${inferredHit}|${Math.floor(eventTimeMs / 60000)}`;
+        const inferredHitKey = `${symbol}|${trade.refId}|${inferredHit}|${Math.floor(receivedAtMs / 60000)}`;
         if (wasRecentHitSent(inferredHitKey)) continue;
 
         trade.hit = true;
         trade.hitType = inferredHit;
-        trade.hitAtMs = Date.now();
+        trade.hitAtMs = receivedAtMs;
 
         await sendHitAlert({
           trade,
           hitType: inferredHit,
-          hitTime: eventTimeMs,
+          hitTime: receivedAtMs,
           hitPrice: currentPrice,
+          chatId: CHAT_ID,
+        });
+
+        if (wasSharedToFree(trade.refId)) {
+          try {
+            await sendHitAlert({
+              trade,
+              hitType: inferredHit,
+              hitTime: receivedAtMs,
+              hitPrice: currentPrice,
+              chatId: FREE_CHAT_ID,
+            });
+
+            console.log(`FREE INFERRED HIT SENT: ${symbol} ${inferredHit} REF ${trade.refId}`);
+          } catch (err) {
+            console.error("FREE INFERRED HIT SEND FAILED:", {
+              symbol,
+              refId: trade.refId,
+              error: err?.message || String(err),
+            });
+          }
+        }
+
+        await recordHitStat({
+          refId: trade.refId,
+          symbol: trade.symbol,
+          hitType: inferredHit,
+          ts: receivedAtMs,
         });
 
         await markRecentHit(inferredHitKey);
@@ -2025,11 +2307,7 @@ async function handleTradingViewWebhook(req, res) {
           tp: trade.tp,
           sl: trade.sl,
           side: trade.side,
-          primaryAlertId: trade.primaryAlertId || null,
-          tradeIds: uniqueStrings([
-            trade.primaryAlertId,
-            ...(trade.alertIds || []),
-          ]),
+          freeForwarded: wasSharedToFree(trade.refId),
         });
 
         hitKeysToRemove.push(key);
@@ -2053,7 +2331,7 @@ async function handleTradingViewWebhook(req, res) {
     }
 
     if (!validLevels) {
-      console.log("SIGNAL RECEIVED BUT LEVELS INVALID - ALERT STILL SENT, TRADE NOT STORED:", {
+      console.log("SIGNAL SKIPPED BECAUSE LEVELS INVALID:", {
         symbol,
         side,
         entry: entryParsed,
@@ -2062,6 +2340,7 @@ async function handleTradingViewWebhook(req, res) {
         eventType,
         eventTime: prettyTime,
       });
+      return;
     }
 
     if (shouldSkipStrength(strength)) {
@@ -2074,6 +2353,39 @@ async function handleTradingViewWebhook(req, res) {
         tp: fmtPrice(tpParsed),
         sl: fmtPrice(slParsed),
         tpPct: fmtPct(tpPct),
+        rr: fmtRR(rr),
+        eventType,
+        time: prettyTime,
+      });
+      return;
+    }
+
+    if (hasOpenTradeForSymbol(symbol)) {
+      console.log("SIGNAL SKIPPED BY OPEN TRADE FILTER:", {
+        reason: "open_trade_already_exists_for_symbol",
+        symbol,
+        openTradesForSymbol: countOpenTradesForSymbol(symbol),
+        maxOpenTradesPerSymbol: MAX_OPEN_TRADES_PER_SYMBOL,
+        side,
+        entry: fmtPrice(entryParsed),
+        tp: fmtPrice(tpParsed),
+        sl: fmtPrice(slParsed),
+        rr: fmtRR(rr),
+        eventType,
+        time: prettyTime,
+      });
+      return;
+    }
+
+    if (!Number.isFinite(rr) || rr < MIN_RR_TO_SEND) {
+      console.log("SIGNAL SKIPPED BY MIN RR FILTER:", {
+        reason: "rr_too_low",
+        minRequired: MIN_RR_TO_SEND,
+        symbol,
+        side,
+        entry: fmtPrice(entryParsed),
+        tp: fmtPrice(tpParsed),
+        sl: fmtPrice(slParsed),
         rr: fmtRR(rr),
         eventType,
         time: prettyTime,
@@ -2106,7 +2418,7 @@ async function handleTradingViewWebhook(req, res) {
       strength,
       rsi,
       atrPct,
-      eventTime,
+      eventTime: receivedAtMs,
       refId,
     });
 
@@ -2129,71 +2441,107 @@ async function handleTradingViewWebhook(req, res) {
       tpPct,
     });
 
-    let tradeKey = null;
+    const sendResult = await sendTelegramAlert({
+      text,
+      imageUrl: chartAssets.imageUrl,
+      imageBuffer: chartAssets.imageBuffer,
+      imageFilename: chartAssets.imageFilename,
+      fallbackChartLink: chartLink,
+      chatId: CHAT_ID,
+    });
 
-    if (validLevels) {
-      tradeKey = buildTradeKey(symbol, side, refId);
+    let sharedToFree = false;
 
-      await upsertTrade(tradeKey, {
-        tradeKey,
-        refId,
-        symbol,
-        side,
-        entry: entryParsed,
-        tp: tpParsed,
-        sl: slParsed,
-        leverage,
-        createdAtMs: eventTimeMs,
-        hit: false,
-        hitType: null,
-        hitAtMs: null,
-        primaryAlertId,
-        alertIds: uniqueStrings([
-          ...signalIds,
-          ...candidateIds,
+    if (validLevels && canSendFreeSignal(receivedAtMs)) {
+      try {
+        await sendTelegramAlert({
+          text,
+          imageUrl: chartAssets.imageUrl,
+          imageBuffer: chartAssets.imageBuffer,
+          imageFilename: chartAssets.imageFilename,
+          fallbackChartLink: chartLink,
+          chatId: FREE_CHAT_ID,
+        });
+
+        await markFreeSignalShared({
           refId,
-        ]),
-        setupType,
-        strength,
-        rr,
-        chartLink,
-        chartImageUrl: chartAssets.imageUrl,
-      });
+          symbol,
+          side,
+          sharedAtMs: receivedAtMs,
+        });
 
-      console.log("SIGNAL STORED:", {
-        symbol,
-        side,
-        refId,
-        primaryAlertId,
-        signalIds,
-        candidateIds,
-        activeTrades: activeTrades.size,
-        createdAtUtc: formatUtc(eventTimeMs),
-      });
+        sharedToFree = true;
+
+        console.log(`FREE SIGNAL SENT: ${symbol} ${side} REF ${refId}`, {
+          freePostsToday,
+          freeDailyLimit: FREE_DAILY_LIMIT,
+          freePostDate,
+        });
+      } catch (err) {
+        console.error("FREE SIGNAL SEND FAILED:", {
+          symbol,
+          side,
+          refId,
+          error: err?.message || String(err),
+        });
+      }
     } else {
-      await persistState();
-    }
-
-    let sendResult = { usedPhoto: false };
-
-    try {
-      sendResult = await sendTelegramAlert({
-        text,
-        imageUrl: chartAssets.imageUrl,
-        imageBuffer: chartAssets.imageBuffer,
-        imageFilename: chartAssets.imageFilename,
-        fallbackChartLink: chartLink,
-      });
-    } catch (err) {
-      console.error("TELEGRAM ALERT SEND FAILED:", {
+      console.log("FREE SIGNAL NOT SENT:", {
+        reason: !FREE_CHAT_ID
+          ? "free_chat_id_missing"
+          : !validLevels
+          ? "invalid_levels"
+          : "daily_limit_reached",
         symbol,
         side,
         refId,
-        error: err?.message || String(err),
+        freePostsToday,
+        freeDailyLimit: FREE_DAILY_LIMIT,
+        freePostDate,
       });
     }
+
+    const tradeKey = buildTradeKey(symbol, side, refId);
+
+    await upsertTrade(tradeKey, {
+      tradeKey,
+      refId,
+      symbol,
+      side,
+      entry: entryParsed,
+      tp: tpParsed,
+      sl: slParsed,
+      leverage,
+      createdAtMs: receivedAtMs,
+      hit: false,
+      hitType: null,
+      hitAtMs: null,
+      primaryAlertId,
+      alertIds: candidateIds,
+      setupType,
+      strength,
+      rr,
+      chartLink,
+      chartImageUrl: chartAssets.imageUrl,
+      postedUtc: prettyTime,
+    });
+
+    await recordSignalStat({
+      refId,
+      symbol,
+      side,
+      strength,
+      setupType,
+      entry: entryParsed,
+      tp: tpParsed,
+      sl: slParsed,
+      rr,
+      sharedToFree,
+      ts: receivedAtMs,
+    });
 
     console.log(`ALERT SENT: ${symbol} ${side} REF ${refId}`);
+
     console.log("ALERT DATA:", {
       symbol,
       side,
@@ -2211,7 +2559,7 @@ async function handleTradingViewWebhook(req, res) {
       chartImageUrl: chartAssets.imageUrl,
       chartBufferBuilt: Boolean(chartAssets.imageBuffer),
       chartLink,
-      storedForHits: validLevels,
+      storedForHits: true,
       activeTrades: activeTrades.size,
       eventType,
       signalIds,
@@ -2220,27 +2568,28 @@ async function handleTradingViewWebhook(req, res) {
       usedDynamicLevels: !validIncomingLevels && validLevels,
       whyLine,
       nextRef,
+      freeEnabled: Boolean(FREE_CHAT_ID),
+      freePostsToday,
+      freePostDate,
+      sharedToFree,
+      minRrToSend: MIN_RR_TO_SEND,
+      maxOpenTradesPerSymbol: MAX_OPEN_TRADES_PER_SYMBOL,
     });
-
-    if (!chartAssets.imageUrl && !chartAssets.imageBuffer) {
-      console.log("NO DIRECT CHART IMAGE AVAILABLE FOR THIS ALERT:", {
-        symbol,
-        refId,
-        chartLink,
-      });
-    }
   } catch (err) {
     console.error("ERROR:", err);
   }
 }
 
-// accepteer beide webhook URLs
+// ===== WEBHOOK ROUTES =====
 app.post("/webhook", handleTradingViewWebhook);
 app.post("/webhook/tradingview", handleTradingViewWebhook);
 
 // ===== 404 =====
 app.use((req, res) => {
-  res.status(404).json({ ok: false, error: "Not found" });
+  res.status(404).json({
+    ok: false,
+    error: "Not found",
+  });
 });
 
 // ===== START =====
@@ -2251,8 +2600,34 @@ async function startServer() {
   console.log("STATE FILE PATH:", STATE_FILE);
   console.log("DATA DIR:", DATA_DIR);
 
+  console.log("QUALITY FILTERS:", {
+    minRrToSend: MIN_RR_TO_SEND,
+    maxOpenTradesPerSymbol: MAX_OPEN_TRADES_PER_SYMBOL,
+  });
+
+  console.log("FREE CHANNEL:", {
+    enabled: Boolean(FREE_CHAT_ID),
+    freePostDate,
+    freePostsToday,
+    freeDailyLimit: FREE_DAILY_LIMIT,
+    freeSharedRefs: freeSharedRefs.size,
+  });
+
+  console.log("DAILY SUMMARY:", {
+    enabled: DAILY_SUMMARY_ENABLED,
+    utcHour: DAILY_SUMMARY_UTC_HOUR,
+    utcMinute: DAILY_SUMMARY_UTC_MINUTE,
+    lastSummarySentDate,
+  });
+
+  setInterval(() => {
+    maybeSendDailySummary().catch((err) => {
+      console.error("DAILY SUMMARY INTERVAL ERROR:", err);
+    });
+  }, 30 * 1000);
+
   app.listen(PORT, () => {
-    console.log(`ALRT-Render running on port ${PORT}`);
+    console.log(`ALRT-Render-STAGING running on port ${PORT}`);
   });
 }
 
