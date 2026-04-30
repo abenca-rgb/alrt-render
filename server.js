@@ -40,7 +40,7 @@ const MAX_TRADE_AGE_MS = 24 * 60 * 60 * 1000;
 const HIT_DEDUP_TTL_MS = 36 * 60 * 60 * 1000;
 const FREE_REF_TTL_MS = 48 * 60 * 60 * 1000;
 const FREE_DAILY_LIMIT = 2;
-const MIN_RR_TO_SEND = 1.8;
+const MIN_RR_TO_SEND = 1.4;
 
 let nextRef = 100000;
 let savePromise = Promise.resolve();
