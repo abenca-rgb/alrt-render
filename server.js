@@ -47,7 +47,7 @@ const FREE_REF_TTL_MS = 48 * 60 * 60 * 1000;
 const FREE_DAILY_LIMIT = 2;
 
 // HARD QUALITY FILTERS
-const MIN_RR_TO_SEND = Number(process.env.MIN_RR_TO_SEND || 1.4);
+const MIN_RR_TO_SEND = Number(process.env.MIN_RR_TO_SEND || 0.9);
 const MAX_OPEN_TRADES_PER_SYMBOL = 1;
 
 let nextRef = 100000;
