@@ -19,7 +19,7 @@ const FREE_CHAT_ID = process.env.FREE_TELEGRAM_CHAT_ID || "";
 const APP_BASE_URL = (process.env.APP_BASE_URL || "").replace(/\/+$/, "");
 const CHART_IMAGE_TEMPLATE = process.env.CHART_IMAGE_TEMPLATE || "";
 
-// Daily summary settings
+// ===== DAILY SUMMARY =====
 const DAILY_SUMMARY_ENABLED =
   String(process.env.DAILY_SUMMARY_ENABLED || "true").toLowerCase() !== "false";
 const DAILY_SUMMARY_UTC_HOUR = Number(process.env.DAILY_SUMMARY_UTC_HOUR || 23);
@@ -28,10 +28,6 @@ const DAILY_SUMMARY_UTC_MINUTE = Number(process.env.DAILY_SUMMARY_UTC_MINUTE || 
 // ===== PATHS =====
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
-// IMPORTANT:
-// Voor staging mag /tmp, maar beter is een Render disk.
-// Als je staging refs/state wil bewaren na deploys, zet RENDER_DISK_PATH goed.
 const DATA_DIR = process.env.RENDER_DISK_PATH || process.env.DATA_DIR || "/tmp";
 const STATE_FILE = path.join(DATA_DIR, "state.json");
 
@@ -46,9 +42,8 @@ const HIT_DEDUP_TTL_MS = 36 * 60 * 60 * 1000;
 const FREE_REF_TTL_MS = 48 * 60 * 60 * 1000;
 const FREE_DAILY_LIMIT = 2;
 
-// HARD QUALITY FILTERS
-const MIN_RR_TO_SEND = Number(process.env.MIN_RR_TO_SEND || 0.9);
-const MAX_OPEN_TRADES_PER_SYMBOL = 1;
+const MIN_RR_TO_SEND = Number(process.env.MIN_RR_TO_SEND || 0);
+const MAX_OPEN_TRADES_PER_SYMBOL = Number(process.env.MAX_OPEN_TRADES_PER_SYMBOL || 1);
 
 let nextRef = 100000;
 let savePromise = Promise.resolve();
@@ -161,6 +156,7 @@ function formatUtc(ts) {
     d = new Date();
   } else {
     const raw = String(ts).trim();
+
     if (/^\d+$/.test(raw)) {
       const num = Number(raw);
       d = raw.length <= 10 ? new Date(num * 1000) : new Date(num);
@@ -190,6 +186,7 @@ function getUtcDateKey(ts = Date.now()) {
 
 function eventTimeToMs(ts) {
   if (ts === null || ts === undefined || ts === "") return Date.now();
+
   const raw = String(ts).trim();
 
   if (/^\d+$/.test(raw)) {
@@ -233,15 +230,6 @@ function buildLocalChartImageUrl({ req = null, symbol, side, refId }) {
   return `${baseUrl}/chart-image?${params.toString()}`;
 }
 
-function stableHash(str) {
-  let hash = 0;
-  const input = String(str || "");
-  for (let i = 0; i < input.length; i++) {
-    hash = (hash * 31 + input.charCodeAt(i)) % 2147483647;
-  }
-  return hash;
-}
-
 function allocNextRef() {
   nextRef += 1;
   if (nextRef > 999999) nextRef = 100000;
@@ -257,7 +245,7 @@ function parseIncomingRef(body) {
 }
 
 function isMajorSymbol(symbol) {
-  return ["BTCUSDT", "ETHUSDT"].includes(symbol);
+  return ["BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT"].includes(symbol);
 }
 
 // ===== TRADE MATH =====
@@ -280,6 +268,7 @@ function pctMove(side, entry, price) {
   const p = parseNum(price);
 
   if (!Number.isFinite(e) || !Number.isFinite(p) || e <= 0) return null;
+
   if (side === "LONG") return ((p - e) / e) * 100;
   if (side === "SHORT") return ((e - p) / e) * 100;
 
@@ -291,6 +280,7 @@ function tpPctFromLevels(side, entry, tp) {
   const t = parseNum(tp);
 
   if (!Number.isFinite(e) || !Number.isFinite(t) || e <= 0) return null;
+
   if (side === "LONG") return ((t - e) / e) * 100;
   if (side === "SHORT") return ((e - t) / e) * 100;
 
@@ -310,7 +300,9 @@ function rrFromLevels(side, entry, tp, sl) {
   if (side === "LONG") {
     reward = t - e;
     risk = e - s;
-  } else if (side === "SHORT") {
+  }
+
+  if (side === "SHORT") {
     reward = e - t;
     risk = s - e;
   }
@@ -319,9 +311,9 @@ function rrFromLevels(side, entry, tp, sl) {
   return reward / risk;
 }
 
-// ===== QUALITY HELPERS =====
 function getStrengthBucket({ symbol, side, rsi, atrPct, score, risk, incomingStrength }) {
   const explicitStrength = String(incomingStrength || "").trim().toUpperCase();
+
   if (explicitStrength === "A+" || explicitStrength === "A" || explicitStrength === "B" || explicitStrength === "C") {
     return explicitStrength;
   }
@@ -362,27 +354,13 @@ function getStrengthBucket({ symbol, side, rsi, atrPct, score, risk, incomingStr
   return "C";
 }
 
-function getTargetProfile({ symbol, strength }) {
-  const major = isMajorSymbol(symbol);
-
-  if (strength === "A+") {
-    return major ? { tpPct: 3.4, slPct: 1.45 } : { tpPct: 3.9, slPct: 1.65 };
-  }
-
-  if (strength === "A") {
-    return major ? { tpPct: 2.8, slPct: 1.45 } : { tpPct: 3.2, slPct: 1.65 };
-  }
-
-  if (strength === "B") {
-    return major ? { tpPct: 2.6, slPct: 1.45 } : { tpPct: 3.0, slPct: 1.65 };
-  }
-
-  return major ? { tpPct: 2.3, slPct: 1.45 } : { tpPct: 2.7, slPct: 1.65 };
-}
-
-function applyProfileLevels(side, entry, tpPct, slPct) {
+function applyFallbackLevels(side, entry, strength, symbol) {
   const e = parseNum(entry);
   if (!Number.isFinite(e) || e <= 0) return { tp: null, sl: null };
+
+  const major = isMajorSymbol(symbol);
+  const tpPct = strength === "A+" ? (major ? 1.2 : 1.4) : (major ? 0.9 : 1.1);
+  const slPct = major ? 1.0 : 1.2;
 
   if (side === "LONG") {
     return {
@@ -430,266 +408,46 @@ function deriveSetupType({ body, side, rsi, atrPct }) {
   return "TREND";
 }
 
-function getRsiBucket(side, rsi) {
-  const r = parseNum(rsi);
-  if (!Number.isFinite(r)) return "UNKNOWN";
-
-  if (side === "LONG") {
-    if (r >= 70) return "HOT";
-    if (r >= 60) return "STRONG";
-    if (r >= 50) return "STEADY";
-    if (r >= 40) return "EARLY";
-    return "RECOVERY";
-  }
-
-  if (side === "SHORT") {
-    if (r <= 30) return "HOT";
-    if (r <= 40) return "STRONG";
-    if (r <= 50) return "STEADY";
-    if (r <= 60) return "EARLY";
-    return "ROLLING";
-  }
-
-  return "UNKNOWN";
-}
-function getAtrBucket(atrPct) {
-  const a = parseNum(atrPct);
-  if (!Number.isFinite(a)) return "UNKNOWN";
-  if (a <= 0.9) return "TIGHT";
-  if (a <= 1.5) return "CONTROLLED";
-  if (a <= 2.6) return "NORMAL";
-  return "EXPANDED";
-}
-
-function chooseVariant(seed, variants) {
-  if (!Array.isArray(variants) || variants.length === 0) return "";
-  const index = stableHash(seed) % variants.length;
-  return variants[index];
-}
-
-function cleanSentence(text) {
-  return String(text || "")
-    .replace(/\s+/g, " ")
-    .replace(/\s+\./g, ".")
-    .trim();
-}
-
 function getStrengthText(strength) {
   if (!strength) return "N/A";
   return strength;
 }
 
-function shouldSkipStrength(strength) {
-  return strength === "C";
-}
-
-function getWhyLeadPhrases({ setupType, side, atrBucket, rsiBucket }) {
-  const bank = {
-    BREAKOUT: {
-      LONG: [
-        "Price is trying to hold after the breakout",
-        "The break is active and can still extend",
-      ],
-      SHORT: [
-        "Price is trying to hold after the breakdown",
-        "The break is active and can still extend lower",
-      ],
-    },
-    PULLBACK: {
-      LONG: [
-        "Clean pullback into support",
-        "Buyers are absorbing the dip without breaking structure",
-      ],
-      SHORT: [
-        "Weak bounce into resistance",
-        "Sellers are absorbing the bounce without losing structure",
-      ],
-    },
-    TREND: {
-      LONG: [
-        "Trend still looks strong here",
-        "Buyers still control the bigger move",
-      ],
-      SHORT: [
-        "Trend still looks weak here",
-        "Sellers still control the bigger move",
-      ],
-    },
-    COMPRESSION: {
-      LONG: [
-        "Tight range, now trying to break higher",
-        "Compression is starting to release upward",
-      ],
-      SHORT: [
-        "Tight range, now trying to break lower",
-        "Compression is starting to release downward",
-      ],
-    },
-    REVERSAL: {
-      LONG: [
-        "There is an early turn higher here",
-        "Buyers are trying to shift momentum back up",
-      ],
-      SHORT: [
-        "There is an early turn lower here",
-        "Sellers are trying to shift momentum back down",
-      ],
-    },
-    MOMENTUM: {
-      LONG: [
-        "Momentum is still behind this move",
-        "Buyers are still pressing price higher",
-      ],
-      SHORT: [
-        "Momentum is still behind this move",
-        "Sellers are still pressing price lower",
-      ],
-    },
-  };
-
-  const setupBlock = bank[setupType] || bank.TREND;
-  let phrases = setupBlock[side] || setupBlock.LONG || [];
-
-  if (atrBucket === "TIGHT") {
-    phrases = phrases.concat(
-      side === "LONG"
-        ? ["Still tight enough to expand higher if buyers push"]
-        : ["Still tight enough to expand lower if sellers push"]
-    );
-  }
-
-  if (rsiBucket === "HOT" || rsiBucket === "STRONG") {
-    phrases = phrases.concat(["Momentum is strong enough to keep this moving"]);
-  }
-
-  return phrases;
-}
-
-function getWhyContextPhrases({ side, strength, atrBucket }) {
-  const general = {
-    LONG: [
-      "Buyers still look in control",
-      "The chart still looks orderly enough for continuation",
-    ],
-    SHORT: [
-      "Sellers still look in control",
-      "The 1H structure still supports continuation lower",
-    ],
-  };
-
-  let phrases = [...(general[side] || [])];
-
-  if (strength === "A+") {
-    phrases = phrases.concat(
-      side === "LONG"
-        ? ["This is one of the cleaner long profiles"]
-        : ["This is one of the cleaner short profiles"]
-    );
-  }
-
-  if (strength === "A") {
-    phrases = phrases.concat(["Quality is good enough to pay attention here"]);
-  }
-
-  if (atrBucket === "CONTROLLED" || atrBucket === "TIGHT") {
-    phrases = phrases.concat(["Volatility still looks controlled"]);
-  }
-
-  return phrases;
-}
-
-function getWhyTailPhrases({ setupType, side, rsiBucket }) {
-  const base = {
-    LONG: [
-      "If price holds here, the upside is still there",
-      "The idea stays valid while buyers defend this area",
-    ],
-    SHORT: [
-      "If price holds here, the downside is still there",
-      "The idea stays valid while sellers defend this area",
-    ],
-  };
-
-  const setupTails = {
-    BREAKOUT: {
-      LONG: ["This gets stronger if the breakout starts acting like support"],
-      SHORT: ["This gets stronger if the breakdown starts acting like resistance"],
-    },
-    COMPRESSION: {
-      LONG: ["This gets interesting if the squeeze really opens up"],
-      SHORT: ["This gets interesting if the squeeze really opens up lower"],
-    },
-  };
-
-  let phrases = [...(setupTails[setupType]?.[side] || []), ...(base[side] || [])];
-
-  if (rsiBucket === "HOT") {
-    phrases = phrases.concat(["Momentum is already there, so now it is about follow-through"]);
-  }
-
-  return phrases;
-}
-
-function buildWhyLine({ symbol, side, setupType, strength, rsi, atrPct, eventTime, refId }) {
-  const rsiBucket = getRsiBucket(side, rsi);
-  const atrBucket = getAtrBucket(atrPct);
-  const seedBase = `${symbol}|${side}|${setupType}|${strength}|${rsiBucket}|${atrBucket}|${eventTime}|${refId}`;
-
-  const lead = chooseVariant(
-    `${seedBase}|lead`,
-    getWhyLeadPhrases({ setupType, side, atrBucket, rsiBucket })
+function resolveLeverage(body, symbol, strength) {
+  const raw = pick(
+    body.leverage,
+    body.lev,
+    body.suggested_leverage,
+    body.recommended_leverage
   );
 
-  const context = chooseVariant(
-    `${seedBase}|context`,
-    getWhyContextPhrases({ side, strength, atrBucket })
-  );
-
-  const tail = chooseVariant(
-    `${seedBase}|tail`,
-    getWhyTailPhrases({ setupType, side, rsiBucket })
-  );
-
-  const parts = [lead, context, tail].filter(Boolean);
-  let why = parts.join(". ");
-  if (why && !/[.!?]$/.test(why)) why += ".";
-  return cleanSentence(why);
-}
-
-// ===== FREE CHANNEL HELPERS =====
-function resetFreeCounterIfNeeded(nowMs = Date.now()) {
-  const today = getUtcDateKey(nowMs);
-  if (freePostDate !== today) {
-    freePostDate = today;
-    freePostsToday = 0;
+  if (raw) {
+    const txt = String(raw).trim().toLowerCase().replace(/\s+/g, "");
+    if (/^\d+(\.\d+)?x$/.test(txt)) return txt.toUpperCase();
+    if (/^\d+(\.\d+)?$/.test(txt)) return `${txt}x`;
+    return String(raw).trim();
   }
+
+  if (strength === "A+" || strength === "A") return isMajorSymbol(symbol) ? "4x" : "3x";
+  return isMajorSymbol(symbol) ? "3x" : "2x";
 }
 
-function canSendFreeSignal(nowMs = Date.now()) {
-  resetFreeCounterIfNeeded(nowMs);
-  return Boolean(FREE_CHAT_ID) && freePostsToday < FREE_DAILY_LIMIT;
-}
+function buildWhyLine({ body, symbol, side, setupType, strength }) {
+  const incomingReason = pick(body.reason, body.why, body.comment, body.market_bias);
 
-async function markFreeSignalShared({ refId, symbol, side, sharedAtMs = Date.now() }) {
-  if (!refId) return;
+  if (incomingReason) {
+    return String(incomingReason).trim();
+  }
 
-  resetFreeCounterIfNeeded(sharedAtMs);
-  freePostsToday += 1;
+  if (side === "LONG") {
+    return `${setupType} long setup. Buyers are trying to push price toward the nearby target.`;
+  }
 
-  freeSharedRefs.set(String(refId), {
-    refId: String(refId),
-    symbol,
-    side,
-    sharedAtMs,
-    sharedAtUtc: formatUtc(sharedAtMs),
-  });
+  if (side === "SHORT") {
+    return `${setupType} short setup. Sellers are trying to push price toward the nearby target.`;
+  }
 
-  await persistState();
-}
-
-function wasSharedToFree(refId) {
-  if (!refId) return false;
-  return freeSharedRefs.has(String(refId));
+  return `${symbol} setup detected.`;
 }
 
 // ===== DAILY STATS =====
@@ -700,6 +458,8 @@ function getDailyStat(dateKey = getUtcDateKey(Date.now())) {
       alerts: 0,
       tp: 0,
       sl: 0,
+      timeExitProfit: 0,
+      timeExitLoss: 0,
       expired: 0,
       freeAlerts: 0,
       bySymbol: {},
@@ -707,7 +467,14 @@ function getDailyStat(dateKey = getUtcDateKey(Date.now())) {
     });
   }
 
-  return dailyStats.get(dateKey);
+  const stat = dailyStats.get(dateKey);
+
+  if (stat.timeExitProfit === undefined) stat.timeExitProfit = 0;
+  if (stat.timeExitLoss === undefined) stat.timeExitLoss = 0;
+  if (!stat.bySymbol) stat.bySymbol = {};
+  if (!stat.byRef) stat.byRef = {};
+
+  return stat;
 }
 
 function ensureSymbolStats(stat, symbol) {
@@ -716,11 +483,17 @@ function ensureSymbolStats(stat, symbol) {
       alerts: 0,
       tp: 0,
       sl: 0,
+      timeExitProfit: 0,
+      timeExitLoss: 0,
       expired: 0,
     };
   }
 
-  return stat.bySymbol[symbol];
+  const s = stat.bySymbol[symbol];
+  if (s.timeExitProfit === undefined) s.timeExitProfit = 0;
+  if (s.timeExitLoss === undefined) s.timeExitLoss = 0;
+
+  return s;
 }
 
 async function recordSignalStat({
@@ -763,15 +536,16 @@ async function recordSignalStat({
     result: "OPEN",
     closedAtMs: null,
     closedAtUtc: null,
+    exitPrice: null,
+    movePct: null,
   };
 
   await persistState();
 }
 
-async function recordHitStat({ refId, symbol, hitType, ts = Date.now() }) {
+async function recordCloseStat({ refId, symbol, result, exitPrice = null, movePct = null, ts = Date.now() }) {
   const todayKey = getUtcDateKey(ts);
   let stat = getDailyStat(todayKey);
-
   let item = stat.byRef[String(refId)];
 
   if (!item) {
@@ -787,115 +561,91 @@ async function recordHitStat({ refId, symbol, hitType, ts = Date.now() }) {
 
   const symbolStat = ensureSymbolStats(stat, symbol);
 
-  if (hitType === "TP") {
+  if (result === "TP") {
     stat.tp += 1;
     symbolStat.tp += 1;
   }
 
-  if (hitType === "SL") {
+  if (result === "SL") {
     stat.sl += 1;
     symbolStat.sl += 1;
   }
 
+  if (result === "TIME_EXIT_PROFIT") {
+    stat.timeExitProfit += 1;
+    symbolStat.timeExitProfit += 1;
+  }
+
+  if (result === "TIME_EXIT_LOSS") {
+    stat.timeExitLoss += 1;
+    symbolStat.timeExitLoss += 1;
+  }
+
+  if (result === "EXPIRED") {
+    stat.expired += 1;
+    symbolStat.expired += 1;
+  }
+
   if (item) {
-    item.result = hitType;
+    item.result = result;
     item.closedAtMs = ts;
     item.closedAtUtc = formatUtc(ts);
+    item.exitPrice = exitPrice;
+    item.movePct = movePct;
   }
 
   await persistState();
 }
 
-async function recordExpiredTrade(trade, ts = Date.now()) {
-  const todayKey = getUtcDateKey(ts);
-  let stat = getDailyStat(todayKey);
-
-  let item = stat.byRef[String(trade.refId)];
-
-  if (!item) {
-    for (const [, dayStat] of dailyStats.entries()) {
-      const found = dayStat?.byRef?.[String(trade.refId)];
-      if (found) {
-        stat = dayStat;
-        item = found;
-        break;
-      }
-    }
+// ===== FREE CHANNEL =====
+function resetFreeCounterIfNeeded(nowMs = Date.now()) {
+  const today = getUtcDateKey(nowMs);
+  if (freePostDate !== today) {
+    freePostDate = today;
+    freePostsToday = 0;
   }
+}
 
-  const symbolStat = ensureSymbolStats(stat, trade.symbol);
+function canSendFreeSignal(nowMs = Date.now()) {
+  resetFreeCounterIfNeeded(nowMs);
+  return Boolean(FREE_CHAT_ID) && freePostsToday < FREE_DAILY_LIMIT;
+}
 
-  stat.expired += 1;
-  symbolStat.expired += 1;
+async function markFreeSignalShared({ refId, symbol, side, sharedAtMs = Date.now() }) {
+  if (!refId) return;
 
-  if (item) {
-    item.result = "EXPIRED";
-    item.closedAtMs = ts;
-    item.closedAtUtc = formatUtc(ts);
-  }
+  resetFreeCounterIfNeeded(sharedAtMs);
+  freePostsToday += 1;
+
+  freeSharedRefs.set(String(refId), {
+    refId: String(refId),
+    symbol,
+    side,
+    sharedAtMs,
+    sharedAtUtc: formatUtc(sharedAtMs),
+  });
 
   await persistState();
 }
 
-// ===== STATE CLEANUP =====
-function cleanupState() {
-  const now = Date.now();
-  let changed = false;
-
-  for (const [key, trade] of activeTrades.entries()) {
-    if (!trade?.createdAtMs || now - trade.createdAtMs > MAX_TRADE_AGE_MS) {
-      void recordExpiredTrade(trade, now);
-      activeTrades.delete(key);
-      changed = true;
-    }
-  }
-
-  for (const [key, ts] of recentHitKeys.entries()) {
-    if (!ts || now - ts > HIT_DEDUP_TTL_MS) {
-      recentHitKeys.delete(key);
-      changed = true;
-    }
-  }
-
-  for (const [refId, info] of freeSharedRefs.entries()) {
-    if (!info?.sharedAtMs || now - info.sharedAtMs > FREE_REF_TTL_MS) {
-      freeSharedRefs.delete(refId);
-      changed = true;
-    }
-  }
-
-  const keepAfterMs = now - 10 * 24 * 60 * 60 * 1000;
-  for (const [dateKey] of dailyStats.entries()) {
-    const statDateMs = Date.parse(`${dateKey}T00:00:00Z`);
-    if (Number.isFinite(statDateMs) && statDateMs < keepAfterMs) {
-      dailyStats.delete(dateKey);
-      changed = true;
-    }
-  }
-
-  resetFreeCounterIfNeeded(now);
-
-  if (changed) {
-    void persistState();
-  }
+function wasSharedToFree(refId) {
+  if (!refId) return false;
+  return freeSharedRefs.has(String(refId));
 }
 
-// ===== SIGNAL / HIT DETECTION HELPERS =====
+// ===== HIT / MATCH HELPERS =====
 function detectExplicitHitType(eventType, body) {
   const normalized = normalizeEventType(eventType);
+  const hitType = String(pick(body.hit_type, body.result, "") || "").toLowerCase();
   const rawText = JSON.stringify(body).toLowerCase();
 
   if (
     normalized.includes("tp_hit") ||
     normalized.includes("take_profit_hit") ||
-    normalized.includes("takeprofit_hit") ||
     normalized === "tp" ||
-    rawText.includes('"event":"tp_hit"') ||
-    rawText.includes('"type":"tp_hit"') ||
-    rawText.includes('"event_type":"tp_hit"') ||
-    rawText.includes('"hit_type":"tp"') ||
-    rawText.includes("take_profit_hit") ||
-    rawText.includes("tp hit")
+    hitType === "tp" ||
+    rawText.includes("tp_hit") ||
+    rawText.includes("take_profit")
   ) {
     return "TP";
   }
@@ -903,16 +653,21 @@ function detectExplicitHitType(eventType, body) {
   if (
     normalized.includes("sl_hit") ||
     normalized.includes("stop_loss_hit") ||
-    normalized.includes("stoploss_hit") ||
     normalized === "sl" ||
-    rawText.includes('"event":"sl_hit"') ||
-    rawText.includes('"type":"sl_hit"') ||
-    rawText.includes('"event_type":"sl_hit"') ||
-    rawText.includes('"hit_type":"sl"') ||
-    rawText.includes("stop_loss_hit") ||
-    rawText.includes("sl hit")
+    hitType === "sl" ||
+    rawText.includes("sl_hit") ||
+    rawText.includes("stop_loss")
   ) {
     return "SL";
+  }
+
+  if (
+    normalized.includes("expired") ||
+    normalized.includes("time_exit") ||
+    hitType === "expired" ||
+    hitType === "time_exit"
+  ) {
+    return "EXPIRED";
   }
 
   return null;
@@ -920,7 +675,6 @@ function detectExplicitHitType(eventType, body) {
 
 function isLikelySignalEvent(eventType, side, entry) {
   const normalized = normalizeEventType(eventType);
-
   if (normalized.includes("signal")) return true;
   if (normalized.includes("entry")) return true;
   if (normalized.includes("alert")) return true;
@@ -935,9 +689,9 @@ function buildTradeKey(symbol, side, refId) {
 function collectRawCandidateIds(body) {
   return uniqueStrings([
     pick(body.alert_id),
-    pick(body.source_alert_id),
     pick(body.signal_alert_id),
     pick(body.parent_alert_id),
+    pick(body.source_alert_id),
     pick(body.strategy_order_id),
     pick(body.order_id),
     pick(body.id),
@@ -945,33 +699,15 @@ function collectRawCandidateIds(body) {
   ]);
 }
 
-function collectSignalIds(body) {
-  return uniqueStrings([
-    pick(body.alert_id),
-    pick(body.signal_alert_id),
-    pick(body.parent_alert_id),
-    pick(body.source_alert_id),
-    pick(body.strategy_order_id),
-    pick(body.order_id),
-    pick(body.id),
-  ]);
-}
-
-function buildSyntheticIds({ symbol, side, eventTimeMs, refId }) {
+function collectAllCandidateIds({ body, symbol, side, eventTimeMs, refId }) {
   const ms = Number.isFinite(eventTimeMs) ? String(eventTimeMs) : "";
   const sec = Number.isFinite(eventTimeMs) ? String(Math.floor(eventTimeMs / 1000)) : "";
 
   return uniqueStrings([
+    ...collectRawCandidateIds(body),
     refId ? String(refId) : null,
     symbol && side && ms ? `${symbol}-${side}-${ms}` : null,
     symbol && side && sec ? `${symbol}-${side}-${sec}` : null,
-  ]);
-}
-
-function collectAllCandidateIds({ body, symbol, side, eventTimeMs, refId }) {
-  return uniqueStrings([
-    ...collectRawCandidateIds(body),
-    ...buildSyntheticIds({ symbol, side, eventTimeMs, refId }),
   ]);
 }
 
@@ -987,12 +723,12 @@ async function markRecentHit(hitKey) {
   recentHitKeys.set(hitKey, Date.now());
   await persistState();
 }
-
 function findTradeByRefId(refId) {
   if (!refId) return null;
 
   for (const [key, trade] of activeTrades.entries()) {
     if (trade.hit) continue;
+
     if (String(trade.refId) === String(refId)) {
       return { key, trade, matchType: "ref_id", score: 2000 };
     }
@@ -1023,22 +759,6 @@ function findOpenTradeByCandidateIds(ids) {
   return null;
 }
 
-function findLatestOpenTradeBySymbolAndSide(symbol, side) {
-  let latest = null;
-
-  for (const [key, trade] of activeTrades.entries()) {
-    if (trade.symbol !== symbol) continue;
-    if (side !== "N/A" && trade.side !== side) continue;
-    if (trade.hit) continue;
-
-    if (!latest || trade.createdAtMs > latest.trade.createdAtMs) {
-      latest = { key, trade, matchType: "symbol_side_latest", score: 700 };
-    }
-  }
-
-  return latest;
-}
-
 function findLatestOpenTradeBySymbol(symbol) {
   let latest = null;
 
@@ -1052,98 +772,6 @@ function findLatestOpenTradeBySymbol(symbol) {
   }
 
   return latest;
-}
-
-function findNearestOpenTradeBySymbolTime(symbol, hitTimeMs, side = "N/A") {
-  let nearest = null;
-
-  for (const [key, trade] of activeTrades.entries()) {
-    if (trade.symbol !== symbol) continue;
-    if (trade.hit) continue;
-    if (side !== "N/A" && trade.side !== side) continue;
-
-    const diff = Math.abs((trade.createdAtMs || 0) - hitTimeMs);
-
-    if (!nearest || diff < nearest.diff) {
-      nearest = {
-        key,
-        trade,
-        diff,
-        matchType: "symbol_time_nearest",
-        score: 600 - Math.min(599, Math.floor(diff / 60000)),
-      };
-    }
-  }
-
-  return nearest;
-}
-
-function levelDistancePct(expected, actual) {
-  const e = parseNum(expected);
-  const a = parseNum(actual);
-
-  if (!Number.isFinite(e) || !Number.isFinite(a) || e <= 0) return null;
-  return Math.abs((a - e) / e) * 100;
-}
-
-function findBestOpenTradeByHitPrice(symbol, side, hitType, currentPrice, eventTimeMs) {
-  if (!Number.isFinite(currentPrice)) return null;
-
-  let best = null;
-
-  for (const [key, trade] of activeTrades.entries()) {
-    if (trade.symbol !== symbol) continue;
-    if (trade.hit) continue;
-    if (side !== "N/A" && trade.side !== side) continue;
-
-    const expected = hitType === "TP" ? trade.tp : trade.sl;
-    const distPct = levelDistancePct(expected, currentPrice);
-    if (!Number.isFinite(distPct)) continue;
-
-    const timeDiff = Math.abs((trade.createdAtMs || 0) - eventTimeMs);
-    const score =
-      800 -
-      Math.min(600, Math.floor(distPct * 100)) -
-      Math.min(180, Math.floor(timeDiff / 60000));
-
-    if (!best || score > best.score) {
-      best = {
-        key,
-        trade,
-        distPct,
-        timeDiff,
-        matchType: "price_proximity",
-        score,
-      };
-    }
-  }
-
-  return best;
-}
-
-function getOpenTradesForSymbol(symbol) {
-  const items = [];
-
-  for (const [, trade] of activeTrades.entries()) {
-    if (trade.symbol !== symbol) continue;
-    if (trade.hit) continue;
-
-    items.push({
-      refId: trade.refId,
-      symbol: trade.symbol,
-      side: trade.side,
-      entry: trade.entry,
-      tp: trade.tp,
-      sl: trade.sl,
-      createdAtMs: trade.createdAtMs,
-      createdAtUtc: formatUtc(trade.createdAtMs),
-      primaryAlertId: trade.primaryAlertId || null,
-      alertIds: uniqueStrings(trade.alertIds || []),
-    });
-  }
-
-  items.sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0));
-  return items;
 }
 
 function countOpenTradesForSymbol(symbol) {
@@ -1177,6 +805,38 @@ function shouldInferHit(trade, currentPrice) {
   }
 
   return null;
+}
+
+function getTimeExitResult(trade, currentPrice) {
+  const movePct = pctMove(trade.side, trade.entry, currentPrice);
+  if (!Number.isFinite(movePct)) return "EXPIRED";
+
+  return movePct >= 0 ? "TIME_EXIT_PROFIT" : "TIME_EXIT_LOSS";
+}
+
+function getOpenTradesForSymbol(symbol) {
+  const items = [];
+
+  for (const [, trade] of activeTrades.entries()) {
+    if (trade.symbol !== symbol) continue;
+    if (trade.hit) continue;
+
+    items.push({
+      refId: trade.refId,
+      symbol: trade.symbol,
+      side: trade.side,
+      entry: trade.entry,
+      tp: trade.tp,
+      sl: trade.sl,
+      createdAtMs: trade.createdAtMs,
+      createdAtUtc: formatUtc(trade.createdAtMs),
+      primaryAlertId: trade.primaryAlertId || null,
+      alertIds: uniqueStrings(trade.alertIds || []),
+    });
+  }
+
+  items.sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0));
+  return items;
 }
 
 // ===== CHART HELPERS =====
@@ -1251,7 +911,8 @@ function resolveChartImageUrl(body, symbol, side = "LONG", refId = "", req = nul
     refId,
   });
 }
-// ===== HTML / TELEGRAM TEXT HELPERS =====
+
+// ===== HTML / TEXT =====
 function escapeHtml(value) {
   return String(value ?? "")
     .replace(/&/g, "&amp;")
@@ -1273,38 +934,6 @@ function formatChartHtml(chartLink) {
   }
 
   return `<a href="${escapeAttr(chartLink)}">Open chart</a>`;
-}
-
-function inferLeverage(symbol, strength) {
-  if (strength === "A+" || strength === "A") {
-    return isMajorSymbol(symbol) ? "5x" : "4x";
-  }
-
-  if (strength === "B") {
-    return isMajorSymbol(symbol) ? "4x" : "3x";
-  }
-
-  return isMajorSymbol(symbol) ? "3x" : "2x";
-}
-
-function resolveLeverage(body, symbol, strength) {
-  const raw = pick(
-    body.leverage,
-    body.lev,
-    body.suggested_leverage,
-    body.recommended_leverage
-  );
-
-  if (raw) {
-    const txt = String(raw).trim().toLowerCase().replace(/\s+/g, "");
-
-    if (/^\d+(\.\d+)?x$/.test(txt)) return txt.toUpperCase();
-    if (/^\d+(\.\d+)?$/.test(txt)) return `${txt}x`;
-
-    return String(raw).trim();
-  }
-
-  return inferLeverage(symbol, strength);
 }
 
 function buildAlertText({
@@ -1353,9 +982,20 @@ function buildHitText({
   showChartLink,
 }) {
   const isTp = hitType === "TP";
-  const icon = isTp ? "🎯" : "🛑";
-  const status = isTp ? "TP HIT" : "SL HIT";
-  const resultWord = isTp ? "PROFIT" : "LOSS";
+  const isSl = hitType === "SL";
+  const isTimeProfit = hitType === "TIME_EXIT_PROFIT";
+
+  const icon = isTp ? "🎯" : isSl ? "🛑" : isTimeProfit ? "⏱️✅" : "⏱️⚠️";
+  const status =
+    hitType === "TP"
+      ? "TP HIT"
+      : hitType === "SL"
+      ? "SL HIT"
+      : hitType === "TIME_EXIT_PROFIT"
+      ? "TIME EXIT • PROFIT"
+      : hitType === "TIME_EXIT_LOSS"
+      ? "TIME EXIT • LOSS"
+      : "EXPIRED";
 
   return `${icon} <b>${escapeHtml(trade.symbol)} ${escapeHtml(trade.side)}</b>
 
@@ -1363,7 +1003,7 @@ function buildHitText({
 
 <b>ENTRY</b> ${escapeHtml(fmtPrice(trade.entry))}
 <b>EXIT</b> ${escapeHtml(fmtPrice(exitPrice))}
-<b>${escapeHtml(resultWord)}</b> ${escapeHtml(fmtPct(movePct, { signed: true }))}
+<b>MOVE</b> ${escapeHtml(fmtPct(movePct, { signed: true }))}
 <b>REF</b> ${escapeHtml(trade.refId)}${showChartLink ? `
 
 <b>CHART</b> ${formatChartHtml(chartLink)}` : ""}`;
@@ -1380,15 +1020,16 @@ function appendChartLinkIfMissing(text, chartLink) {
 
 function buildDailySummaryText(dateKey) {
   const stat = getDailyStat(dateKey);
-  const closed = stat.tp + stat.sl;
-  const winrate = closed > 0 ? (stat.tp / closed) * 100 : null;
+  const closed = stat.tp + stat.sl + stat.timeExitProfit + stat.timeExitLoss;
+  const positive = stat.tp + stat.timeExitProfit;
+  const winrate = closed > 0 ? (positive / closed) * 100 : null;
   const openCount = Array.from(activeTrades.values()).filter((t) => !t.hit).length;
 
   const symbols = Object.entries(stat.bySymbol || {})
     .sort((a, b) => (b[1].alerts || 0) - (a[1].alerts || 0))
     .slice(0, 8)
     .map(([symbol, s]) => {
-      return `${symbol}: ${s.alerts || 0} alerts | TP ${s.tp || 0} | SL ${s.sl || 0} | EXP ${s.expired || 0}`;
+      return `${symbol}: ${s.alerts || 0} alerts | TP ${s.tp || 0} | SL ${s.sl || 0} | T+ ${s.timeExitProfit || 0} | T- ${s.timeExitLoss || 0}`;
     });
 
   return `📊 <b>D-ALRT DAILY OVERVIEW</b>
@@ -1397,7 +1038,9 @@ function buildDailySummaryText(dateKey) {
 <b>ALERTS</b> ${stat.alerts}
 <b>TP HITS</b> ${stat.tp}
 <b>SL HITS</b> ${stat.sl}
-<b>EXPIRED</b> ${stat.expired}
+<b>TIME EXIT PROFIT</b> ${stat.timeExitProfit || 0}
+<b>TIME EXIT LOSS</b> ${stat.timeExitLoss || 0}
+<b>EXPIRED</b> ${stat.expired || 0}
 <b>WINRATE</b> ${closed > 0 ? escapeHtml(fmtPct(winrate)) : "N/A"}
 <b>OPEN TRADES</b> ${openCount}
 
@@ -1443,6 +1086,96 @@ async function maybeSendDailySummary() {
 
   const dateKey = getUtcDateKey(Date.now());
   await sendDailySummary(dateKey, false);
+}
+
+// ===== STATE CLEANUP / TIME EXIT =====
+async function closeTradeByTimeExit(key, trade, nowMs, currentPrice = null) {
+  const exitPrice = Number.isFinite(currentPrice) ? currentPrice : trade.entry;
+  const movePct = pctMove(trade.side, trade.entry, exitPrice);
+  const result = getTimeExitResult(trade, exitPrice);
+
+  trade.hit = true;
+  trade.hitType = result;
+  trade.hitAtMs = nowMs;
+
+  await sendHitAlert({
+    trade,
+    hitType: result,
+    hitTime: nowMs,
+    hitPrice: exitPrice,
+    chatId: CHAT_ID,
+  });
+
+  if (wasSharedToFree(trade.refId)) {
+    try {
+      await sendHitAlert({
+        trade,
+        hitType: result,
+        hitTime: nowMs,
+        hitPrice: exitPrice,
+        chatId: FREE_CHAT_ID,
+      });
+    } catch (err) {
+      console.error("FREE TIME EXIT SEND FAILED:", {
+        refId: trade.refId,
+        error: err?.message || String(err),
+      });
+    }
+  }
+
+  await recordCloseStat({
+    refId: trade.refId,
+    symbol: trade.symbol,
+    result,
+    exitPrice,
+    movePct,
+    ts: nowMs,
+  });
+
+  await removeTrade(key);
+
+  console.log("TIME EXIT CLOSED:", {
+    symbol: trade.symbol,
+    side: trade.side,
+    refId: trade.refId,
+    result,
+    exitPrice: fmtPrice(exitPrice),
+    movePct: fmtPct(movePct, { signed: true }),
+  });
+}
+
+function cleanupState() {
+  const now = Date.now();
+  let changed = false;
+
+  for (const [key, ts] of recentHitKeys.entries()) {
+    if (!ts || now - ts > HIT_DEDUP_TTL_MS) {
+      recentHitKeys.delete(key);
+      changed = true;
+    }
+  }
+
+  for (const [refId, info] of freeSharedRefs.entries()) {
+    if (!info?.sharedAtMs || now - info.sharedAtMs > FREE_REF_TTL_MS) {
+      freeSharedRefs.delete(refId);
+      changed = true;
+    }
+  }
+
+  const keepAfterMs = now - 10 * 24 * 60 * 60 * 1000;
+  for (const [dateKey] of dailyStats.entries()) {
+    const statDateMs = Date.parse(`${dateKey}T00:00:00Z`);
+    if (Number.isFinite(statDateMs) && statDateMs < keepAfterMs) {
+      dailyStats.delete(dateKey);
+      changed = true;
+    }
+  }
+
+  resetFreeCounterIfNeeded(now);
+
+  if (changed) {
+    void persistState();
+  }
 }
 
 // ===== PERSISTENCE =====
@@ -1493,20 +1226,9 @@ async function loadState() {
       nextRef = Math.max(100000, Math.min(999999, Number(parsed.nextRef)));
     }
 
-    freePostDate =
-      typeof parsed?.freePostDate === "string"
-        ? parsed.freePostDate
-        : getUtcDateKey(now);
-
-    freePostsToday =
-      Number.isFinite(Number(parsed?.freePostsToday))
-        ? Math.max(0, Number(parsed.freePostsToday))
-        : 0;
-
-    lastSummarySentDate =
-      typeof parsed?.lastSummarySentDate === "string"
-        ? parsed.lastSummarySentDate
-        : "";
+    freePostDate = typeof parsed?.freePostDate === "string" ? parsed.freePostDate : getUtcDateKey(now);
+    freePostsToday = Number.isFinite(Number(parsed?.freePostsToday)) ? Math.max(0, Number(parsed.freePostsToday)) : 0;
+    lastSummarySentDate = typeof parsed?.lastSummarySentDate === "string" ? parsed.lastSummarySentDate : "";
 
     resetFreeCounterIfNeeded(now);
 
@@ -1517,8 +1239,9 @@ async function loadState() {
 
       if (!trade || typeof trade !== "object") continue;
       if (!trade.createdAtMs) continue;
-      if (now - trade.createdAtMs > MAX_TRADE_AGE_MS) continue;
       if (trade.hit) continue;
+
+      if (now - trade.createdAtMs > MAX_TRADE_AGE_MS) continue;
 
       activeTrades.set(key, trade);
     }
@@ -1559,9 +1282,7 @@ async function loadState() {
     console.log(`Loaded ${recentHitKeys.size} recent hit keys from disk`);
     console.log(`Loaded ${freeSharedRefs.size} free shared refs from disk`);
     console.log(`Loaded ${dailyStats.size} daily stat days from disk`);
-    console.log(`Loaded free counter ${freePostsToday}/${FREE_DAILY_LIMIT} for ${freePostDate}`);
     console.log(`Loaded nextRef ${nextRef}`);
-    console.log(`Loaded lastSummarySentDate ${lastSummarySentDate || "none"}`);
   } catch (err) {
     if (err.code === "ENOENT") {
       console.log("No state.json found yet, starting clean");
@@ -1825,13 +1546,6 @@ async function buildChartDeliveryAssets({
 }) {
   const imageUrl = resolveChartImageUrl(inlineBody || {}, symbol, side, refId, req);
 
-  console.log("CHART ASSET INPUT:", {
-    symbol,
-    side,
-    refId,
-    imageUrl,
-  });
-
   if (!imageUrl) {
     return {
       imageUrl: null,
@@ -1884,7 +1598,9 @@ async function sendHitAlert({
       ? trade.tp
       : hitType === "SL"
       ? trade.sl
-      : hitPrice;
+      : Number.isFinite(parseNum(hitPrice))
+      ? parseNum(hitPrice)
+      : trade.entry;
 
   const movePct = pctMove(trade.side, trade.entry, exitPrice);
   const chartLink = trade.chartLink || resolveChartLink(trade.symbol);
@@ -1959,7 +1675,8 @@ app.get("/chart-image", async (req, res) => {
 app.get("/", (req, res) => {
   res.status(200).json({
     ok: true,
-    service: "ALRT-Render-STAGING",
+    service: "ALRT-Render",
+    version: "v22-time-exit",
   });
 });
 
@@ -1972,6 +1689,7 @@ app.get("/health", (req, res) => {
     activeTrades: activeTrades.size,
     recentHitKeys: recentHitKeys.size,
     nextRef,
+    maxTradeAgeHours: MAX_TRADE_AGE_MS / 1000 / 60 / 60,
     minRrToSend: MIN_RR_TO_SEND,
     maxOpenTradesPerSymbol: MAX_OPEN_TRADES_PER_SYMBOL,
     freeEnabled: Boolean(FREE_CHAT_ID),
@@ -2096,7 +1814,6 @@ async function handleTradingViewWebhook(req, res) {
     });
 
     const leverage = resolveLeverage(body, symbol, strength);
-    const profile = getTargetProfile({ symbol, strength });
 
     const entryParsed = parseNum(entryRaw);
     let tpParsed = parseNum(tpRaw);
@@ -2105,7 +1822,7 @@ async function handleTradingViewWebhook(req, res) {
     const validIncomingLevels = hasValidTradeLevels(side, entryParsed, tpParsed, slParsed);
 
     if (!validIncomingLevels && Number.isFinite(entryParsed) && (side === "LONG" || side === "SHORT")) {
-      const derived = applyProfileLevels(side, entryParsed, profile.tpPct, profile.slPct);
+      const derived = applyFallbackLevels(side, entryParsed, strength, symbol);
       tpParsed = derived.tp;
       slParsed = derived.sl;
     }
@@ -2125,37 +1842,45 @@ async function handleTradingViewWebhook(req, res) {
       refId: incomingRef || "",
     });
 
-    const signalIds = collectSignalIds(body);
-
     if (!BOT_TOKEN || !CHAT_ID) {
       console.error("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID");
       return;
     }
 
+    const chartLink = resolveChartLink(symbol);
+
     console.log("WEBHOOK RECEIVED:", {
       symbol,
       side,
       eventType,
-      eventTime: prettyTime,
-      entryRaw,
-      tpRaw,
-      slRaw,
-      incomingRef,
-      signalIds,
-      candidateIdsBase,
+      entry: fmtPrice(entryParsed),
+      tp: fmtPrice(tpParsed),
+      sl: fmtPrice(slParsed),
       rr: fmtRR(rr),
       strength,
+      currentPrice: fmtPrice(currentPrice),
+      activeTrades: activeTrades.size,
     });
 
-    const chartLink = resolveChartLink(symbol);
+    // ===== TIME EXIT CHECK ON EVERY WEBHOOK FOR THIS SYMBOL =====
+    if (symbol) {
+      for (const [key, trade] of Array.from(activeTrades.entries())) {
+        if (trade.symbol !== symbol) continue;
+        if (trade.hit) continue;
 
-    // ===== HANDLE EXPLICIT TP/SL HIT WEBHOOKS =====
+        const ageMs = receivedAtMs - (trade.createdAtMs || receivedAtMs);
+
+        if (ageMs >= MAX_TRADE_AGE_MS) {
+          await closeTradeByTimeExit(key, trade, receivedAtMs, currentPrice);
+        }
+      }
+    }
+
+    // ===== HANDLE EXPLICIT TP/SL/EXPIRED =====
     if (explicitHitType && symbol) {
-      let matched =
-        findOpenTradeByCandidateIds(signalIds) ||
-        findTradeByRefId(incomingRef) ||
+      const matched =
         findOpenTradeByCandidateIds(candidateIdsBase) ||
-        findBestOpenTradeByHitPrice(symbol, "N/A", explicitHitType, currentPrice, eventTimeMs) ||
+        findTradeByRefId(incomingRef) ||
         findLatestOpenTradeBySymbol(symbol);
 
       if (matched) {
@@ -2176,15 +1901,23 @@ async function handleTradingViewWebhook(req, res) {
           return;
         }
 
+        let finalHitType = explicitHitType;
+        let exitPrice = currentPrice;
+
+        if (explicitHitType === "EXPIRED") {
+          finalHitType = getTimeExitResult(matched.trade, Number.isFinite(currentPrice) ? currentPrice : matched.trade.entry);
+          exitPrice = Number.isFinite(currentPrice) ? currentPrice : matched.trade.entry;
+        }
+
         matched.trade.hit = true;
-        matched.trade.hitType = explicitHitType;
+        matched.trade.hitType = finalHitType;
         matched.trade.hitAtMs = receivedAtMs;
 
         await sendHitAlert({
           trade: matched.trade,
-          hitType: explicitHitType,
+          hitType: finalHitType,
           hitTime: receivedAtMs,
-          hitPrice: currentPrice,
+          hitPrice: exitPrice,
           chatId: CHAT_ID,
         });
 
@@ -2192,62 +1925,47 @@ async function handleTradingViewWebhook(req, res) {
           try {
             await sendHitAlert({
               trade: matched.trade,
-              hitType: explicitHitType,
+              hitType: finalHitType,
               hitTime: receivedAtMs,
-              hitPrice: currentPrice,
+              hitPrice: exitPrice,
               chatId: FREE_CHAT_ID,
             });
-
-            console.log(`FREE HIT SENT: ${symbol} ${explicitHitType} REF ${matched.trade.refId}`);
           } catch (err) {
             console.error("FREE HIT SEND FAILED:", {
-              symbol,
               refId: matched.trade.refId,
               error: err?.message || String(err),
             });
           }
         }
 
-        await recordHitStat({
+        await recordCloseStat({
           refId: matched.trade.refId,
           symbol: matched.trade.symbol,
-          hitType: explicitHitType,
+          result: finalHitType,
+          exitPrice,
+          movePct: pctMove(matched.trade.side, matched.trade.entry, exitPrice),
           ts: receivedAtMs,
         });
 
         await markRecentHit(hitKey);
-
-        console.log(`EXPLICIT HIT SENT (${matched.matchType}): ${symbol} ${explicitHitType} REF ${matched.trade.refId}`, {
-          incomingRef,
-          tradeRef: matched.trade.refId,
-          hitTimeUtc: formatUtc(receivedAtMs),
-          currentPrice,
-          freeForwarded: wasSharedToFree(matched.trade.refId),
-        });
-
         await removeTrade(matched.key);
+
+        console.log(`EXPLICIT CLOSE SENT (${matched.matchType}): ${symbol} ${finalHitType} REF ${matched.trade.refId}`);
         return;
       }
 
-      console.log("EXPLICIT HIT RECEIVED BUT NO MATCHED TRADE FOUND - NOT SENT TO TELEGRAM:", {
+      console.log("EXPLICIT HIT RECEIVED BUT NO MATCHED TRADE FOUND:", {
         symbol,
         explicitHitType,
-        incomingSide: side,
         incomingRef,
-        candidateIds: candidateIdsBase,
-        signalIds,
-        eventTime,
-        eventTimeUtc: formatUtc(eventTimeMs),
-        receivedAtUtc: prettyTime,
-        currentPrice,
+        candidateIdsBase,
         openTradesForSymbol: getOpenTradesForSymbol(symbol),
-        totalActiveTrades: activeTrades.size,
       });
 
       return;
     }
 
-    // ===== INFER HITS FROM PRICE ON NEW WEBHOOKS =====
+    // ===== INFER HITS FROM PRICE =====
     if (symbol && Number.isFinite(currentPrice)) {
       const hitKeysToRemove = [];
 
@@ -2282,35 +2000,27 @@ async function handleTradingViewWebhook(req, res) {
               hitPrice: currentPrice,
               chatId: FREE_CHAT_ID,
             });
-
-            console.log(`FREE INFERRED HIT SENT: ${symbol} ${inferredHit} REF ${trade.refId}`);
           } catch (err) {
             console.error("FREE INFERRED HIT SEND FAILED:", {
-              symbol,
               refId: trade.refId,
               error: err?.message || String(err),
             });
           }
         }
 
-        await recordHitStat({
+        await recordCloseStat({
           refId: trade.refId,
           symbol: trade.symbol,
-          hitType: inferredHit,
+          result: inferredHit,
+          exitPrice: currentPrice,
+          movePct: pctMove(trade.side, trade.entry, currentPrice),
           ts: receivedAtMs,
         });
 
         await markRecentHit(inferredHitKey);
-
-        console.log(`INFERRED HIT SENT: ${symbol} ${inferredHit} REF ${trade.refId}`, {
-          currentPrice,
-          tp: trade.tp,
-          sl: trade.sl,
-          side: trade.side,
-          freeForwarded: wasSharedToFree(trade.refId),
-        });
-
         hitKeysToRemove.push(key);
+
+        console.log(`INFERRED HIT SENT: ${symbol} ${inferredHit} REF ${trade.refId}`);
       }
 
       for (const key of hitKeysToRemove) {
@@ -2318,7 +2028,7 @@ async function handleTradingViewWebhook(req, res) {
       }
     }
 
-    // ===== NORMAL SIGNAL ALERT =====
+    // ===== NORMAL SIGNAL =====
     const isSignal = isLikelySignalEvent(eventType, side, entryParsed);
 
     if (!isSignal || !symbol || (side !== "LONG" && side !== "SHORT")) {
@@ -2337,58 +2047,24 @@ async function handleTradingViewWebhook(req, res) {
         entry: entryParsed,
         tp: tpParsed,
         sl: slParsed,
-        eventType,
-        eventTime: prettyTime,
-      });
-      return;
-    }
-
-    if (shouldSkipStrength(strength)) {
-      console.log("SIGNAL SKIPPED BY SAFE FILTER:", {
-        reason: "strength_c_filtered",
-        symbol,
-        side,
-        strength,
-        entry: fmtPrice(entryParsed),
-        tp: fmtPrice(tpParsed),
-        sl: fmtPrice(slParsed),
-        tpPct: fmtPct(tpPct),
-        rr: fmtRR(rr),
-        eventType,
-        time: prettyTime,
       });
       return;
     }
 
     if (hasOpenTradeForSymbol(symbol)) {
       console.log("SIGNAL SKIPPED BY OPEN TRADE FILTER:", {
-        reason: "open_trade_already_exists_for_symbol",
         symbol,
         openTradesForSymbol: countOpenTradesForSymbol(symbol),
         maxOpenTradesPerSymbol: MAX_OPEN_TRADES_PER_SYMBOL,
-        side,
-        entry: fmtPrice(entryParsed),
-        tp: fmtPrice(tpParsed),
-        sl: fmtPrice(slParsed),
-        rr: fmtRR(rr),
-        eventType,
-        time: prettyTime,
       });
       return;
     }
 
-    if (!Number.isFinite(rr) || rr < MIN_RR_TO_SEND) {
+    if (Number.isFinite(MIN_RR_TO_SEND) && MIN_RR_TO_SEND > 0 && (!Number.isFinite(rr) || rr < MIN_RR_TO_SEND)) {
       console.log("SIGNAL SKIPPED BY MIN RR FILTER:", {
-        reason: "rr_too_low",
         minRequired: MIN_RR_TO_SEND,
         symbol,
-        side,
-        entry: fmtPrice(entryParsed),
-        tp: fmtPrice(tpParsed),
-        sl: fmtPrice(slParsed),
         rr: fmtRR(rr),
-        eventType,
-        time: prettyTime,
       });
       return;
     }
@@ -2396,12 +2072,11 @@ async function handleTradingViewWebhook(req, res) {
     const refId = incomingRef || allocNextRef();
 
     const candidateIds = uniqueStrings([
-      ...signalIds,
       ...candidateIdsBase,
       refId,
     ]);
 
-    const primaryAlertId = signalIds[0] || candidateIds[0] || refId;
+    const primaryAlertId = candidateIds[0] || refId;
 
     const chartAssets = await buildChartDeliveryAssets({
       symbol,
@@ -2412,14 +2087,11 @@ async function handleTradingViewWebhook(req, res) {
     });
 
     const whyLine = buildWhyLine({
+      body,
       symbol,
       side,
       setupType,
       strength,
-      rsi,
-      atrPct,
-      eventTime: receivedAtMs,
-      refId,
     });
 
     const showChartLink = !chartAssets.imageUrl && !chartAssets.imageBuffer;
@@ -2452,7 +2124,7 @@ async function handleTradingViewWebhook(req, res) {
 
     let sharedToFree = false;
 
-    if (validLevels && canSendFreeSignal(receivedAtMs)) {
+    if (canSendFreeSignal(receivedAtMs)) {
       try {
         await sendTelegramAlert({
           text,
@@ -2471,34 +2143,12 @@ async function handleTradingViewWebhook(req, res) {
         });
 
         sharedToFree = true;
-
-        console.log(`FREE SIGNAL SENT: ${symbol} ${side} REF ${refId}`, {
-          freePostsToday,
-          freeDailyLimit: FREE_DAILY_LIMIT,
-          freePostDate,
-        });
       } catch (err) {
         console.error("FREE SIGNAL SEND FAILED:", {
-          symbol,
-          side,
           refId,
           error: err?.message || String(err),
         });
       }
-    } else {
-      console.log("FREE SIGNAL NOT SENT:", {
-        reason: !FREE_CHAT_ID
-          ? "free_chat_id_missing"
-          : !validLevels
-          ? "invalid_levels"
-          : "daily_limit_reached",
-        symbol,
-        side,
-        refId,
-        freePostsToday,
-        freeDailyLimit: FREE_DAILY_LIMIT,
-        freePostDate,
-      });
     }
 
     const tradeKey = buildTradeKey(symbol, side, refId);
@@ -2513,6 +2163,8 @@ async function handleTradingViewWebhook(req, res) {
       sl: slParsed,
       leverage,
       createdAtMs: receivedAtMs,
+      createdAtUtc: prettyTime,
+      maxAgeMs: MAX_TRADE_AGE_MS,
       hit: false,
       hitType: null,
       hitAtMs: null,
@@ -2556,21 +2208,12 @@ async function handleTradingViewWebhook(req, res) {
       refId,
       primaryAlertId,
       imageUsed: sendResult.usedPhoto,
-      chartImageUrl: chartAssets.imageUrl,
-      chartBufferBuilt: Boolean(chartAssets.imageBuffer),
-      chartLink,
       storedForHits: true,
       activeTrades: activeTrades.size,
       eventType,
-      signalIds,
       candidateIds,
       setupType,
-      usedDynamicLevels: !validIncomingLevels && validLevels,
-      whyLine,
-      nextRef,
       freeEnabled: Boolean(FREE_CHAT_ID),
-      freePostsToday,
-      freePostDate,
       sharedToFree,
       minRrToSend: MIN_RR_TO_SEND,
       maxOpenTradesPerSymbol: MAX_OPEN_TRADES_PER_SYMBOL,
@@ -2603,6 +2246,7 @@ async function startServer() {
   console.log("QUALITY FILTERS:", {
     minRrToSend: MIN_RR_TO_SEND,
     maxOpenTradesPerSymbol: MAX_OPEN_TRADES_PER_SYMBOL,
+    maxTradeAgeHours: MAX_TRADE_AGE_MS / 1000 / 60 / 60,
   });
 
   console.log("FREE CHANNEL:", {
@@ -2627,7 +2271,7 @@ async function startServer() {
   }, 30 * 1000);
 
   app.listen(PORT, () => {
-    console.log(`ALRT-Render-STAGING running on port ${PORT}`);
+    console.log(`ALRT-Render v22-time-exit running on port ${PORT}`);
   });
 }
 
