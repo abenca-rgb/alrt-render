@@ -11,6 +11,9 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// ===== VERSION =====
+const APP_VERSION = "v22.1-live-ref-safe-time-exit";
+
 // ===== CONFIG =====
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
@@ -28,7 +31,12 @@ const DAILY_SUMMARY_UTC_MINUTE = Number(process.env.DAILY_SUMMARY_UTC_MINUTE || 
 // ===== PATHS =====
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const DATA_DIR = process.env.RENDER_DISK_PATH || process.env.DATA_DIR || "/tmp";
+
+// LIVE FIX:
+// Live mag NIET terugvallen naar /tmp, want dan verlies je state en refs.
+// Zet op Render live een disk op /var/data.
+// Staging mag eventueel DATA_DIR gebruiken, maar live blijft veilig op /var/data.
+const DATA_DIR = process.env.RENDER_DISK_PATH || "/var/data";
 const STATE_FILE = path.join(DATA_DIR, "state.json");
 
 // ===== STATE =====
@@ -45,7 +53,13 @@ const FREE_DAILY_LIMIT = 2;
 const MIN_RR_TO_SEND = Number(process.env.MIN_RR_TO_SEND || 0);
 const MAX_OPEN_TRADES_PER_SYMBOL = Number(process.env.MAX_OPEN_TRADES_PER_SYMBOL || 1);
 
-let nextRef = 100000;
+// REF FIX:
+// Gebruik env NEXT_REF_START als noodanker.
+// Omdat live net rond 100116 zat, start hij nooit meer lager dan 100116.
+// Als state.json hoger is, wint state.json.
+const REF_START_FLOOR = Number(process.env.NEXT_REF_START || 100116);
+
+let nextRef = Math.max(100000, REF_START_FLOOR);
 let savePromise = Promise.resolve();
 let freePostDate = "";
 let freePostsToday = 0;
@@ -232,7 +246,11 @@ function buildLocalChartImageUrl({ req = null, symbol, side, refId }) {
 
 function allocNextRef() {
   nextRef += 1;
-  if (nextRef > 999999) nextRef = 100000;
+
+  // Niet meer terug naar 100000 bij overflow.
+  // Dit voorkomt oude ref-conflicten.
+  if (nextRef > 999999) nextRef = Math.max(REF_START_FLOOR, 100000);
+
   return String(nextRef).padStart(6, "0");
 }
 
@@ -314,7 +332,12 @@ function rrFromLevels(side, entry, tp, sl) {
 function getStrengthBucket({ symbol, side, rsi, atrPct, score, risk, incomingStrength }) {
   const explicitStrength = String(incomingStrength || "").trim().toUpperCase();
 
-  if (explicitStrength === "A+" || explicitStrength === "A" || explicitStrength === "B" || explicitStrength === "C") {
+  if (
+    explicitStrength === "A+" ||
+    explicitStrength === "A" ||
+    explicitStrength === "B" ||
+    explicitStrength === "C"
+  ) {
     return explicitStrength;
   }
 
@@ -432,7 +455,7 @@ function resolveLeverage(body, symbol, strength) {
   return isMajorSymbol(symbol) ? "3x" : "2x";
 }
 
-function buildWhyLine({ body, symbol, side, setupType, strength }) {
+function buildWhyLine({ body, symbol, side, setupType }) {
   const incomingReason = pick(body.reason, body.why, body.comment, body.market_bias);
 
   if (incomingReason) {
@@ -632,7 +655,6 @@ function wasSharedToFree(refId) {
   if (!refId) return false;
   return freeSharedRefs.has(String(refId));
 }
-
 // ===== HIT / MATCH HELPERS =====
 function detectExplicitHitType(eventType, body) {
   const normalized = normalizeEventType(eventType);
@@ -723,6 +745,7 @@ async function markRecentHit(hitKey) {
   recentHitKeys.set(hitKey, Date.now());
   await persistState();
 }
+
 function findTradeByRefId(refId) {
   if (!refId) return null;
 
@@ -810,7 +833,6 @@ function shouldInferHit(trade, currentPrice) {
 function getTimeExitResult(trade, currentPrice) {
   const movePct = pctMove(trade.side, trade.entry, currentPrice);
   if (!Number.isFinite(movePct)) return "EXPIRED";
-
   return movePct >= 0 ? "TIME_EXIT_PROFIT" : "TIME_EXIT_LOSS";
 }
 
@@ -1088,7 +1110,7 @@ async function maybeSendDailySummary() {
   await sendDailySummary(dateKey, false);
 }
 
-// ===== STATE CLEANUP / TIME EXIT =====
+// ===== TIME EXIT =====
 async function closeTradeByTimeExit(key, trade, nowMs, currentPrice = null) {
   const exitPrice = Number.isFinite(currentPrice) ? currentPrice : trade.entry;
   const movePct = pctMove(trade.side, trade.entry, exitPrice);
@@ -1190,7 +1212,9 @@ async function persistState() {
 
       const payload = {
         updatedAt: new Date().toISOString(),
+        version: APP_VERSION,
         nextRef,
+        refStartFloor: REF_START_FLOOR,
         activeTrades: Array.from(activeTrades.entries()).map(([key, trade]) => [key, trade]),
         recentHitKeys: Array.from(recentHitKeys.entries()).map(([key, ts]) => [key, ts]),
         freePostDate,
@@ -1222,8 +1246,17 @@ async function loadState() {
     const stats = Array.isArray(parsed?.dailyStats) ? parsed.dailyStats : [];
     const now = Date.now();
 
+    // REF FIX:
+    // Nooit lager dan REF_START_FLOOR.
+    // Als state.json hoger is, ga verder vanaf state.
     if (Number.isFinite(Number(parsed?.nextRef))) {
-      nextRef = Math.max(100000, Math.min(999999, Number(parsed.nextRef)));
+      nextRef = Math.max(
+        REF_START_FLOOR,
+        100000,
+        Math.min(999999, Number(parsed.nextRef))
+      );
+    } else {
+      nextRef = Math.max(REF_START_FLOOR, 100000);
     }
 
     freePostDate = typeof parsed?.freePostDate === "string" ? parsed.freePostDate : getUtcDateKey(now);
@@ -1289,6 +1322,7 @@ async function loadState() {
       freePostDate = getUtcDateKey(Date.now());
       freePostsToday = 0;
       lastSummarySentDate = "";
+      nextRef = Math.max(REF_START_FLOOR, 100000);
       getDailyStat(freePostDate);
       return;
     }
@@ -1676,7 +1710,7 @@ app.get("/", (req, res) => {
   res.status(200).json({
     ok: true,
     service: "ALRT-Render",
-    version: "v22-time-exit",
+    version: APP_VERSION,
   });
 });
 
@@ -1685,10 +1719,14 @@ app.get("/health", (req, res) => {
 
   res.status(200).json({
     ok: true,
+    version: APP_VERSION,
     timestamp: new Date().toISOString(),
+    dataDir: DATA_DIR,
+    stateFile: STATE_FILE,
     activeTrades: activeTrades.size,
     recentHitKeys: recentHitKeys.size,
     nextRef,
+    refStartFloor: REF_START_FLOOR,
     maxTradeAgeHours: MAX_TRADE_AGE_MS / 1000 / 60 / 60,
     minRrToSend: MIN_RR_TO_SEND,
     maxOpenTradesPerSymbol: MAX_OPEN_TRADES_PER_SYMBOL,
@@ -1850,6 +1888,7 @@ async function handleTradingViewWebhook(req, res) {
     const chartLink = resolveChartLink(symbol);
 
     console.log("WEBHOOK RECEIVED:", {
+      version: APP_VERSION,
       symbol,
       side,
       eventType,
@@ -1860,6 +1899,7 @@ async function handleTradingViewWebhook(req, res) {
       strength,
       currentPrice: fmtPrice(currentPrice),
       activeTrades: activeTrades.size,
+      nextRef,
     });
 
     // ===== TIME EXIT CHECK ON EVERY WEBHOOK FOR THIS SYMBOL =====
@@ -1905,7 +1945,10 @@ async function handleTradingViewWebhook(req, res) {
         let exitPrice = currentPrice;
 
         if (explicitHitType === "EXPIRED") {
-          finalHitType = getTimeExitResult(matched.trade, Number.isFinite(currentPrice) ? currentPrice : matched.trade.entry);
+          finalHitType = getTimeExitResult(
+            matched.trade,
+            Number.isFinite(currentPrice) ? currentPrice : matched.trade.entry
+          );
           exitPrice = Number.isFinite(currentPrice) ? currentPrice : matched.trade.entry;
         }
 
@@ -2195,6 +2238,7 @@ async function handleTradingViewWebhook(req, res) {
     console.log(`ALERT SENT: ${symbol} ${side} REF ${refId}`);
 
     console.log("ALERT DATA:", {
+      version: APP_VERSION,
       symbol,
       side,
       entry: fmtPrice(entryParsed),
@@ -2217,6 +2261,7 @@ async function handleTradingViewWebhook(req, res) {
       sharedToFree,
       minRrToSend: MIN_RR_TO_SEND,
       maxOpenTradesPerSymbol: MAX_OPEN_TRADES_PER_SYMBOL,
+      nextRef,
     });
   } catch (err) {
     console.error("ERROR:", err);
@@ -2242,6 +2287,13 @@ async function startServer() {
 
   console.log("STATE FILE PATH:", STATE_FILE);
   console.log("DATA DIR:", DATA_DIR);
+
+  console.log("VERSION:", APP_VERSION);
+
+  console.log("REF SETTINGS:", {
+    nextRef,
+    refStartFloor: REF_START_FLOOR,
+  });
 
   console.log("QUALITY FILTERS:", {
     minRrToSend: MIN_RR_TO_SEND,
@@ -2271,7 +2323,7 @@ async function startServer() {
   }, 30 * 1000);
 
   app.listen(PORT, () => {
-    console.log(`ALRT-Render v22-time-exit running on port ${PORT}`);
+    console.log(`ALRT-Render ${APP_VERSION} running on port ${PORT}`);
   });
 }
 
