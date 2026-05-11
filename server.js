@@ -925,9 +925,12 @@ function shouldInferHit(trade, currentPrice) {
 function getTimeExitResult(trade, currentPrice) {
   const movePct = pctMove(trade.side, trade.entry, currentPrice);
   if (!Number.isFinite(movePct)) return "EXPIRED";
-  return movePct >= 0 ? "TIME_EXIT_PROFIT" : "TIME_EXIT_LOSS";
-}
 
+  if (movePct > 0.05) return "TIME_EXIT_PROFIT";
+  if (movePct < -0.05) return "TIME_EXIT_LOSS";
+
+  return "EXPIRED";
+}
 function getOpenTradesForSymbol(symbol) {
   const items = [];
 
@@ -1199,6 +1202,9 @@ async function maybeSendDailySummary() {
   if (hour !== DAILY_SUMMARY_UTC_HOUR || minute !== DAILY_SUMMARY_UTC_MINUTE) return;
 
   const dateKey = getUtcDateKey(Date.now());
+
+  if (lastSummarySentDate === dateKey) return;
+
   await sendDailySummary(dateKey, false);
 }
 
@@ -1845,6 +1851,16 @@ app.get("/health", (req, res) => {
 });
 
 app.post("/summary/send-now", async (req, res) => {
+  const token = String(req.query.token || req.headers["x-summary-token"] || "");
+  const expected = String(process.env.SUMMARY_ADMIN_TOKEN || "");
+
+  if (!expected || token !== expected) {
+    return res.status(403).json({
+      ok: false,
+      error: "manual summary disabled",
+    });
+  }
+
   res.status(200).json({ ok: true, message: "summary send requested" });
 
   try {
