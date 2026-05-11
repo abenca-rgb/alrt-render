@@ -13,7 +13,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ===== VERSION =====
-const APP_VERSION = "v22.1-live-ref-safe-time-exit";
+const APP_VERSION = "v23.1-stripe-basic-member-access";
 
 // ===== CONFIG =====
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
