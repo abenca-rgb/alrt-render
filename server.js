@@ -5,6 +5,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { promises as fs } from "fs";
 import { chromium } from "playwright";
+import crypto from "crypto";
 
 dotenv.config();
 
@@ -18,6 +19,10 @@ const APP_VERSION = "v22.1-live-ref-safe-time-exit";
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const FREE_CHAT_ID = process.env.FREE_TELEGRAM_CHAT_ID || "";
+const PAID_TELEGRAM_CHAT_ID = process.env.PAID_TELEGRAM_CHAT_ID || CHAT_ID;
+const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || "";
+const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || "";
+const PUBLIC_SITE_URL = (process.env.PUBLIC_SITE_URL || "https://dalrt.com").replace(/\/+$/, "");
 
 const APP_BASE_URL = (process.env.APP_BASE_URL || "").replace(/\/+$/, "");
 const CHART_IMAGE_TEMPLATE = process.env.CHART_IMAGE_TEMPLATE || "";
@@ -44,6 +49,7 @@ const activeTrades = new Map();
 const recentHitKeys = new Map();
 const freeSharedRefs = new Map();
 const dailyStats = new Map();
+const members = new Map();
 
 const MAX_TRADE_AGE_MS = 24 * 60 * 60 * 1000;
 const HIT_DEDUP_TTL_MS = 36 * 60 * 60 * 1000;
@@ -64,6 +70,92 @@ let savePromise = Promise.resolve();
 let freePostDate = "";
 let freePostsToday = 0;
 let lastSummarySentDate = "";
+
+
+// ===== STRIPE HELPERS =====
+function normalizeEmail(email) {
+  return String(email || "").trim().toLowerCase();
+}
+
+async function createTelegramInviteLink({ expireHours = 48 } = {}) {
+  const expireDate = Math.floor(Date.now() / 1000 + expireHours * 60 * 60);
+
+  const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/createChatInviteLink`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: PAID_TELEGRAM_CHAT_ID,
+      member_limit: 1,
+      expire_date: expireDate,
+    }),
+  });
+
+  const data = await response.json();
+
+  if (!response.ok || !data.ok) {
+    throw new Error(`Telegram invite failed: ${JSON.stringify(data)}`);
+  }
+
+  return data.result.invite_link;
+}
+
+async function handleStripeEvent(event) {
+  console.log("STRIPE EVENT:", event?.type);
+
+  if (event?.type === "checkout.session.completed") {
+    const session = event.data.object;
+
+    const email = normalizeEmail(
+      pick(session.customer_details?.email, session.customer_email)
+    );
+
+    if (!email) return;
+
+    const inviteLink = await createTelegramInviteLink({ expireHours: 48 });
+
+    members.set(email, {
+      email,
+      active: true,
+      inviteLink,
+      stripeCustomerId: session.customer || null,
+      createdAt: new Date().toISOString(),
+    });
+
+    await persistState();
+
+    await sendTelegramMessage(
+`🔥 <b>NEW PAID MEMBER</b>
+
+<b>Email</b> ${email}
+
+<b>Invite Link</b>
+${inviteLink}`
+    );
+  }
+}
+
+app.post(
+  "/webhook/stripe",
+  express.raw({ type: "application/json", limit: "2mb" }),
+  async (req, res) => {
+    let event;
+
+    try {
+      event = JSON.parse(req.body.toString("utf8"));
+    } catch (err) {
+      console.error("STRIPE WEBHOOK PARSE ERROR:", err);
+      return res.status(400).send("Invalid payload");
+    }
+
+    res.status(200).json({ received: true });
+
+    try {
+      await handleStripeEvent(event);
+    } catch (err) {
+      console.error("STRIPE EVENT HANDLE ERROR:", err);
+    }
+  }
+);
 
 app.use(express.json({ limit: "2mb" }));
 
@@ -1222,6 +1314,7 @@ async function persistState() {
         freeSharedRefs: Array.from(freeSharedRefs.entries()).map(([refId, info]) => [refId, info]),
         dailyStats: Array.from(dailyStats.entries()).map(([dateKey, stat]) => [dateKey, stat]),
         lastSummarySentDate,
+        members: Array.from(members.entries()).map(([email, info]) => [email, info]),
       };
 
       await fs.writeFile(STATE_FILE, JSON.stringify(payload, null, 2), "utf8");
@@ -1298,6 +1391,14 @@ async function loadState() {
       if (now - info.sharedAtMs > FREE_REF_TTL_MS) continue;
 
       freeSharedRefs.set(String(refId), info);
+    }
+
+    if (Array.isArray(parsed?.members)) {
+      for (const item of parsed.members) {
+        if (!Array.isArray(item) || item.length !== 2) continue;
+        const [email, info] = item;
+        members.set(email, info);
+      }
     }
 
     for (const item of stats) {
