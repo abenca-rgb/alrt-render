@@ -63,9 +63,9 @@ const MAX_OPEN_TRADES_PER_SYMBOL = Number(process.env.MAX_OPEN_TRADES_PER_SYMBOL
 // Gebruik env NEXT_REF_START als noodanker.
 // Omdat live net rond 100116 zat, start hij nooit meer lager dan 100116.
 // Als state.json hoger is, wint state.json.
-const REF_START_FLOOR = Number(process.env.NEXT_REF_START || 100116);
+const REF_START_FLOOR = 100000;
 
-let nextRef = Math.max(100000, REF_START_FLOOR);
+let nextRef = REF_START_FLOOR;
 let savePromise = Promise.resolve();
 let freePostDate = "";
 let freePostsToday = 0;
@@ -341,7 +341,7 @@ function allocNextRef() {
 
   // Niet meer terug naar 100000 bij overflow.
   // Dit voorkomt oude ref-conflicten.
-  if (nextRef > 999999) nextRef = Math.max(REF_START_FLOOR, 100000);
+ if (nextRef > 999999) nextRef = REF_START_FLOOR;
 
   return String(nextRef).padStart(6, "0");
 }
@@ -1348,15 +1348,11 @@ async function loadState() {
     // REF FIX:
     // Nooit lager dan REF_START_FLOOR.
     // Als state.json hoger is, ga verder vanaf state.
-    if (Number.isFinite(Number(parsed?.nextRef))) {
-      nextRef = Math.max(
-        REF_START_FLOOR,
-        100000,
-        Math.min(999999, Number(parsed.nextRef))
-      );
-    } else {
-      nextRef = Math.max(REF_START_FLOOR, 100000);
-    }
+   if (Number.isFinite(Number(parsed?.nextRef))) {
+  nextRef = Math.min(999999, Number(parsed.nextRef));
+} else {
+  nextRef = REF_START_FLOOR;
+}
 
     freePostDate = typeof parsed?.freePostDate === "string" ? parsed.freePostDate : getUtcDateKey(now);
     freePostsToday = Number.isFinite(Number(parsed?.freePostsToday)) ? Math.max(0, Number(parsed.freePostsToday)) : 0;
