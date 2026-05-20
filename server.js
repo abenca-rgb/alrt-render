@@ -1,3 +1,7 @@
+// server.js — D-ALRT / ALRT-Render
+// v24.1 full live-safe upgrade
+// Includes: paid/free access, Stripe, Telegram, chart images, refs, TP/SL, time exits, expired, daily summaries.
+
 import express from "express";
 import dotenv from "dotenv";
 import fetch, { FormData, Blob } from "node-fetch";
@@ -5,33 +9,30 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { promises as fs } from "fs";
 import { chromium } from "playwright";
-import crypto from "crypto";
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ===== VERSION =====
-const APP_VERSION = "v23.2-paid-free-access-control";
+const APP_VERSION = "v24.1-elite-pine-timeexit-summary-fix";
 
 // ===== CONFIG =====
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const FREE_CHAT_ID = process.env.FREE_TELEGRAM_CHAT_ID || "";
 const PAID_TELEGRAM_CHAT_ID = process.env.PAID_TELEGRAM_CHAT_ID || CHAT_ID;
-const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || "";
-const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || "";
-const PUBLIC_SITE_URL = (process.env.PUBLIC_SITE_URL || "https://dalrt.com").replace(/\/+$/, "");
 
+const PUBLIC_SITE_URL = (process.env.PUBLIC_SITE_URL || "https://dalrt.com").replace(/\/+$/, "");
 const APP_BASE_URL = (process.env.APP_BASE_URL || "").replace(/\/+$/, "");
 const CHART_IMAGE_TEMPLATE = process.env.CHART_IMAGE_TEMPLATE || "";
 
-// ===== DAILY SUMMARY =====
 const DAILY_SUMMARY_ENABLED =
   String(process.env.DAILY_SUMMARY_ENABLED || "true").toLowerCase() !== "false";
 const DAILY_SUMMARY_UTC_HOUR = Number(process.env.DAILY_SUMMARY_UTC_HOUR || 23);
 const DAILY_SUMMARY_UTC_MINUTE = Number(process.env.DAILY_SUMMARY_UTC_MINUTE || 59);
+
+const SUMMARY_ADMIN_TOKEN = process.env.SUMMARY_ADMIN_TOKEN || "";
 
 // ===== PATHS =====
 const __filename = fileURLToPath(import.meta.url);
@@ -56,7 +57,8 @@ const FREE_DAILY_LIMIT = 2;
 const MIN_RR_TO_SEND = Number(process.env.MIN_RR_TO_SEND || 0);
 const MAX_OPEN_TRADES_PER_SYMBOL = Number(process.env.MAX_OPEN_TRADES_PER_SYMBOL || 1);
 
-const REF_START_FLOOR = 100000;
+// BELANGRIJK: refs nooit meer lager dan 100127, tenzij env hoger staat.
+const REF_START_FLOOR = Number(process.env.NEXT_REF_START || 100127);
 
 let nextRef = REF_START_FLOOR;
 let savePromise = Promise.resolve();
@@ -64,257 +66,7 @@ let freePostDate = "";
 let freePostsToday = 0;
 let lastSummarySentDate = "";
 
-// ===== STRIPE / MEMBER HELPERS =====
-function normalizeEmail(email) {
-  return String(email || "").trim().toLowerCase();
-}
-
-async function createTelegramInviteLink({ expireHours = 48 } = {}) {
-  const expireDate = Math.floor(Date.now() / 1000 + expireHours * 60 * 60);
-
-  const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/createChatInviteLink`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: PAID_TELEGRAM_CHAT_ID,
-      member_limit: 1,
-      expire_date: expireDate,
-    }),
-  });
-
-  const data = await response.json();
-
-  if (!response.ok || !data.ok) {
-    throw new Error(`Telegram invite failed: ${JSON.stringify(data)}`);
-  }
-
-  return data.result.invite_link;
-}
-
-async function createFreeTelegramInviteLink({ expireHours = 48 } = {}) {
-  if (!FREE_CHAT_ID) throw new Error("FREE_CHAT_ID missing");
-
-  const expireDate = Math.floor(Date.now() / 1000 + expireHours * 60 * 60);
-
-  const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/createChatInviteLink`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: FREE_CHAT_ID,
-      member_limit: 1,
-      expire_date: expireDate,
-    }),
-  });
-
-  const data = await response.json();
-
-  if (!response.ok || !data.ok) {
-    throw new Error(`Free Telegram invite failed: ${JSON.stringify(data)}`);
-  }
-
-  return data.result.invite_link;
-}
-
-async function removeTelegramMember(chatId, telegramUserId) {
-  if (!chatId || !telegramUserId) return false;
-
-  const banResponse = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/banChatMember`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      user_id: telegramUserId,
-    }),
-  });
-
-  const banData = await banResponse.json();
-
-  if (!banResponse.ok || !banData.ok) {
-    console.error("TELEGRAM BAN FAILED:", banData);
-    return false;
-  }
-
-  const unbanResponse = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/unbanChatMember`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      user_id: telegramUserId,
-      only_if_banned: true,
-    }),
-  });
-
-  const unbanData = await unbanResponse.json();
-
-  if (!unbanResponse.ok || !unbanData.ok) {
-    console.error("TELEGRAM UNBAN FAILED:", unbanData);
-  }
-
-  return true;
-}
-
-function findPaidMemberByStripe({ stripeCustomerId = null, stripeSubscriptionId = null }) {
-  for (const [email, member] of paidMembers.entries()) {
-    if (
-      (stripeCustomerId && member.stripeCustomerId === stripeCustomerId) ||
-      (stripeSubscriptionId && member.stripeSubscriptionId === stripeSubscriptionId)
-    ) {
-      return { email, member };
-    }
-  }
-
-  return null;
-}
-
-async function handleStripeEvent(event) {
-  console.log("STRIPE EVENT:", event?.type);
-
-  if (event?.type === "checkout.session.completed") {
-    const session = event.data.object;
-
-    const email = normalizeEmail(
-      pick(session.customer_details?.email, session.customer_email)
-    );
-
-    if (!email) return;
-
-    const inviteLink = await createTelegramInviteLink({ expireHours: 48 });
-    const existing = paidMembers.get(email) || {};
-
-    paidMembers.set(email, {
-      ...existing,
-      email,
-      status: "active",
-      active: true,
-      inviteLink,
-      inviteCreatedAt: new Date().toISOString(),
-      inviteExpireHours: 48,
-      stripeCustomerId: session.customer || existing.stripeCustomerId || null,
-      stripeSubscriptionId: session.subscription || existing.stripeSubscriptionId || null,
-      stripeSessionId: session.id || existing.stripeSessionId || null,
-      telegramUserId: existing.telegramUserId || null,
-      createdAt: existing.createdAt || new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      lastStripeEvent: event.type,
-    });
-
-    await persistState();
-
-    await sendTelegramMessage(
-`🔥 <b>NEW PAID MEMBER</b>
-
-<b>Email</b> ${escapeHtml(email)}
-<b>Status</b> active
-<b>Customer</b> ${escapeHtml(session.customer || "N/A")}
-<b>Subscription</b> ${escapeHtml(session.subscription || "N/A")}
-
-<b>Invite Link</b>
-${inviteLink}`
-    );
-
-    return;
-  }
-
-  if (
-    event?.type === "customer.subscription.deleted" ||
-    event?.type === "customer.subscription.updated" ||
-    event?.type === "invoice.payment_failed" ||
-    event?.type === "invoice.payment_succeeded"
-  ) {
-    const obj = event.data.object;
-
-    const stripeCustomerId = obj.customer || null;
-    const stripeSubscriptionId = obj.subscription || obj.id || null;
-
-    const found = findPaidMemberByStripe({
-      stripeCustomerId,
-      stripeSubscriptionId,
-    });
-
-    if (!found) {
-      console.log("STRIPE ACCESS EVENT BUT MEMBER NOT FOUND:", {
-        type: event.type,
-        stripeCustomerId,
-        stripeSubscriptionId,
-      });
-      return;
-    }
-
-    const { email, member } = found;
-
-    let newStatus = member.status || "active";
-    let shouldRemove = false;
-
-    if (event.type === "invoice.payment_succeeded") {
-      newStatus = "active";
-      shouldRemove = false;
-    }
-
-    if (event.type === "invoice.payment_failed") {
-      newStatus = "past_due";
-      shouldRemove = false;
-    }
-
-    if (event.type === "customer.subscription.deleted") {
-      newStatus = "cancelled";
-      shouldRemove = true;
-    }
-
-    if (event.type === "customer.subscription.updated") {
-      const stripeStatus = String(obj.status || "").toLowerCase();
-
-      if (stripeStatus === "active" || stripeStatus === "trialing") {
-        newStatus = "active";
-        shouldRemove = false;
-      }
-
-      if (stripeStatus === "past_due") {
-        newStatus = "past_due";
-        shouldRemove = false;
-      }
-
-      if (
-        stripeStatus === "canceled" ||
-        stripeStatus === "cancelled" ||
-        stripeStatus === "unpaid" ||
-        stripeStatus === "incomplete_expired"
-      ) {
-        newStatus = stripeStatus;
-        shouldRemove = true;
-      }
-    }
-
-    member.status = newStatus;
-    member.active = newStatus === "active";
-    member.updatedAt = new Date().toISOString();
-    member.lastStripeEvent = event.type;
-
-    let removedFromTelegram = false;
-
-    if (shouldRemove && member.telegramUserId) {
-      removedFromTelegram = await removeTelegramMember(
-        PAID_TELEGRAM_CHAT_ID,
-        member.telegramUserId
-      );
-      member.removedFromTelegramAt = removedFromTelegram ? new Date().toISOString() : null;
-    }
-
-    paidMembers.set(email, member);
-    await persistState();
-
-    await sendTelegramMessage(
-`⚠️ <b>PAID MEMBER ACCESS UPDATE</b>
-
-<b>Email</b> ${escapeHtml(email)}
-<b>Status</b> ${escapeHtml(newStatus)}
-<b>Stripe Event</b> ${escapeHtml(event.type)}
-<b>Removed From Telegram</b> ${removedFromTelegram ? "yes" : "no / telegramUserId missing"}`
-    );
-
-    return;
-  }
-}
-
+// ===== RAW STRIPE ROUTE MUST BE BEFORE express.json =====
 app.post(
   "/webhook/stripe",
   express.raw({ type: "application/json", limit: "2mb" }),
@@ -360,7 +112,7 @@ const CHARTS = {
 
 const CHART_IMAGES = {};
 
-// ===== BASIC HELPERS =====
+// ===== HELPERS =====
 function pick(...values) {
   for (const v of values) {
     if (v !== undefined && v !== null && String(v).trim() !== "") return v;
@@ -403,6 +155,10 @@ function fmtRR(v) {
   return `${n.toFixed(2)}R`;
 }
 
+function normalizeEmail(email) {
+  return String(email || "").trim().toLowerCase();
+}
+
 function normalizeSymbol(v) {
   return String(v || "")
     .toUpperCase()
@@ -427,12 +183,17 @@ function normalizeEventType(v) {
 function normalizeSetupType(v) {
   const x = String(v || "").toLowerCase().trim();
   if (!x) return "";
-  if (x.includes("break")) return "BREAKOUT";
-  if (x.includes("pull")) return "PULLBACK";
-  if (x.includes("trend")) return "TREND";
-  if (x.includes("reversal") || x.includes("reverse")) return "REVERSAL";
-  if (x.includes("compress") || x.includes("squeeze")) return "COMPRESSION";
-  if (x.includes("momentum")) return "MOMENTUM";
+  if (x.includes("trend_pullback")) return "TREND_PULLBACK";
+  if (x.includes("compression_breakout")) return "COMPRESSION_BREAKOUT";
+  if (x.includes("liquidity_reclaim")) return "LIQUIDITY_RECLAIM";
+  if (x.includes("htf_continuation")) return "HTF_CONTINUATION";
+  if (x.includes("reversal_expansion")) return "REVERSAL_EXPANSION";
+  if (x.includes("break")) return "COMPRESSION_BREAKOUT";
+  if (x.includes("pull")) return "TREND_PULLBACK";
+  if (x.includes("reclaim")) return "LIQUIDITY_RECLAIM";
+  if (x.includes("trend")) return "HTF_CONTINUATION";
+  if (x.includes("reversal") || x.includes("reverse")) return "REVERSAL_EXPANSION";
+  if (x.includes("compress") || x.includes("squeeze")) return "COMPRESSION_BREAKOUT";
   return x.toUpperCase();
 }
 
@@ -443,7 +204,6 @@ function formatUtc(ts) {
     d = new Date();
   } else {
     const raw = String(ts).trim();
-
     if (/^\d+$/.test(raw)) {
       const num = Number(raw);
       d = raw.length <= 10 ? new Date(num * 1000) : new Date(num);
@@ -473,7 +233,6 @@ function getUtcDateKey(ts = Date.now()) {
 
 function eventTimeToMs(ts) {
   if (ts === null || ts === undefined || ts === "") return Date.now();
-
   const raw = String(ts).trim();
 
   if (/^\d+$/.test(raw)) {
@@ -503,15 +262,15 @@ function getBaseUrl() {
   return APP_BASE_URL;
 }
 
-function buildLocalChartImageUrl({ req = null, symbol, side, refId }) {
-  const baseUrl = getBaseUrl(req);
+function buildLocalChartImageUrl({ symbol, side, refId }) {
+  const baseUrl = getBaseUrl();
   if (!baseUrl || !symbol) return null;
 
   const params = new URLSearchParams({
     symbol: toTvSymbol(symbol),
     side: String(side || "LONG"),
     ref: String(refId || ""),
-    interval: "60",
+    interval: "15",
   });
 
   return `${baseUrl}/chart-image?${params.toString()}`;
@@ -519,7 +278,15 @@ function buildLocalChartImageUrl({ req = null, symbol, side, refId }) {
 
 function allocNextRef() {
   nextRef += 1;
-  if (nextRef > 999999) nextRef = REF_START_FLOOR;
+
+  if (!Number.isFinite(nextRef) || nextRef < REF_START_FLOOR) {
+    nextRef = REF_START_FLOOR;
+  }
+
+  if (nextRef > 999999) {
+    nextRef = REF_START_FLOOR;
+  }
+
   return String(nextRef).padStart(6, "0");
 }
 
@@ -553,7 +320,6 @@ function hasValidTradeLevels(side, entry, tp, sl) {
 function pctMove(side, entry, price) {
   const e = parseNum(entry);
   const p = parseNum(price);
-
   if (!Number.isFinite(e) || !Number.isFinite(p) || e <= 0) return null;
 
   if (side === "LONG") return ((p - e) / e) * 100;
@@ -565,7 +331,6 @@ function pctMove(side, entry, price) {
 function tpPctFromLevels(side, entry, tp) {
   const e = parseNum(entry);
   const t = parseNum(tp);
-
   if (!Number.isFinite(e) || !Number.isFinite(t) || e <= 0) return null;
 
   if (side === "LONG") return ((t - e) / e) * 100;
@@ -598,17 +363,29 @@ function rrFromLevels(side, entry, tp, sl) {
   return reward / risk;
 }
 
-function getStrengthBucket({ symbol, side, rsi, atrPct, score, risk, incomingStrength }) {
-  const explicitStrength = String(incomingStrength || "").trim().toUpperCase();
+function applyFallbackLevels(side, entry, strength, symbol) {
+  const e = parseNum(entry);
+  if (!Number.isFinite(e) || e <= 0) return { tp: null, sl: null };
 
-  if (
-    explicitStrength === "A+" ||
-    explicitStrength === "A" ||
-    explicitStrength === "B" ||
-    explicitStrength === "C"
-  ) {
-    return explicitStrength;
+  const major = isMajorSymbol(symbol);
+
+  const tpPct = strength === "A+" ? (major ? 2.4 : 2.8) : (major ? 2.0 : 2.4);
+  const slPct = major ? 1.0 : 1.2;
+
+  if (side === "LONG") {
+    return { tp: e * (1 + tpPct / 100), sl: e * (1 - slPct / 100) };
   }
+
+  if (side === "SHORT") {
+    return { tp: e * (1 - tpPct / 100), sl: e * (1 + slPct / 100) };
+  }
+
+  return { tp: null, sl: null };
+}
+
+function getStrengthBucket({ symbol, side, rsi, atrPct, score, risk, incomingStrength }) {
+  const explicit = String(incomingStrength || "").trim().toUpperCase();
+  if (["A+", "A", "B", "C"].includes(explicit)) return explicit;
 
   const numericScore = parseNum(score);
   const numericRisk = parseNum(risk);
@@ -616,9 +393,9 @@ function getStrengthBucket({ symbol, side, rsi, atrPct, score, risk, incomingStr
   const numericAtr = parseNum(atrPct);
 
   if (Number.isFinite(numericScore)) {
-    if (numericScore >= 90) return "A+";
-    if (numericScore >= 75) return "A";
-    if (numericScore >= 60) return "B";
+    if (numericScore >= 10) return "A+";
+    if (numericScore >= 8) return "A";
+    if (numericScore >= 6) return "B";
     return "C";
   }
 
@@ -629,46 +406,18 @@ function getStrengthBucket({ symbol, side, rsi, atrPct, score, risk, incomingStr
   }
 
   if (side === "LONG" && Number.isFinite(numericRsi)) {
-    if (numericRsi >= 60 && numericAtr <= 2.8) return "A+";
-    if (numericRsi >= 56 && numericAtr <= 3.2) return "A";
+    if (numericRsi >= 55 && numericAtr <= 3.2) return "A";
     if (numericRsi >= 50) return "B";
     return "C";
   }
 
   if (side === "SHORT" && Number.isFinite(numericRsi)) {
-    if (numericRsi <= 40 && numericAtr <= 2.8) return "A+";
-    if (numericRsi <= 44 && numericAtr <= 3.2) return "A";
+    if (numericRsi <= 45 && numericAtr <= 3.2) return "A";
     if (numericRsi <= 50) return "B";
     return "C";
   }
 
-  if (isMajorSymbol(symbol)) return "B";
-  return "C";
-}
-
-function applyFallbackLevels(side, entry, strength, symbol) {
-  const e = parseNum(entry);
-  if (!Number.isFinite(e) || e <= 0) return { tp: null, sl: null };
-
-  const major = isMajorSymbol(symbol);
-  const tpPct = strength === "A+" ? (major ? 1.2 : 1.4) : (major ? 0.9 : 1.1);
-  const slPct = major ? 1.0 : 1.2;
-
-  if (side === "LONG") {
-    return {
-      tp: e * (1 + tpPct / 100),
-      sl: e * (1 - slPct / 100),
-    };
-  }
-
-  if (side === "SHORT") {
-    return {
-      tp: e * (1 - tpPct / 100),
-      sl: e * (1 + slPct / 100),
-    };
-  }
-
-  return { tp: null, sl: null };
+  return isMajorSymbol(symbol) ? "B" : "C";
 }
 
 function deriveSetupType({ body, side, rsi, atrPct }) {
@@ -678,40 +427,28 @@ function deriveSetupType({ body, side, rsi, atrPct }) {
 
   if (explicit) return explicit;
 
-  const numericRsi = parseNum(rsi);
   const numericAtr = parseNum(atrPct);
+  const numericRsi = parseNum(rsi);
 
-  if (Number.isFinite(numericAtr) && numericAtr <= 1.2) return "COMPRESSION";
+  if (Number.isFinite(numericAtr) && numericAtr <= 1.2) return "COMPRESSION_BREAKOUT";
 
   if (side === "LONG") {
-    if (Number.isFinite(numericRsi) && numericRsi < 42) return "REVERSAL";
-    if (Number.isFinite(numericRsi) && numericRsi >= 58) return "MOMENTUM";
-    if (Number.isFinite(numericRsi) && numericRsi >= 50) return "TREND";
-    return "PULLBACK";
+    if (Number.isFinite(numericRsi) && numericRsi < 43) return "LIQUIDITY_RECLAIM";
+    if (Number.isFinite(numericRsi) && numericRsi >= 55) return "HTF_CONTINUATION";
+    return "TREND_PULLBACK";
   }
 
   if (side === "SHORT") {
-    if (Number.isFinite(numericRsi) && numericRsi > 58) return "REVERSAL";
-    if (Number.isFinite(numericRsi) && numericRsi <= 42) return "MOMENTUM";
-    if (Number.isFinite(numericRsi) && numericRsi <= 50) return "TREND";
-    return "PULLBACK";
+    if (Number.isFinite(numericRsi) && numericRsi > 57) return "LIQUIDITY_RECLAIM";
+    if (Number.isFinite(numericRsi) && numericRsi <= 45) return "HTF_CONTINUATION";
+    return "TREND_PULLBACK";
   }
 
-  return "TREND";
-}
-
-function getStrengthText(strength) {
-  if (!strength) return "N/A";
-  return strength;
+  return "HTF_CONTINUATION";
 }
 
 function resolveLeverage(body, symbol, strength) {
-  const raw = pick(
-    body.leverage,
-    body.lev,
-    body.suggested_leverage,
-    body.recommended_leverage
-  );
+  const raw = pick(body.leverage, body.lev, body.suggested_leverage, body.recommended_leverage);
 
   if (raw) {
     const txt = String(raw).trim().toLowerCase().replace(/\s+/g, "");
@@ -724,22 +461,234 @@ function resolveLeverage(body, symbol, strength) {
   return isMajorSymbol(symbol) ? "3x" : "2x";
 }
 
-function buildWhyLine({ body, symbol, side, setupType }) {
+function buildWhyLine({ body, symbol, side, setupType, marketRegime, session, confidence }) {
   const incomingReason = pick(body.reason, body.why, body.comment, body.market_bias);
+  if (incomingReason) return String(incomingReason).trim();
 
-  if (incomingReason) {
-    return String(incomingReason).trim();
+  const directionText =
+    side === "LONG"
+      ? "buyers are trying to continue higher from a structured area"
+      : "sellers are trying to continue lower from a structured area";
+
+  return `${setupType} detected on ${symbol}. ${directionText}. Session: ${session || "N/A"}. Regime: ${marketRegime || "N/A"}. Confidence: ${confidence || "N/A"}.`;
+}
+
+// ===== EVENT DETECTION =====
+function detectExplicitHitType(eventType, body) {
+  const normalized = normalizeEventType(eventType);
+  const hitType = String(pick(body.hit_type, body.result, "") || "").toLowerCase();
+  const rawText = JSON.stringify(body).toLowerCase();
+
+  if (
+    normalized.includes("time_exit_profit") ||
+    hitType === "time_exit_profit" ||
+    rawText.includes("time_exit_profit")
+  ) {
+    return "TIME_EXIT_PROFIT";
   }
 
-  if (side === "LONG") {
-    return `${setupType} long setup. Buyers are trying to push price toward the nearby target.`;
+  if (
+    normalized.includes("time_exit_loss") ||
+    hitType === "time_exit_loss" ||
+    rawText.includes("time_exit_loss")
+  ) {
+    return "TIME_EXIT_LOSS";
   }
 
-  if (side === "SHORT") {
-    return `${setupType} short setup. Sellers are trying to push price toward the nearby target.`;
+  if (
+    normalized.includes("tp_hit") ||
+    normalized.includes("take_profit_hit") ||
+    normalized === "tp" ||
+    hitType === "tp" ||
+    rawText.includes("tp_hit") ||
+    rawText.includes("take_profit")
+  ) {
+    return "TP";
   }
 
-  return `${symbol} setup detected.`;
+  if (
+    normalized.includes("sl_hit") ||
+    normalized.includes("stop_loss_hit") ||
+    normalized === "sl" ||
+    hitType === "sl" ||
+    rawText.includes("sl_hit") ||
+    rawText.includes("stop_loss")
+  ) {
+    return "SL";
+  }
+
+  if (
+    normalized.includes("expired") ||
+    hitType === "expired" ||
+    rawText.includes('"event":"expired"')
+  ) {
+    return "EXPIRED";
+  }
+
+  return null;
+}
+
+function isLikelySignalEvent(eventType, side, entry) {
+  const normalized = normalizeEventType(eventType);
+  if (normalized.includes("signal")) return true;
+  if (normalized.includes("entry")) return true;
+  if (normalized.includes("alert")) return true;
+  return (side === "LONG" || side === "SHORT") && entry !== null && entry !== undefined && entry !== "";
+}
+
+function buildTradeKey(symbol, side, refId) {
+  return `${symbol}|${side}|${refId}`;
+}
+
+function collectRawCandidateIds(body) {
+  return uniqueStrings([
+    pick(body.alert_id),
+    pick(body.signal_alert_id),
+    pick(body.parent_alert_id),
+    pick(body.source_alert_id),
+    pick(body.strategy_order_id),
+    pick(body.order_id),
+    pick(body.id),
+    pick(body.ref_id),
+  ]);
+}
+
+function collectAllCandidateIds({ body, symbol, side, eventTimeMs, refId }) {
+  const ms = Number.isFinite(eventTimeMs) ? String(eventTimeMs) : "";
+  const sec = Number.isFinite(eventTimeMs) ? String(Math.floor(eventTimeMs / 1000)) : "";
+
+  return uniqueStrings([
+    ...collectRawCandidateIds(body),
+    refId ? String(refId) : null,
+    symbol && side && ms ? `${symbol}-${side}-${ms}` : null,
+    symbol && side && sec ? `${symbol}-${side}-${sec}` : null,
+  ]);
+}
+
+function buildRecentHitKey({ symbol, hitType, refId, eventTime }) {
+  return `${symbol}|${hitType}|${refId}|${String(eventTime || "")}`;
+}
+
+function wasRecentHitSent(hitKey) {
+  return recentHitKeys.has(hitKey);
+}
+
+async function markRecentHit(hitKey) {
+  recentHitKeys.set(hitKey, Date.now());
+  await persistState();
+}
+
+function findTradeByRefId(refId) {
+  if (!refId) return null;
+
+  for (const [key, trade] of activeTrades.entries()) {
+    if (trade.hit) continue;
+    if (String(trade.refId) === String(refId)) {
+      return { key, trade, matchType: "ref_id", score: 2000 };
+    }
+  }
+
+  return null;
+}
+
+function findOpenTradeByCandidateIds(ids) {
+  const wanted = uniqueStrings(ids);
+  if (wanted.length === 0) return null;
+
+  for (const [key, trade] of activeTrades.entries()) {
+    if (trade.hit) continue;
+
+    const tradeIds = uniqueStrings([
+      trade.primaryAlertId,
+      ...(Array.isArray(trade.alertIds) ? trade.alertIds : []),
+    ]);
+
+    const matched = tradeIds.some((id) => wanted.includes(id));
+
+    if (matched) {
+      return { key, trade, matchType: "candidate_id", score: 1000 };
+    }
+  }
+
+  return null;
+}
+
+function findLatestOpenTradeBySymbol(symbol) {
+  let latest = null;
+
+  for (const [key, trade] of activeTrades.entries()) {
+    if (trade.symbol !== symbol) continue;
+    if (trade.hit) continue;
+
+    if (!latest || trade.createdAtMs > latest.trade.createdAtMs) {
+      latest = { key, trade, matchType: "symbol_latest", score: 500 };
+    }
+  }
+
+  return latest;
+}
+
+function countOpenTradesForSymbol(symbol) {
+  let count = 0;
+  for (const [, trade] of activeTrades.entries()) {
+    if (!trade || trade.hit) continue;
+    if (trade.symbol === symbol) count += 1;
+  }
+  return count;
+}
+
+function hasOpenTradeForSymbol(symbol) {
+  return countOpenTradesForSymbol(symbol) >= MAX_OPEN_TRADES_PER_SYMBOL;
+}
+
+function shouldInferHit(trade, currentPrice) {
+  if (!Number.isFinite(currentPrice)) return null;
+  if (trade.hit) return null;
+
+  if (trade.side === "LONG") {
+    if (currentPrice >= trade.tp) return "TP";
+    if (currentPrice <= trade.sl) return "SL";
+  }
+
+  if (trade.side === "SHORT") {
+    if (currentPrice <= trade.tp) return "TP";
+    if (currentPrice >= trade.sl) return "SL";
+  }
+
+  return null;
+}
+
+function getTimeExitResult(trade, currentPrice) {
+  const movePct = pctMove(trade.side, trade.entry, currentPrice);
+  if (!Number.isFinite(movePct)) return "EXPIRED";
+  if (movePct > 0.05) return "TIME_EXIT_PROFIT";
+  if (movePct < -0.05) return "TIME_EXIT_LOSS";
+  return "EXPIRED";
+}
+
+function getOpenTradesForSymbol(symbol) {
+  const items = [];
+
+  for (const [, trade] of activeTrades.entries()) {
+    if (trade.symbol !== symbol) continue;
+    if (trade.hit) continue;
+
+    items.push({
+      refId: trade.refId,
+      symbol: trade.symbol,
+      side: trade.side,
+      entry: trade.entry,
+      tp: trade.tp,
+      sl: trade.sl,
+      createdAtMs: trade.createdAtMs,
+      createdAtUtc: formatUtc(trade.createdAtMs),
+      primaryAlertId: trade.primaryAlertId || null,
+      alertIds: uniqueStrings(trade.alertIds || []),
+    });
+  }
+
+  items.sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0));
+  return items;
 }
 
 // ===== DAILY STATS =====
@@ -763,6 +712,7 @@ function getDailyStat(dateKey = getUtcDateKey(Date.now())) {
 
   if (stat.timeExitProfit === undefined) stat.timeExitProfit = 0;
   if (stat.timeExitLoss === undefined) stat.timeExitLoss = 0;
+  if (stat.expired === undefined) stat.expired = 0;
   if (!stat.bySymbol) stat.bySymbol = {};
   if (!stat.byRef) stat.byRef = {};
 
@@ -784,6 +734,7 @@ function ensureSymbolStats(stat, symbol) {
   const s = stat.bySymbol[symbol];
   if (s.timeExitProfit === undefined) s.timeExitProfit = 0;
   if (s.timeExitLoss === undefined) s.timeExitLoss = 0;
+  if (s.expired === undefined) s.expired = 0;
 
   return s;
 }
@@ -799,6 +750,13 @@ async function recordSignalStat({
   sl,
   rr,
   sharedToFree,
+  setupScore,
+  trendStrength,
+  volatilityState,
+  marketRegime,
+  session,
+  confidenceLevel,
+  estimatedHoldDuration,
   ts = Date.now(),
 }) {
   const dateKey = getUtcDateKey(ts);
@@ -808,9 +766,7 @@ async function recordSignalStat({
   stat.alerts += 1;
   symbolStat.alerts += 1;
 
-  if (sharedToFree) {
-    stat.freeAlerts += 1;
-  }
+  if (sharedToFree) stat.freeAlerts += 1;
 
   stat.byRef[String(refId)] = {
     refId: String(refId),
@@ -818,6 +774,13 @@ async function recordSignalStat({
     side,
     strength,
     setupType,
+    setupScore,
+    trendStrength,
+    volatilityState,
+    marketRegime,
+    session,
+    confidenceLevel,
+    estimatedHoldDuration,
     entry,
     tp,
     sl,
@@ -925,289 +888,6 @@ function wasSharedToFree(refId) {
   return freeSharedRefs.has(String(refId));
 }
 
-// ===== HIT / MATCH HELPERS =====
-function detectExplicitHitType(eventType, body) {
-  const normalized = normalizeEventType(eventType);
-  const hitType = String(pick(body.hit_type, body.result, "") || "").toLowerCase();
-  const rawText = JSON.stringify(body).toLowerCase();
-
-  if (
-    normalized.includes("tp_hit") ||
-    normalized.includes("take_profit_hit") ||
-    normalized === "tp" ||
-    hitType === "tp" ||
-    rawText.includes("tp_hit") ||
-    rawText.includes("take_profit")
-  ) {
-    return "TP";
-  }
-
-  if (
-    normalized.includes("sl_hit") ||
-    normalized.includes("stop_loss_hit") ||
-    normalized === "sl" ||
-    hitType === "sl" ||
-    rawText.includes("sl_hit") ||
-    rawText.includes("stop_loss")
-  ) {
-    return "SL";
-  }
-
-  if (
-    normalized.includes("expired") ||
-    normalized.includes("time_exit") ||
-    hitType === "expired" ||
-    hitType === "time_exit"
-  ) {
-    return "EXPIRED";
-  }
-
-  return null;
-}
-
-function isLikelySignalEvent(eventType, side, entry) {
-  const normalized = normalizeEventType(eventType);
-  if (normalized.includes("signal")) return true;
-  if (normalized.includes("entry")) return true;
-  if (normalized.includes("alert")) return true;
-
-  return (side === "LONG" || side === "SHORT") && entry !== null && entry !== undefined && entry !== "";
-}
-
-function buildTradeKey(symbol, side, refId) {
-  return `${symbol}|${side}|${refId}`;
-}
-
-function collectRawCandidateIds(body) {
-  return uniqueStrings([
-    pick(body.alert_id),
-    pick(body.signal_alert_id),
-    pick(body.parent_alert_id),
-    pick(body.source_alert_id),
-    pick(body.strategy_order_id),
-    pick(body.order_id),
-    pick(body.id),
-    pick(body.ref_id),
-  ]);
-}
-
-function collectAllCandidateIds({ body, symbol, side, eventTimeMs, refId }) {
-  const ms = Number.isFinite(eventTimeMs) ? String(eventTimeMs) : "";
-  const sec = Number.isFinite(eventTimeMs) ? String(Math.floor(eventTimeMs / 1000)) : "";
-
-  return uniqueStrings([
-    ...collectRawCandidateIds(body),
-    refId ? String(refId) : null,
-    symbol && side && ms ? `${symbol}-${side}-${ms}` : null,
-    symbol && side && sec ? `${symbol}-${side}-${sec}` : null,
-  ]);
-}
-
-function buildRecentHitKey({ symbol, hitType, refId, eventTime }) {
-  return `${symbol}|${hitType}|${refId}|${String(eventTime || "")}`;
-}
-
-function wasRecentHitSent(hitKey) {
-  return recentHitKeys.has(hitKey);
-}
-
-async function markRecentHit(hitKey) {
-  recentHitKeys.set(hitKey, Date.now());
-  await persistState();
-}
-
-function findTradeByRefId(refId) {
-  if (!refId) return null;
-
-  for (const [key, trade] of activeTrades.entries()) {
-    if (trade.hit) continue;
-
-    if (String(trade.refId) === String(refId)) {
-      return { key, trade, matchType: "ref_id", score: 2000 };
-    }
-  }
-
-  return null;
-}
-
-function findOpenTradeByCandidateIds(ids) {
-  const wanted = uniqueStrings(ids);
-  if (wanted.length === 0) return null;
-
-  for (const [key, trade] of activeTrades.entries()) {
-    if (trade.hit) continue;
-
-    const tradeIds = uniqueStrings([
-      trade.primaryAlertId,
-      ...(Array.isArray(trade.alertIds) ? trade.alertIds : []),
-    ]);
-
-    const matched = tradeIds.some((id) => wanted.includes(id));
-
-    if (matched) {
-      return { key, trade, matchType: "candidate_id", score: 1000 };
-    }
-  }
-
-  return null;
-}
-
-function findLatestOpenTradeBySymbol(symbol) {
-  let latest = null;
-
-  for (const [key, trade] of activeTrades.entries()) {
-    if (trade.symbol !== symbol) continue;
-    if (trade.hit) continue;
-
-    if (!latest || trade.createdAtMs > latest.trade.createdAtMs) {
-      latest = { key, trade, matchType: "symbol_latest", score: 500 };
-    }
-  }
-
-  return latest;
-}
-
-function countOpenTradesForSymbol(symbol) {
-  let count = 0;
-
-  for (const [, trade] of activeTrades.entries()) {
-    if (!trade) continue;
-    if (trade.hit) continue;
-    if (trade.symbol === symbol) count += 1;
-  }
-
-  return count;
-}
-
-function hasOpenTradeForSymbol(symbol) {
-  return countOpenTradesForSymbol(symbol) >= MAX_OPEN_TRADES_PER_SYMBOL;
-}
-
-function shouldInferHit(trade, currentPrice) {
-  if (!Number.isFinite(currentPrice)) return null;
-  if (trade.hit) return null;
-
-  if (trade.side === "LONG") {
-    if (currentPrice >= trade.tp) return "TP";
-    if (currentPrice <= trade.sl) return "SL";
-  }
-
-  if (trade.side === "SHORT") {
-    if (currentPrice <= trade.tp) return "TP";
-    if (currentPrice >= trade.sl) return "SL";
-  }
-
-  return null;
-}
-
-function getTimeExitResult(trade, currentPrice) {
-  const movePct = pctMove(trade.side, trade.entry, currentPrice);
-  if (!Number.isFinite(movePct)) return "EXPIRED";
-
-  if (movePct > 0.05) return "TIME_EXIT_PROFIT";
-  if (movePct < -0.05) return "TIME_EXIT_LOSS";
-
-  return "EXPIRED";
-}
-
-function getOpenTradesForSymbol(symbol) {
-  const items = [];
-
-  for (const [, trade] of activeTrades.entries()) {
-    if (trade.symbol !== symbol) continue;
-    if (trade.hit) continue;
-
-    items.push({
-      refId: trade.refId,
-      symbol: trade.symbol,
-      side: trade.side,
-      entry: trade.entry,
-      tp: trade.tp,
-      sl: trade.sl,
-      createdAtMs: trade.createdAtMs,
-      createdAtUtc: formatUtc(trade.createdAtMs),
-      primaryAlertId: trade.primaryAlertId || null,
-      alertIds: uniqueStrings(trade.alertIds || []),
-    });
-  }
-
-  items.sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0));
-  return items;
-}
-
-// ===== CHART HELPERS =====
-function resolveChartLink(symbol) {
-  return CHARTS[symbol] || "N/A";
-}
-
-function looksLikeDirectImageUrl(url) {
-  const value = String(url || "").trim();
-
-  if (!/^https?:\/\//i.test(value)) return false;
-  if (/\.(png|jpg|jpeg|webp)(\?.*)?$/i.test(value)) return true;
-  if (value.includes("/image")) return true;
-  if (value.includes("/images/")) return true;
-  if (value.includes("chart-image")) return true;
-  if (value.includes("snapshot")) return true;
-
-  return false;
-}
-
-function isLocalChartImageUrl(url) {
-  const value = String(url || "").trim();
-
-  if (!value) return false;
-  if (!value.includes("/chart-image")) return false;
-
-  const baseUrl = getBaseUrl();
-
-  if (baseUrl && value.startsWith(baseUrl)) return true;
-
-  try {
-    const parsed = new URL(value);
-    return parsed.pathname === "/chart-image";
-  } catch {
-    return value.includes("/chart-image");
-  }
-}
-
-function resolveChartImageUrl(body, symbol, side = "LONG", refId = "", req = null) {
-  const inline = pick(
-    body.chart_image_url,
-    body.image_url,
-    body.snapshot_url,
-    body.chart_snapshot,
-    body.chart_image,
-    body.image,
-    body.photo
-  );
-
-  if (inline && looksLikeDirectImageUrl(inline)) {
-    return String(inline).trim();
-  }
-
-  const mapped = CHART_IMAGES[symbol];
-
-  if (mapped && looksLikeDirectImageUrl(mapped)) {
-    return String(mapped).trim();
-  }
-
-  if (CHART_IMAGE_TEMPLATE && CHART_IMAGE_TEMPLATE.includes("{symbol}")) {
-    const built = CHART_IMAGE_TEMPLATE.replace("{symbol}", symbol);
-
-    if (looksLikeDirectImageUrl(built)) {
-      return built;
-    }
-  }
-
-  return buildLocalChartImageUrl({
-    req,
-    symbol,
-    side,
-    refId,
-  });
-}
-
 // ===== HTML / TEXT =====
 function escapeHtml(value) {
   return String(value ?? "")
@@ -1217,19 +897,17 @@ function escapeHtml(value) {
 }
 
 function escapeAttr(value) {
-  return String(value ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/"/g, "&quot;");
+  return String(value ?? "").replace(/&/g, "&amp;").replace(/"/g, "&quot;");
 }
 
 function formatChartHtml(chartLink) {
   if (!chartLink || chartLink === "N/A") return "N/A";
-
-  if (!/^https?:\/\//i.test(String(chartLink))) {
-    return escapeHtml(chartLink);
-  }
-
+  if (!/^https?:\/\//i.test(String(chartLink))) return escapeHtml(chartLink);
   return `<a href="${escapeAttr(chartLink)}">Open chart</a>`;
+}
+
+function getStrengthText(strength) {
+  return strength || "N/A";
 }
 
 function buildAlertText({
@@ -1247,11 +925,20 @@ function buildAlertText({
   showChartLink,
   refId,
   tpPct,
+  setupType,
+  setupScore,
+  marketRegime,
+  session,
+  confidenceLevel,
 }) {
   return `🚨 <b>ALERT • ${escapeHtml(symbol)}</b>
 <b>REF</b> ${escapeHtml(refId)}
 
 <b>DIRECTION</b> ${escapeHtml(side)}
+<b>SETUP</b> ${escapeHtml(setupType || "N/A")}
+<b>SCORE</b> ${escapeHtml(setupScore || "N/A")}
+<b>CONFIDENCE</b> ${escapeHtml(confidenceLevel || "N/A")}
+
 <b>ENTRY</b> ${escapeHtml(fmtPrice(entry))}
 <b>TP</b> ${escapeHtml(fmtPrice(tp))} (${escapeHtml(fmtPct(tpPct))})
 <b>SL</b> ${escapeHtml(fmtPrice(sl))}
@@ -1259,7 +946,9 @@ function buildAlertText({
 <b>STRENGTH</b> ${escapeHtml(getStrengthText(strength))}
 <b>LEVERAGE</b> ${escapeHtml(leverage)}
 
-<b>TIMEFRAME</b> 60M
+<b>TF</b> 15M execution / 1H bias
+<b>SESSION</b> ${escapeHtml(session || "N/A")}
+<b>REGIME</b> ${escapeHtml(marketRegime || "N/A")}
 <b>UTC</b> ${escapeHtml(prettyTime)}
 
 <b>WHY</b> ${escapeHtml(whyLine)}${showChartLink ? `
@@ -1269,19 +958,18 @@ function buildAlertText({
 NFA`;
 }
 
-function buildHitText({
-  trade,
-  hitType,
-  exitPrice,
-  movePct,
-  chartLink,
-  showChartLink,
-}) {
-  const isTp = hitType === "TP";
-  const isSl = hitType === "SL";
-  const isTimeProfit = hitType === "TIME_EXIT_PROFIT";
+function buildHitText({ trade, hitType, exitPrice, movePct, chartLink, showChartLink }) {
+  const icon =
+    hitType === "TP"
+      ? "🎯"
+      : hitType === "SL"
+      ? "🛑"
+      : hitType === "TIME_EXIT_PROFIT"
+      ? "⏱️✅"
+      : hitType === "TIME_EXIT_LOSS"
+      ? "⏱️⚠️"
+      : "⌛";
 
-  const icon = isTp ? "🎯" : isSl ? "🛑" : isTimeProfit ? "⏱️✅" : "⏱️⚠️";
   const status =
     hitType === "TP"
       ? "TP HIT"
@@ -1308,7 +996,6 @@ function buildHitText({
 function appendChartLinkIfMissing(text, chartLink) {
   if (!chartLink || chartLink === "N/A") return text;
   if (String(text).includes("<b>CHART</b>")) return text;
-
   return `${text}
 
 <b>CHART</b> ${formatChartHtml(chartLink)}`;
@@ -1316,16 +1003,16 @@ function appendChartLinkIfMissing(text, chartLink) {
 
 function buildDailySummaryText(dateKey) {
   const stat = getDailyStat(dateKey);
-  const closed = stat.tp + stat.sl + stat.timeExitProfit + stat.timeExitLoss;
+  const closed = stat.tp + stat.sl + stat.timeExitProfit + stat.timeExitLoss + stat.expired;
   const positive = stat.tp + stat.timeExitProfit;
   const winrate = closed > 0 ? (positive / closed) * 100 : null;
   const openCount = Array.from(activeTrades.values()).filter((t) => !t.hit).length;
 
   const symbols = Object.entries(stat.bySymbol || {})
     .sort((a, b) => (b[1].alerts || 0) - (a[1].alerts || 0))
-    .slice(0, 8)
+    .slice(0, 10)
     .map(([symbol, s]) => {
-      return `${symbol}: ${s.alerts || 0} alerts | TP ${s.tp || 0} | SL ${s.sl || 0} | T+ ${s.timeExitProfit || 0} | T- ${s.timeExitLoss || 0}`;
+      return `${symbol}: ${s.alerts || 0} alerts | TP ${s.tp || 0} | SL ${s.sl || 0} | T+ ${s.timeExitProfit || 0} | T- ${s.timeExitLoss || 0} | EXP ${s.expired || 0}`;
     });
 
   return `📊 <b>D-ALRT DAILY OVERVIEW</b>
@@ -1347,102 +1034,548 @@ ${symbols.length ? `<b>BY SYMBOL</b>\n${escapeHtml(symbols.join("\n"))}` : "<b>B
 NFA`;
 }
 
-async function sendDailySummary(dateKey, force = false) {
-  if (!DAILY_SUMMARY_ENABLED && !force) return false;
-  if (!force && lastSummarySentDate === dateKey) return false;
+// ===== CHART HELPERS =====
+function resolveChartLink(symbol) {
+  return CHARTS[symbol] || "N/A";
+}
 
-  const text = buildDailySummaryText(dateKey);
+function looksLikeDirectImageUrl(url) {
+  const value = String(url || "").trim();
+  if (!/^https?:\/\//i.test(value)) return false;
+  if (/\.(png|jpg|jpeg|webp)(\?.*)?$/i.test(value)) return true;
+  if (value.includes("/image")) return true;
+  if (value.includes("/images/")) return true;
+  if (value.includes("chart-image")) return true;
+  if (value.includes("snapshot")) return true;
+  return false;
+}
 
-  await sendTelegramMessage(text, CHAT_ID);
+function isLocalChartImageUrl(url) {
+  const value = String(url || "").trim();
+  if (!value) return false;
+  if (!value.includes("/chart-image")) return false;
 
-  if (FREE_CHAT_ID) {
-    await sendTelegramMessage(text, FREE_CHAT_ID);
+  const baseUrl = getBaseUrl();
+  if (baseUrl && value.startsWith(baseUrl)) return true;
+
+  try {
+    const parsed = new URL(value);
+    return parsed.pathname === "/chart-image";
+  } catch {
+    return value.includes("/chart-image");
+  }
+}
+
+function resolveChartImageUrl(body, symbol, side = "LONG", refId = "") {
+  const inline = pick(
+    body.chart_image_url,
+    body.image_url,
+    body.snapshot_url,
+    body.chart_snapshot,
+    body.chart_image,
+    body.image,
+    body.photo
+  );
+
+  if (inline && looksLikeDirectImageUrl(inline)) return String(inline).trim();
+
+  const mapped = CHART_IMAGES[symbol];
+  if (mapped && looksLikeDirectImageUrl(mapped)) return String(mapped).trim();
+
+  if (CHART_IMAGE_TEMPLATE && CHART_IMAGE_TEMPLATE.includes("{symbol}")) {
+    const built = CHART_IMAGE_TEMPLATE.replace("{symbol}", symbol);
+    if (looksLikeDirectImageUrl(built)) return built;
   }
 
-  lastSummarySentDate = dateKey;
-  await persistState();
+  return buildLocalChartImageUrl({ symbol, side, refId });
+}
 
-  console.log("DAILY SUMMARY SENT:", {
-    dateKey,
-    force,
-    lastSummarySentDate,
+// ===== TELEGRAM =====
+async function sendTelegramMessage(text, chatId = CHAT_ID) {
+  const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text,
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+    }),
+  });
+
+  const data = await response.json();
+
+  console.log("TELEGRAM MESSAGE RESPONSE:", { chatId, data });
+
+  if (!response.ok || !data.ok) {
+    throw new Error(`Telegram sendMessage failed: ${JSON.stringify(data)}`);
+  }
+}
+
+async function sendTelegramPhoto({
+  photoUrl = null,
+  photoBuffer = null,
+  filename = "chart.png",
+  caption = "",
+  chatId = CHAT_ID,
+}) {
+  let response;
+
+  if (photoBuffer) {
+    const form = new FormData();
+    form.append("chat_id", chatId);
+    form.append("caption", caption);
+    form.append("parse_mode", "HTML");
+    form.append("photo", new Blob([photoBuffer], { type: "image/png" }), filename);
+
+    response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
+      method: "POST",
+      body: form,
+    });
+  } else {
+    response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: chatId,
+        photo: photoUrl,
+        caption,
+        parse_mode: "HTML",
+      }),
+    });
+  }
+
+  const data = await response.json();
+  console.log("TELEGRAM PHOTO RESPONSE:", { chatId, data });
+
+  if (!response.ok || !data.ok) {
+    throw new Error(`Telegram sendPhoto failed: ${JSON.stringify(data)}`);
+  }
+}
+
+async function sendTelegramAlert({
+  text,
+  imageUrl = null,
+  imageBuffer = null,
+  imageFilename = "chart.png",
+  fallbackChartLink = "N/A",
+  chatId = CHAT_ID,
+}) {
+  if (imageBuffer || imageUrl) {
+    try {
+      await sendTelegramPhoto({
+        photoUrl: imageUrl,
+        photoBuffer: imageBuffer,
+        filename: imageFilename,
+        caption: text,
+        chatId,
+      });
+
+      return { usedPhoto: true };
+    } catch (err) {
+      console.error("PHOTO SEND FAILED, FALLING BACK TO MESSAGE:", err.message);
+      const fallbackText = appendChartLinkIfMissing(text, fallbackChartLink);
+      await sendTelegramMessage(fallbackText, chatId);
+      return { usedPhoto: false, photoFailed: true };
+    }
+  }
+
+  const fallbackText = appendChartLinkIfMissing(text, fallbackChartLink);
+  await sendTelegramMessage(fallbackText, chatId);
+  return { usedPhoto: false };
+}
+
+async function renderChartImagePngBuffer({
+  symbol = "BINANCE:BTCUSDT",
+  side = "LONG",
+  ref = "",
+  interval = "15",
+}) {
+  let browser;
+
+  try {
+    browser = await chromium.launch({
+      headless: true,
+      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    });
+
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 720 },
+      deviceScaleFactor: 1,
+    });
+
+    const html = `
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+html, body {
+  margin:0;
+  padding:0;
+  background:#0b1220;
+  width:1280px;
+  height:720px;
+  overflow:hidden;
+  font-family:Arial,sans-serif;
+}
+#wrap { width:1280px; height:720px; position:relative; }
+#tv_chart_container { width:1280px; height:720px; }
+.badge {
+  position:absolute;
+  top:14px;
+  left:14px;
+  z-index:20;
+  background:rgba(10,14,25,0.88);
+  color:white;
+  padding:10px 14px;
+  border-radius:12px;
+  font-size:22px;
+  font-weight:700;
+}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div class="badge">${symbol} • ${side}${ref ? ` • REF ${ref}` : ""}</div>
+  <div id="tv_chart_container"></div>
+</div>
+<script src="https://s3.tradingview.com/tv.js"></script>
+<script>
+function startWidget() {
+  if (!window.TradingView) {
+    setTimeout(startWidget, 300);
+    return;
+  }
+
+  new TradingView.widget({
+    autosize: false,
+    width: 1280,
+    height: 720,
+    symbol: ${JSON.stringify(symbol)},
+    interval: ${JSON.stringify(interval)},
+    timezone: "Etc/UTC",
+    theme: "dark",
+    style: "1",
+    locale: "en",
+    hide_top_toolbar: false,
+    hide_legend: false,
+    allow_symbol_change: false,
+    save_image: false,
+    studies: [],
+    container_id: "tv_chart_container"
+  });
+}
+startWidget();
+</script>
+</body>
+</html>`;
+
+    await page.setContent(html, { waitUntil: "load", timeout: 60000 });
+    await sleep(8000);
+
+    return await page.screenshot({ type: "png" });
+  } finally {
+    if (browser) {
+      try {
+        await browser.close();
+      } catch {}
+    }
+  }
+}
+
+async function buildChartDeliveryAssets({ symbol, side, refId, inlineBody = null }) {
+  const imageUrl = resolveChartImageUrl(inlineBody || {}, symbol, side, refId);
+
+  if (!imageUrl) {
+    return {
+      imageUrl: null,
+      imageBuffer: null,
+      imageFilename: `${symbol || "chart"}-${refId || "alert"}.png`,
+    };
+  }
+
+  if (isLocalChartImageUrl(imageUrl)) {
+    try {
+      const pngBuffer = await renderChartImagePngBuffer({
+        symbol: toTvSymbol(symbol),
+        side,
+        ref: refId,
+        interval: "15",
+      });
+
+      return {
+        imageUrl,
+        imageBuffer: pngBuffer,
+        imageFilename: `${symbol || "chart"}-${refId || "alert"}.png`,
+      };
+    } catch (err) {
+      console.error("LOCAL CHART RENDER FAILED:", err);
+      return {
+        imageUrl,
+        imageBuffer: null,
+        imageFilename: `${symbol || "chart"}-${refId || "alert"}.png`,
+      };
+    }
+  }
+
+  return {
+    imageUrl,
+    imageBuffer: null,
+    imageFilename: `${symbol || "chart"}-${refId || "alert"}.png`,
+  };
+}
+
+async function sendHitAlert({ trade, hitType, hitPrice = null, chatId = CHAT_ID }) {
+  const exitPrice =
+    hitType === "TP"
+      ? trade.tp
+      : hitType === "SL"
+      ? trade.sl
+      : Number.isFinite(parseNum(hitPrice))
+      ? parseNum(hitPrice)
+      : trade.entry;
+
+  const movePct = pctMove(trade.side, trade.entry, exitPrice);
+  const chartLink = trade.chartLink || resolveChartLink(trade.symbol);
+
+  const chartAssets = await buildChartDeliveryAssets({
+    symbol: trade.symbol,
+    side: trade.side,
+    refId: trade.refId,
+    inlineBody: { chart_image_url: trade.chartImageUrl },
+  });
+
+  const showChartLink = !chartAssets.imageUrl && !chartAssets.imageBuffer;
+
+  const hitText = buildHitText({
+    trade,
+    hitType,
+    exitPrice,
+    movePct,
+    chartLink,
+    showChartLink,
+  });
+
+  await sendTelegramAlert({
+    text: hitText,
+    imageUrl: chartAssets.imageUrl,
+    imageBuffer: chartAssets.imageBuffer,
+    imageFilename: chartAssets.imageFilename,
+    fallbackChartLink: chartLink,
+    chatId,
+  });
+}
+
+// ===== STRIPE / MEMBERS =====
+async function createTelegramInviteLink({ chatId = PAID_TELEGRAM_CHAT_ID, expireHours = 48 } = {}) {
+  const expireDate = Math.floor(Date.now() / 1000 + expireHours * 60 * 60);
+
+  const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/createChatInviteLink`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      member_limit: 1,
+      expire_date: expireDate,
+    }),
+  });
+
+  const data = await response.json();
+
+  if (!response.ok || !data.ok) {
+    throw new Error(`Telegram invite failed: ${JSON.stringify(data)}`);
+  }
+
+  return data.result.invite_link;
+}
+
+async function createFreeTelegramInviteLink({ expireHours = 48 } = {}) {
+  if (!FREE_CHAT_ID) throw new Error("FREE_CHAT_ID missing");
+  return createTelegramInviteLink({ chatId: FREE_CHAT_ID, expireHours });
+}
+
+async function removeTelegramMember(chatId, telegramUserId) {
+  if (!chatId || !telegramUserId) return false;
+
+  const banResponse = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/banChatMember`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      user_id: telegramUserId,
+    }),
+  });
+
+  const banData = await banResponse.json();
+
+  if (!banResponse.ok || !banData.ok) {
+    console.error("TELEGRAM BAN FAILED:", banData);
+    return false;
+  }
+
+  await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/unbanChatMember`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      user_id: telegramUserId,
+      only_if_banned: true,
+    }),
   });
 
   return true;
 }
 
-async function maybeSendDailySummary() {
-  if (!DAILY_SUMMARY_ENABLED) return;
-
-  const now = new Date();
-  const hour = now.getUTCHours();
-  const minute = now.getUTCMinutes();
-
-  if (hour !== DAILY_SUMMARY_UTC_HOUR || minute !== DAILY_SUMMARY_UTC_MINUTE) return;
-
-  const dateKey = getUtcDateKey(Date.now());
-
-  if (lastSummarySentDate === dateKey) return;
-
-  await sendDailySummary(dateKey, false);
-}
-
-// ===== TIME EXIT =====
-async function closeTradeByTimeExit(key, trade, nowMs, currentPrice = null) {
-  const exitPrice = Number.isFinite(currentPrice) ? currentPrice : trade.entry;
-  const movePct = pctMove(trade.side, trade.entry, exitPrice);
-  const result = getTimeExitResult(trade, exitPrice);
-
-  trade.hit = true;
-  trade.hitType = result;
-  trade.hitAtMs = nowMs;
-
-  await sendHitAlert({
-    trade,
-    hitType: result,
-    hitTime: nowMs,
-    hitPrice: exitPrice,
-    chatId: CHAT_ID,
-  });
-
-  if (wasSharedToFree(trade.refId)) {
-    try {
-      await sendHitAlert({
-        trade,
-        hitType: result,
-        hitTime: nowMs,
-        hitPrice: exitPrice,
-        chatId: FREE_CHAT_ID,
-      });
-    } catch (err) {
-      console.error("FREE TIME EXIT SEND FAILED:", {
-        refId: trade.refId,
-        error: err?.message || String(err),
-      });
+function findPaidMemberByStripe({ stripeCustomerId = null, stripeSubscriptionId = null }) {
+  for (const [email, member] of paidMembers.entries()) {
+    if (
+      (stripeCustomerId && member.stripeCustomerId === stripeCustomerId) ||
+      (stripeSubscriptionId && member.stripeSubscriptionId === stripeSubscriptionId)
+    ) {
+      return { email, member };
     }
   }
 
-  await recordCloseStat({
-    refId: trade.refId,
-    symbol: trade.symbol,
-    result,
-    exitPrice,
-    movePct,
-    ts: nowMs,
-  });
-
-  await removeTrade(key);
-
-  console.log("TIME EXIT CLOSED:", {
-    symbol: trade.symbol,
-    side: trade.side,
-    refId: trade.refId,
-    result,
-    exitPrice: fmtPrice(exitPrice),
-    movePct: fmtPct(movePct, { signed: true }),
-  });
+  return null;
 }
 
+async function handleStripeEvent(event) {
+  console.log("STRIPE EVENT:", event?.type);
+
+  if (event?.type === "checkout.session.completed") {
+    const session = event.data.object;
+    const email = normalizeEmail(pick(session.customer_details?.email, session.customer_email));
+    if (!email) return;
+
+    const inviteLink = await createTelegramInviteLink({ expireHours: 48 });
+    const existing = paidMembers.get(email) || {};
+
+    paidMembers.set(email, {
+      ...existing,
+      email,
+      status: "active",
+      active: true,
+      inviteLink,
+      inviteCreatedAt: new Date().toISOString(),
+      inviteExpireHours: 48,
+      stripeCustomerId: session.customer || existing.stripeCustomerId || null,
+      stripeSubscriptionId: session.subscription || existing.stripeSubscriptionId || null,
+      stripeSessionId: session.id || existing.stripeSessionId || null,
+      telegramUserId: existing.telegramUserId || null,
+      createdAt: existing.createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      lastStripeEvent: event.type,
+    });
+
+    await persistState();
+
+    await sendTelegramMessage(`🔥 <b>NEW PAID MEMBER</b>
+
+<b>Email</b> ${escapeHtml(email)}
+<b>Status</b> active
+<b>Customer</b> ${escapeHtml(session.customer || "N/A")}
+<b>Subscription</b> ${escapeHtml(session.subscription || "N/A")}
+
+<b>Invite Link</b>
+${inviteLink}`);
+
+    return;
+  }
+
+  if (
+    event?.type === "customer.subscription.deleted" ||
+    event?.type === "customer.subscription.updated" ||
+    event?.type === "invoice.payment_failed" ||
+    event?.type === "invoice.payment_succeeded"
+  ) {
+    const obj = event.data.object;
+
+    const stripeCustomerId = obj.customer || null;
+    const stripeSubscriptionId = obj.subscription || obj.id || null;
+
+    const found = findPaidMemberByStripe({ stripeCustomerId, stripeSubscriptionId });
+
+    if (!found) {
+      console.log("STRIPE ACCESS EVENT BUT MEMBER NOT FOUND:", {
+        type: event.type,
+        stripeCustomerId,
+        stripeSubscriptionId,
+      });
+      return;
+    }
+
+    const { email, member } = found;
+
+    let newStatus = member.status || "active";
+    let shouldRemove = false;
+
+    if (event.type === "invoice.payment_succeeded") {
+      newStatus = "active";
+      shouldRemove = false;
+    }
+
+    if (event.type === "invoice.payment_failed") {
+      newStatus = "past_due";
+      shouldRemove = false;
+    }
+
+    if (event.type === "customer.subscription.deleted") {
+      newStatus = "cancelled";
+      shouldRemove = true;
+    }
+
+    if (event.type === "customer.subscription.updated") {
+      const stripeStatus = String(obj.status || "").toLowerCase();
+
+      if (stripeStatus === "active" || stripeStatus === "trialing") {
+        newStatus = "active";
+        shouldRemove = false;
+      }
+
+      if (stripeStatus === "past_due") {
+        newStatus = "past_due";
+        shouldRemove = false;
+      }
+
+      if (
+        stripeStatus === "canceled" ||
+        stripeStatus === "cancelled" ||
+        stripeStatus === "unpaid" ||
+        stripeStatus === "incomplete_expired"
+      ) {
+        newStatus = stripeStatus;
+        shouldRemove = true;
+      }
+    }
+
+    member.status = newStatus;
+    member.active = newStatus === "active";
+    member.updatedAt = new Date().toISOString();
+    member.lastStripeEvent = event.type;
+
+    let removedFromTelegram = false;
+
+    if (shouldRemove && member.telegramUserId) {
+      removedFromTelegram = await removeTelegramMember(PAID_TELEGRAM_CHAT_ID, member.telegramUserId);
+      member.removedFromTelegramAt = removedFromTelegram ? new Date().toISOString() : null;
+    }
+
+    paidMembers.set(email, member);
+    await persistState();
+
+    await sendTelegramMessage(`⚠️ <b>PAID MEMBER ACCESS UPDATE</b>
+
+<b>Email</b> ${escapeHtml(email)}
+<b>Status</b> ${escapeHtml(newStatus)}
+<b>Stripe Event</b> ${escapeHtml(event.type)}
+<b>Removed From Telegram</b> ${removedFromTelegram ? "yes" : "no / telegramUserId missing"}`);
+
+    return;
+  }
+}
+
+// ===== STATE CLEANUP / PERSISTENCE =====
 function cleanupState() {
   const now = Date.now();
   let changed = false;
@@ -1462,6 +1595,7 @@ function cleanupState() {
   }
 
   const keepAfterMs = now - 10 * 24 * 60 * 60 * 1000;
+
   for (const [dateKey] of dailyStats.entries()) {
     const statDateMs = Date.parse(`${dateKey}T00:00:00Z`);
     if (Number.isFinite(statDateMs) && statDateMs < keepAfterMs) {
@@ -1472,12 +1606,9 @@ function cleanupState() {
 
   resetFreeCounterIfNeeded(now);
 
-  if (changed) {
-    void persistState();
-  }
+  if (changed) void persistState();
 }
 
-// ===== PERSISTENCE =====
 async function ensureDataDir() {
   await fs.mkdir(DATA_DIR, { recursive: true });
 }
@@ -1526,7 +1657,7 @@ async function loadState() {
     const now = Date.now();
 
     if (Number.isFinite(Number(parsed?.nextRef))) {
-      nextRef = Math.min(999999, Number(parsed.nextRef));
+      nextRef = Math.max(REF_START_FLOOR, Math.min(999999, Number(parsed.nextRef)));
     } else {
       nextRef = REF_START_FLOOR;
     }
@@ -1539,13 +1670,11 @@ async function loadState() {
 
     for (const item of active) {
       if (!Array.isArray(item) || item.length !== 2) continue;
-
       const [key, trade] = item;
 
       if (!trade || typeof trade !== "object") continue;
       if (!trade.createdAtMs) continue;
       if (trade.hit) continue;
-
       if (now - trade.createdAtMs > MAX_TRADE_AGE_MS) continue;
 
       activeTrades.set(key, trade);
@@ -1553,22 +1682,16 @@ async function loadState() {
 
     for (const item of hits) {
       if (!Array.isArray(item) || item.length !== 2) continue;
-
       const [key, ts] = item;
-
       if (!ts || now - ts > HIT_DEDUP_TTL_MS) continue;
-
       recentHitKeys.set(key, ts);
     }
 
     for (const item of freeRefs) {
       if (!Array.isArray(item) || item.length !== 2) continue;
-
       const [refId, info] = item;
-
       if (!refId || !info?.sharedAtMs) continue;
       if (now - info.sharedAtMs > FREE_REF_TTL_MS) continue;
-
       freeSharedRefs.set(String(refId), info);
     }
 
@@ -1598,10 +1721,8 @@ async function loadState() {
 
     for (const item of stats) {
       if (!Array.isArray(item) || item.length !== 2) continue;
-
       const [dateKey, stat] = item;
       if (!dateKey || !stat || typeof stat !== "object") continue;
-
       dailyStats.set(String(dateKey), stat);
     }
 
@@ -1620,7 +1741,7 @@ async function loadState() {
       freePostDate = getUtcDateKey(Date.now());
       freePostsToday = 0;
       lastSummarySentDate = "";
-      nextRef = Math.max(REF_START_FLOOR, 100000);
+      nextRef = REF_START_FLOOR;
       getDailyStat(freePostDate);
       return;
     }
@@ -1630,9 +1751,7 @@ async function loadState() {
 }
 
 async function removeTrade(tradeKey) {
-  if (activeTrades.delete(tradeKey)) {
-    await persistState();
-  }
+  if (activeTrades.delete(tradeKey)) await persistState();
 }
 
 async function upsertTrade(tradeKey, trade) {
@@ -1640,370 +1759,103 @@ async function upsertTrade(tradeKey, trade) {
   await persistState();
 }
 
-// ===== CHART RENDER =====
-async function renderChartImagePngBuffer({
-  symbol = "BINANCE:BTCUSDT",
-  side = "LONG",
-  ref = "",
-  interval = "60",
-}) {
-  let browser;
+// ===== DAILY SUMMARY =====
+async function sendDailySummary(dateKey, force = false) {
+  if (!DAILY_SUMMARY_ENABLED && !force) return false;
+  if (!force && lastSummarySentDate === dateKey) return false;
 
-  try {
-    browser = await chromium.launch({
-      headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox"],
-    });
+  const text = buildDailySummaryText(dateKey);
 
-    const page = await browser.newPage({
-      viewport: { width: 1280, height: 720 },
-      deviceScaleFactor: 1,
-    });
+  await sendTelegramMessage(text, CHAT_ID);
 
-    const html = `
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <title>ALRT Chart</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <style>
-    html, body {
-      margin: 0;
-      padding: 0;
-      background: #0b1220;
-      width: 1280px;
-      height: 720px;
-      overflow: hidden;
-      font-family: Arial, sans-serif;
-    }
-    #wrap {
-      width: 1280px;
-      height: 720px;
-      position: relative;
-      background: #0b1220;
-    }
-    #tv_chart_container {
-      width: 1280px;
-      height: 720px;
-    }
-    .badge {
-      position: absolute;
-      top: 14px;
-      left: 14px;
-      z-index: 20;
-      background: rgba(10, 14, 25, 0.88);
-      color: white;
-      padding: 10px 14px;
-      border-radius: 12px;
-      font-size: 22px;
-      font-weight: 700;
-      letter-spacing: 0.3px;
-      border: 1px solid rgba(255,255,255,0.08);
-      box-shadow: 0 8px 24px rgba(0,0,0,0.25);
-    }
-  </style>
-</head>
-<body>
-  <div id="wrap">
-    <div class="badge">${symbol} • ${side}${ref ? ` • REF ${ref}` : ""}</div>
-    <div id="tv_chart_container"></div>
-  </div>
-
-  <script src="https://s3.tradingview.com/tv.js"></script>
-  <script>
-    function startWidget() {
-      if (!window.TradingView) {
-        setTimeout(startWidget, 300);
-        return;
-      }
-
-      new TradingView.widget({
-        autosize: false,
-        width: 1280,
-        height: 720,
-        symbol: ${JSON.stringify(symbol)},
-        interval: ${JSON.stringify(interval)},
-        timezone: "Etc/UTC",
-        theme: "dark",
-        style: "1",
-        locale: "en",
-        hide_top_toolbar: false,
-        hide_legend: false,
-        allow_symbol_change: false,
-        save_image: false,
-        studies: [],
-        container_id: "tv_chart_container"
-      });
-    }
-
-    startWidget();
-  </script>
-</body>
-</html>
-    `;
-
-    await page.setContent(html, {
-      waitUntil: "load",
-      timeout: 60000,
-    });
-
-    await sleep(8000);
-
-    return await page.screenshot({
-      type: "png",
-    });
-  } finally {
-    if (browser) {
-      try {
-        await browser.close();
-      } catch {}
-    }
+  if (FREE_CHAT_ID) {
+    await sendTelegramMessage(text, FREE_CHAT_ID);
   }
-}
 
-// ===== TELEGRAM =====
-async function sendTelegramMessage(text, chatId = CHAT_ID) {
-  const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text,
-      parse_mode: "HTML",
-      disable_web_page_preview: true,
-    }),
+  lastSummarySentDate = dateKey;
+  await persistState();
+
+  console.log("DAILY SUMMARY SENT:", {
+    dateKey,
+    force,
+    lastSummarySentDate,
   });
 
-  const data = await response.json();
-
-  console.log("TELEGRAM MESSAGE RESPONSE:", {
-    chatId,
-    data,
-  });
-
-  if (!response.ok || !data.ok) {
-    throw new Error(`Telegram sendMessage failed: ${JSON.stringify(data)}`);
-  }
+  return true;
 }
 
-async function sendTelegramPhoto({
-  photoUrl = null,
-  photoBuffer = null,
-  filename = "chart.png",
-  caption = "",
-  chatId = CHAT_ID,
-}) {
-  let response;
-  let data;
+async function maybeSendDailySummary() {
+  if (!DAILY_SUMMARY_ENABLED) return;
 
-  if (photoBuffer) {
-    const form = new FormData();
+  const now = new Date();
+  const hour = now.getUTCHours();
+  const minute = now.getUTCMinutes();
 
-    form.append("chat_id", chatId);
-    form.append("caption", caption);
-    form.append("parse_mode", "HTML");
-    form.append("photo", new Blob([photoBuffer], { type: "image/png" }), filename);
+  if (hour !== DAILY_SUMMARY_UTC_HOUR || minute !== DAILY_SUMMARY_UTC_MINUTE) return;
 
-    response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
-      method: "POST",
-      body: form,
-    });
-  } else {
-    response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: chatId,
-        photo: photoUrl,
-        caption,
-        parse_mode: "HTML",
-      }),
-    });
-  }
+  const dateKey = getUtcDateKey(Date.now());
+  if (lastSummarySentDate === dateKey) return;
 
-  data = await response.json();
-
-  console.log("TELEGRAM PHOTO RESPONSE:", {
-    chatId,
-    data,
-  });
-
-  if (!response.ok || !data.ok) {
-    throw new Error(`Telegram sendPhoto failed: ${JSON.stringify(data)}`);
-  }
+  await sendDailySummary(dateKey, false);
 }
 
-async function sendTelegramAlert({
-  text,
-  imageUrl = null,
-  imageBuffer = null,
-  imageFilename = "chart.png",
-  fallbackChartLink = "N/A",
-  chatId = CHAT_ID,
-}) {
-  if (imageBuffer || imageUrl) {
-    try {
-      await sendTelegramPhoto({
-        photoUrl: imageUrl,
-        photoBuffer: imageBuffer,
-        filename: imageFilename,
-        caption: text,
-        chatId,
-      });
-
-      return { usedPhoto: true };
-    } catch (err) {
-      console.error("PHOTO SEND FAILED, FALLING BACK TO MESSAGE:", err.message);
-
-      const fallbackText = appendChartLinkIfMissing(text, fallbackChartLink);
-      await sendTelegramMessage(fallbackText, chatId);
-
-      return { usedPhoto: false, photoFailed: true };
-    }
-  }
-
-  const fallbackText = appendChartLinkIfMissing(text, fallbackChartLink);
-  await sendTelegramMessage(fallbackText, chatId);
-
-  return { usedPhoto: false };
-}
-
-async function buildChartDeliveryAssets({
-  symbol,
-  side,
-  refId,
-  req = null,
-  inlineBody = null,
-}) {
-  const imageUrl = resolveChartImageUrl(inlineBody || {}, symbol, side, refId, req);
-
-  if (!imageUrl) {
-    return {
-      imageUrl: null,
-      imageBuffer: null,
-      imageFilename: `${symbol || "chart"}-${refId || "alert"}.png`,
-    };
-  }
-
-  if (isLocalChartImageUrl(imageUrl)) {
-    try {
-      const pngBuffer = await renderChartImagePngBuffer({
-        symbol: toTvSymbol(symbol),
-        side,
-        ref: refId,
-        interval: "60",
-      });
-
-      return {
-        imageUrl,
-        imageBuffer: pngBuffer,
-        imageFilename: `${symbol || "chart"}-${refId || "alert"}.png`,
-      };
-    } catch (err) {
-      console.error("LOCAL CHART RENDER FOR TELEGRAM FAILED:", err);
-
-      return {
-        imageUrl,
-        imageBuffer: null,
-        imageFilename: `${symbol || "chart"}-${refId || "alert"}.png`,
-      };
-    }
-  }
-
-  return {
-    imageUrl,
-    imageBuffer: null,
-    imageFilename: `${symbol || "chart"}-${refId || "alert"}.png`,
-  };
-}
-
-async function sendHitAlert({
-  trade,
-  hitType,
-  hitTime,
-  hitPrice = null,
-  chatId = CHAT_ID,
-}) {
-  const exitPrice =
-    hitType === "TP"
-      ? trade.tp
-      : hitType === "SL"
-      ? trade.sl
-      : Number.isFinite(parseNum(hitPrice))
-      ? parseNum(hitPrice)
-      : trade.entry;
-
+// ===== TIME EXIT =====
+async function closeTradeByTimeExit(key, trade, nowMs, currentPrice = null) {
+  const exitPrice = Number.isFinite(currentPrice) ? currentPrice : trade.entry;
   const movePct = pctMove(trade.side, trade.entry, exitPrice);
-  const chartLink = trade.chartLink || resolveChartLink(trade.symbol);
+  const result = getTimeExitResult(trade, exitPrice);
 
-  const chartAssets = await buildChartDeliveryAssets({
+  trade.hit = true;
+  trade.hitType = result;
+  trade.hitAtMs = nowMs;
+
+  if (result !== "EXPIRED") {
+    await sendHitAlert({
+      trade,
+      hitType: result,
+      hitPrice: exitPrice,
+      chatId: CHAT_ID,
+    });
+
+    if (wasSharedToFree(trade.refId)) {
+      try {
+        await sendHitAlert({
+          trade,
+          hitType: result,
+          hitPrice: exitPrice,
+          chatId: FREE_CHAT_ID,
+        });
+      } catch (err) {
+        console.error("FREE TIME EXIT SEND FAILED:", {
+          refId: trade.refId,
+          error: err?.message || String(err),
+        });
+      }
+    }
+  }
+
+  await recordCloseStat({
+    refId: trade.refId,
+    symbol: trade.symbol,
+    result,
+    exitPrice,
+    movePct,
+    ts: nowMs,
+  });
+
+  await removeTrade(key);
+
+  console.log("TIME EXIT CLOSED:", {
     symbol: trade.symbol,
     side: trade.side,
     refId: trade.refId,
-    inlineBody: {
-      chart_image_url: trade.chartImageUrl,
-    },
-  });
-
-  const showChartLink = !chartAssets.imageUrl && !chartAssets.imageBuffer;
-
-  const hitText = buildHitText({
-    trade,
-    hitType,
-    exitPrice,
-    movePct,
-    chartLink,
-    showChartLink,
-  });
-
-  await sendTelegramAlert({
-    text: hitText,
-    imageUrl: chartAssets.imageUrl,
-    imageBuffer: chartAssets.imageBuffer,
-    imageFilename: chartAssets.imageFilename,
-    fallbackChartLink: chartLink,
-    chatId,
+    result,
+    exitPrice: fmtPrice(exitPrice),
+    movePct: fmtPct(movePct, { signed: true }),
   });
 }
 
 // ===== ROUTES =====
-app.get("/chart-template", async (req, res) => {
-  try {
-    const templatePath = path.join(__dirname, "chart-template.html");
-    const html = await fs.readFile(templatePath, "utf8");
-
-    res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.status(200).send(html);
-  } catch (err) {
-    console.error("CHART TEMPLATE ERROR:", err);
-    res.status(500).send("chart template error");
-  }
-});
-
-app.get("/chart-image", async (req, res) => {
-  try {
-    const symbol = String(req.query.symbol || "BINANCE:BTCUSDT");
-    const side = String(req.query.side || "LONG").toUpperCase();
-    const ref = String(req.query.ref || "");
-    const interval = String(req.query.interval || "60");
-
-    const png = await renderChartImagePngBuffer({
-      symbol,
-      side,
-      ref,
-      interval,
-    });
-
-    res.setHeader("Content-Type", "image/png");
-    res.setHeader("Cache-Control", "public, max-age=120");
-    res.status(200).send(png);
-  } catch (err) {
-    console.error("CHART IMAGE ERROR FULL:", err);
-    res.status(500).send(`chart image error: ${err?.message || String(err)}`);
-  }
-});
-
 app.get("/", (req, res) => {
   res.status(200).json({
     ok: true,
@@ -2025,6 +1877,7 @@ app.get("/health", (req, res) => {
     recentHitKeys: recentHitKeys.size,
     nextRef,
     refStartFloor: REF_START_FLOOR,
+    nextRefFloorSafe: nextRef >= REF_START_FLOOR,
     maxTradeAgeHours: MAX_TRADE_AGE_MS / 1000 / 60 / 60,
     minRrToSend: MIN_RR_TO_SEND,
     maxOpenTradesPerSymbol: MAX_OPEN_TRADES_PER_SYMBOL,
@@ -2043,11 +1896,28 @@ app.get("/health", (req, res) => {
   });
 });
 
+app.get("/chart-image", async (req, res) => {
+  try {
+    const symbol = String(req.query.symbol || "BINANCE:BTCUSDT");
+    const side = String(req.query.side || "LONG").toUpperCase();
+    const ref = String(req.query.ref || "");
+    const interval = String(req.query.interval || "15");
+
+    const png = await renderChartImagePngBuffer({ symbol, side, ref, interval });
+
+    res.setHeader("Content-Type", "image/png");
+    res.setHeader("Cache-Control", "public, max-age=120");
+    res.status(200).send(png);
+  } catch (err) {
+    console.error("CHART IMAGE ERROR FULL:", err);
+    res.status(500).send(`chart image error: ${err?.message || String(err)}`);
+  }
+});
+
 app.post("/summary/send-now", async (req, res) => {
   const token = String(req.query.token || req.headers["x-summary-token"] || "");
-  const expected = String(process.env.SUMMARY_ADMIN_TOKEN || "");
 
-  if (!expected || token !== expected) {
+  if (!SUMMARY_ADMIN_TOKEN || token !== SUMMARY_ADMIN_TOKEN) {
     return res.status(403).json({
       ok: false,
       error: "manual summary disabled",
@@ -2069,10 +1939,7 @@ app.post("/signup/free", async (req, res) => {
     const email = normalizeEmail(req.body?.email);
 
     if (!email || !email.includes("@")) {
-      return res.status(400).json({
-        ok: false,
-        error: "valid email required",
-      });
+      return res.status(400).json({ ok: false, error: "valid email required" });
     }
 
     const existing = freeMembers.get(email);
@@ -2102,38 +1969,25 @@ app.post("/signup/free", async (req, res) => {
 
     await persistState();
 
-    await sendTelegramMessage(
-`🆓 <b>NEW FREE MEMBER</b>
+    await sendTelegramMessage(`🆓 <b>NEW FREE MEMBER</b>
 
 <b>Email</b> ${escapeHtml(email)}
 
 <b>Free Invite</b>
-${inviteLink}`
-    );
+${inviteLink}`);
 
-    return res.status(200).json({
-      ok: true,
-      email,
-      inviteLink,
-    });
+    return res.status(200).json({ ok: true, email, inviteLink });
   } catch (err) {
     console.error("FREE SIGNUP ERROR:", err);
-    return res.status(500).json({
-      ok: false,
-      error: "free signup failed",
-    });
+    return res.status(500).json({ ok: false, error: "free signup failed" });
   }
 });
 
 app.get("/admin/members", async (req, res) => {
   const token = String(req.query.token || "");
-  const expected = String(process.env.SUMMARY_ADMIN_TOKEN || "");
 
-  if (!expected || token !== expected) {
-    return res.status(403).json({
-      ok: false,
-      error: "forbidden",
-    });
+  if (!SUMMARY_ADMIN_TOKEN || token !== SUMMARY_ADMIN_TOKEN) {
+    return res.status(403).json({ ok: false, error: "forbidden" });
   }
 
   res.status(200).json({
@@ -2145,7 +1999,7 @@ app.get("/admin/members", async (req, res) => {
   });
 });
 
-// ===== WEBHOOK HANDLER =====
+// ===== TRADINGVIEW WEBHOOK =====
 async function handleTradingViewWebhook(req, res) {
   const body = req.body || {};
   const receivedAtMs = Date.now();
@@ -2156,81 +2010,37 @@ async function handleTradingViewWebhook(req, res) {
   try {
     cleanupState();
 
-    const symbol = normalizeSymbol(
-      pick(body.symbol, body.ticker, body.pair, body.coin, body.market, "")
-    );
+    const symbol = normalizeSymbol(pick(body.symbol, body.ticker, body.pair, body.coin, body.market, ""));
+    const side = normalizeSide(pick(body.side, body.direction, body.position, body.trade_side, body.action, ""));
 
-    const side = normalizeSide(
-      pick(body.side, body.direction, body.position, body.trade_side, body.action, "")
-    );
-
-    const entryRaw = pick(
-      body.entry,
-      body.entry_price,
-      body.entryPrice,
-      body.price,
-      body.Entry,
-      body.close
-    );
-
-    const tpRaw = pick(
-      body.tp1,
-      body.tp,
-      body.take_profit,
-      body.takeProfit,
-      body.tp_price,
-      body.target,
-      body.target_price,
-      body.TP,
-      body.tpPrice
-    );
-
-    const slRaw = pick(
-      body.sl,
-      body.stop_loss,
-      body.stop,
-      body.stopLoss,
-      body.sl_price,
-      body.stop_price,
-      body.SL,
-      body.slPrice
-    );
+    const entryRaw = pick(body.entry, body.entry_price, body.entryPrice, body.price, body.Entry, body.close);
+    const tpRaw = pick(body.tp1, body.tp, body.take_profit, body.takeProfit, body.tp_price, body.target, body.target_price, body.TP, body.tpPrice);
+    const slRaw = pick(body.sl, body.stop_loss, body.stop, body.stopLoss, body.sl_price, body.stop_price, body.SL, body.slPrice);
 
     const rsi = pick(body.rsi, body.rsi_value);
     const atrPct = pick(body.atr_pct, body.atrPercent, body.atr_percent);
-    const score = pick(body.score, body.strength_score, body.setup_score);
+    const adx = pick(body.adx, body.adx_value);
+    const score = pick(body.setup_score, body.score, body.strength_score);
     const risk = pick(body.risk, body.risk_score);
     const incomingStrength = pick(body.strength, body.grade, body.quality);
 
-    const eventTime = pick(
-      body.time_close,
-      body.bar_close_time,
-      body.timestamp,
-      body.time,
-      receivedAtMs
-    );
+    const trendStrength = pick(body.trend_strength, body.trendStrength, adx);
+    const volatilityState = pick(body.volatility_state, body.volatilityState);
+    const marketRegime = pick(body.market_regime, body.marketRegime, volatilityState);
+    const session = pick(body.session, body.session_name, body.sessionName);
+    const confidenceLevel = pick(body.confidence_level, body.confidence, body.confidenceLevel);
+    const estimatedHoldDuration = pick(body.estimated_hold_duration, body.estimatedHoldDuration);
 
+    const eventTime = pick(body.time_close, body.bar_close_time, body.timestamp, body.time, receivedAtMs);
     const eventTimeMs = eventTimeToMs(eventTime);
 
-    const eventType = pick(
-      body.event,
-      body.type,
-      body.event_type,
-      body.kind,
-      body.signal_type,
-      ""
-    );
+    const eventType = pick(body.event, body.type, body.event_type, body.kind, body.signal_type, "");
 
     const currentPrice = parseNum(
       pick(body.hit_price, body.last_price, body.market_price, body.price, body.close, body.last)
     );
 
-    const setupType = deriveSetupType({
-      body,
-      side,
-      rsi,
-      atrPct,
-    });
+    const setupType = deriveSetupType({ body, side, rsi, atrPct });
 
     const strength = getStrengthBucket({
       symbol,
@@ -2283,16 +2093,22 @@ async function handleTradingViewWebhook(req, res) {
       symbol,
       side,
       eventType,
+      explicitHitType,
       entry: fmtPrice(entryParsed),
       tp: fmtPrice(tpParsed),
       sl: fmtPrice(slParsed),
       rr: fmtRR(rr),
+      setupType,
+      score,
       strength,
+      session,
+      marketRegime,
       currentPrice: fmtPrice(currentPrice),
       activeTrades: activeTrades.size,
       nextRef,
     });
 
+    // Time exit check for same symbol.
     if (symbol) {
       for (const [key, trade] of Array.from(activeTrades.entries())) {
         if (trade.symbol !== symbol) continue;
@@ -2306,6 +2122,7 @@ async function handleTradingViewWebhook(req, res) {
       }
     }
 
+    // Explicit close events.
     if (explicitHitType && symbol) {
       const matched =
         findOpenTradeByCandidateIds(candidateIdsBase) ||
@@ -2338,35 +2155,42 @@ async function handleTradingViewWebhook(req, res) {
             matched.trade,
             Number.isFinite(currentPrice) ? currentPrice : matched.trade.entry
           );
+
           exitPrice = Number.isFinite(currentPrice) ? currentPrice : matched.trade.entry;
+        }
+
+        if (!Number.isFinite(exitPrice)) {
+          if (finalHitType === "TP") exitPrice = matched.trade.tp;
+          else if (finalHitType === "SL") exitPrice = matched.trade.sl;
+          else exitPrice = matched.trade.entry;
         }
 
         matched.trade.hit = true;
         matched.trade.hitType = finalHitType;
         matched.trade.hitAtMs = receivedAtMs;
 
-        await sendHitAlert({
-          trade: matched.trade,
-          hitType: finalHitType,
-          hitTime: receivedAtMs,
-          hitPrice: exitPrice,
-          chatId: CHAT_ID,
-        });
+        if (finalHitType !== "EXPIRED") {
+          await sendHitAlert({
+            trade: matched.trade,
+            hitType: finalHitType,
+            hitPrice: exitPrice,
+            chatId: CHAT_ID,
+          });
 
-        if (wasSharedToFree(matched.trade.refId)) {
-          try {
-            await sendHitAlert({
-              trade: matched.trade,
-              hitType: finalHitType,
-              hitTime: receivedAtMs,
-              hitPrice: exitPrice,
-              chatId: FREE_CHAT_ID,
-            });
-          } catch (err) {
-            console.error("FREE HIT SEND FAILED:", {
-              refId: matched.trade.refId,
-              error: err?.message || String(err),
-            });
+          if (wasSharedToFree(matched.trade.refId)) {
+            try {
+              await sendHitAlert({
+                trade: matched.trade,
+                hitType: finalHitType,
+                hitPrice: exitPrice,
+                chatId: FREE_CHAT_ID,
+              });
+            } catch (err) {
+              console.error("FREE HIT SEND FAILED:", {
+                refId: matched.trade.refId,
+                error: err?.message || String(err),
+              });
+            }
           }
         }
 
@@ -2397,6 +2221,7 @@ async function handleTradingViewWebhook(req, res) {
       return;
     }
 
+    // Infer hit from price on incoming webhook.
     if (symbol && Number.isFinite(currentPrice)) {
       const hitKeysToRemove = [];
 
@@ -2417,7 +2242,6 @@ async function handleTradingViewWebhook(req, res) {
         await sendHitAlert({
           trade,
           hitType: inferredHit,
-          hitTime: receivedAtMs,
           hitPrice: currentPrice,
           chatId: CHAT_ID,
         });
@@ -2427,7 +2251,6 @@ async function handleTradingViewWebhook(req, res) {
             await sendHitAlert({
               trade,
               hitType: inferredHit,
-              hitTime: receivedAtMs,
               hitPrice: currentPrice,
               chatId: FREE_CHAT_ID,
             });
@@ -2459,14 +2282,11 @@ async function handleTradingViewWebhook(req, res) {
       }
     }
 
+    // Normal signal.
     const isSignal = isLikelySignalEvent(eventType, side, entryParsed);
 
     if (!isSignal || !symbol || (side !== "LONG" && side !== "SHORT")) {
-      console.log("NON-SIGNAL WEBHOOK RECEIVED:", {
-        symbol,
-        side,
-        eventType,
-      });
+      console.log("NON-SIGNAL WEBHOOK RECEIVED:", { symbol, side, eventType });
       return;
     }
 
@@ -2501,18 +2321,13 @@ async function handleTradingViewWebhook(req, res) {
 
     const refId = incomingRef || allocNextRef();
 
-    const candidateIds = uniqueStrings([
-      ...candidateIdsBase,
-      refId,
-    ]);
-
+    const candidateIds = uniqueStrings([...candidateIdsBase, refId]);
     const primaryAlertId = candidateIds[0] || refId;
 
     const chartAssets = await buildChartDeliveryAssets({
       symbol,
       side,
       refId,
-      req,
       inlineBody: body,
     });
 
@@ -2521,7 +2336,9 @@ async function handleTradingViewWebhook(req, res) {
       symbol,
       side,
       setupType,
-      strength,
+      marketRegime,
+      session,
+      confidence: confidenceLevel,
     });
 
     const showChartLink = !chartAssets.imageUrl && !chartAssets.imageBuffer;
@@ -2541,6 +2358,11 @@ async function handleTradingViewWebhook(req, res) {
       showChartLink,
       refId,
       tpPct,
+      setupType,
+      setupScore: score,
+      marketRegime,
+      session,
+      confidenceLevel,
     });
 
     const sendResult = await sendTelegramAlert({
@@ -2601,6 +2423,13 @@ async function handleTradingViewWebhook(req, res) {
       primaryAlertId,
       alertIds: candidateIds,
       setupType,
+      setupScore: score,
+      trendStrength,
+      volatilityState,
+      marketRegime,
+      session,
+      confidenceLevel,
+      estimatedHoldDuration,
       strength,
       rr,
       chartLink,
@@ -2614,6 +2443,13 @@ async function handleTradingViewWebhook(req, res) {
       side,
       strength,
       setupType,
+      setupScore: score,
+      trendStrength,
+      volatilityState,
+      marketRegime,
+      session,
+      confidenceLevel,
+      estimatedHoldDuration,
       entry: entryParsed,
       tp: tpParsed,
       sl: slParsed,
@@ -2635,6 +2471,11 @@ async function handleTradingViewWebhook(req, res) {
       rr: fmtRR(rr),
       leverage,
       strength,
+      setupType,
+      setupScore: score,
+      session,
+      marketRegime,
+      confidenceLevel,
       time: prettyTime,
       refId,
       primaryAlertId,
@@ -2643,7 +2484,6 @@ async function handleTradingViewWebhook(req, res) {
       activeTrades: activeTrades.size,
       eventType,
       candidateIds,
-      setupType,
       freeEnabled: Boolean(FREE_CHAT_ID),
       sharedToFree,
       minRrToSend: MIN_RR_TO_SEND,
@@ -2655,7 +2495,6 @@ async function handleTradingViewWebhook(req, res) {
   }
 }
 
-// ===== WEBHOOK ROUTES =====
 app.post("/webhook", handleTradingViewWebhook);
 app.post("/webhook/tradingview", handleTradingViewWebhook);
 
@@ -2674,12 +2513,12 @@ async function startServer() {
 
   console.log("STATE FILE PATH:", STATE_FILE);
   console.log("DATA DIR:", DATA_DIR);
-
   console.log("VERSION:", APP_VERSION);
 
   console.log("REF SETTINGS:", {
     nextRef,
     refStartFloor: REF_START_FLOOR,
+    safe: nextRef >= REF_START_FLOOR,
   });
 
   console.log("QUALITY FILTERS:", {
