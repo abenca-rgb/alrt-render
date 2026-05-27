@@ -572,6 +572,15 @@ function getDailyStat(dateKey = getUtcDateKey(Date.now())) {
       timeExitLoss: 0,
       expired: 0,
       freeAlerts: 0,
+
+      oldClosures: {
+        tp: 0,
+        sl: 0,
+        timeExitProfit: 0,
+        timeExitLoss: 0,
+        expired: 0,
+      },
+
       bySymbol: {},
       bySetup: {},
       byRef: {},
@@ -583,6 +592,15 @@ function getDailyStat(dateKey = getUtcDateKey(Date.now())) {
   if (stat.timeExitProfit === undefined) stat.timeExitProfit = 0;
   if (stat.timeExitLoss === undefined) stat.timeExitLoss = 0;
   if (stat.expired === undefined) stat.expired = 0;
+  if (!stat.oldClosures) {
+    stat.oldClosures = {
+      tp: 0,
+      sl: 0,
+      timeExitProfit: 0,
+      timeExitLoss: 0,
+      expired: 0,
+    };
+  }
   if (!stat.bySymbol) stat.bySymbol = {};
   if (!stat.bySetup) stat.bySetup = {};
   if (!stat.byRef) stat.byRef = {};
@@ -688,8 +706,9 @@ async function recordSignalStat({
     sl,
     rr,
     sharedToFree: Boolean(sharedToFree),
-    openedAtMs: ts,
-    openedAtUtc: formatUtc(ts),
+    openedDateKey: dateKey,
+openedAtMs: ts,
+openedAtUtc: formatUtc(ts),
     result: "OPEN",
     closedAtMs: null,
     closedAtUtc: null,
@@ -709,25 +728,28 @@ async function recordCloseStat({
   movePct = null,
   ts = Date.now(),
 }) {
-  let stat = getDailyStat(getUtcDateKey(ts));
+  const closeDateKey = getUtcDateKey(ts);
+  let stat = getDailyStat(closeDateKey);
   let item = stat.byRef[String(refId)];
+  let openedStat = stat;
 
   if (!item) {
     for (const [, dayStat] of dailyStats.entries()) {
       const found = dayStat?.byRef?.[String(refId)];
 
       if (found) {
-        stat = dayStat;
         item = found;
+        openedStat = dayStat;
         break;
       }
     }
   }
 
-  const finalSetupType = item?.setupType || setupType || "UNKNOWN";
+  const openedDateKey = item?.openedDateKey || item?.openedAtUtc?.slice(0, 10) || null;
+  const belongsToToday = openedDateKey === closeDateKey;
 
-  const symbolStat = ensureSymbolStats(stat, symbol);
-  const setupStat = ensureSetupStats(stat, finalSetupType);
+  const targetStat = belongsToToday ? openedStat : stat;
+  const finalSetupType = item?.setupType || setupType || "UNKNOWN";
 
   if (item?.result && item.result !== "OPEN") {
     console.log("CLOSE STAT IGNORED - REF ALREADY CLOSED:", {
@@ -738,34 +760,55 @@ async function recordCloseStat({
     return false;
   }
 
-  if (result === "TP") {
-    stat.tp += 1;
-    symbolStat.tp += 1;
-    setupStat.tp += 1;
-  }
+  if (belongsToToday) {
+    const symbolStat = ensureSymbolStats(targetStat, symbol);
+    const setupStat = ensureSetupStats(targetStat, finalSetupType);
 
-  if (result === "SL") {
-    stat.sl += 1;
-    symbolStat.sl += 1;
-    setupStat.sl += 1;
-  }
+    if (result === "TP") {
+      targetStat.tp += 1;
+      symbolStat.tp += 1;
+      setupStat.tp += 1;
+    }
 
-  if (result === "TIME_EXIT_PROFIT") {
-    stat.timeExitProfit += 1;
-    symbolStat.timeExitProfit += 1;
-    setupStat.timeExitProfit += 1;
-  }
+    if (result === "SL") {
+      targetStat.sl += 1;
+      symbolStat.sl += 1;
+      setupStat.sl += 1;
+    }
 
-  if (result === "TIME_EXIT_LOSS") {
-    stat.timeExitLoss += 1;
-    symbolStat.timeExitLoss += 1;
-    setupStat.timeExitLoss += 1;
-  }
+    if (result === "TIME_EXIT_PROFIT") {
+      targetStat.timeExitProfit += 1;
+      symbolStat.timeExitProfit += 1;
+      setupStat.timeExitProfit += 1;
+    }
 
-  if (result === "EXPIRED") {
-    stat.expired += 1;
-    symbolStat.expired += 1;
-    setupStat.expired += 1;
+    if (result === "TIME_EXIT_LOSS") {
+      targetStat.timeExitLoss += 1;
+      symbolStat.timeExitLoss += 1;
+      setupStat.timeExitLoss += 1;
+    }
+
+    if (result === "EXPIRED") {
+      targetStat.expired += 1;
+      symbolStat.expired += 1;
+      setupStat.expired += 1;
+    }
+  } else {
+    const old = stat.oldClosures || {
+      tp: 0,
+      sl: 0,
+      timeExitProfit: 0,
+      timeExitLoss: 0,
+      expired: 0,
+    };
+
+    if (result === "TP") old.tp += 1;
+    if (result === "SL") old.sl += 1;
+    if (result === "TIME_EXIT_PROFIT") old.timeExitProfit += 1;
+    if (result === "TIME_EXIT_LOSS") old.timeExitLoss += 1;
+    if (result === "EXPIRED") old.expired += 1;
+
+    stat.oldClosures = old;
   }
 
   if (item) {
@@ -774,16 +817,17 @@ async function recordCloseStat({
     item.closedAtUtc = formatUtc(ts);
     item.exitPrice = exitPrice;
     item.movePct = movePct;
+    item.closedDateKey = closeDateKey;
   } else {
-    // Dit vangt sluitingen op waarvan de open-stat niet gevonden is.
-    // Zo verdwijnen time exits/hits niet meer uit het overzicht.
     stat.byRef[String(refId)] = {
       refId: String(refId),
       symbol,
       setupType: finalSetupType,
       result,
+      openedDateKey: null,
       openedAtMs: null,
       openedAtUtc: null,
+      closedDateKey: closeDateKey,
       closedAtMs: ts,
       closedAtUtc: formatUtc(ts),
       exitPrice,
@@ -795,7 +839,6 @@ async function recordCloseStat({
   await persistState();
   return true;
 }
-
 // ===== FREE CHANNEL =====
 function resetFreeCounterIfNeeded(nowMs = Date.now()) {
   const today = getUtcDateKey(nowMs);
@@ -1271,16 +1314,36 @@ function appendChartLinkIfMissing(text, chartLink) {
 function buildDailySummaryText(dateKey) {
   const stat = getDailyStat(dateKey);
 
-  const closed =
+  const todayClosed =
     stat.tp +
     stat.sl +
     stat.timeExitProfit +
     stat.timeExitLoss +
     stat.expired;
 
-  const positive = stat.tp + stat.timeExitProfit;
-  const winrate = closed > 0 ? (positive / closed) * 100 : null;
-  const openCount = Array.from(activeTrades.values()).filter((t) => !t.hit).length;
+  const todayPositive = stat.tp + stat.timeExitProfit;
+  const todayWinrate = todayClosed > 0 ? (todayPositive / todayClosed) * 100 : null;
+
+  const old = stat.oldClosures || {
+    tp: 0,
+    sl: 0,
+    timeExitProfit: 0,
+    timeExitLoss: 0,
+    expired: 0,
+  };
+
+  const oldClosed =
+    old.tp +
+    old.sl +
+    old.timeExitProfit +
+    old.timeExitLoss +
+    old.expired;
+
+  const openToday = Object.values(stat.byRef || {}).filter((t) => {
+    return t.openedDateKey === dateKey && t.result === "OPEN";
+  }).length;
+
+  const openTotal = Array.from(activeTrades.values()).filter((t) => !t.hit).length;
 
   const symbols = Object.entries(stat.bySymbol || {})
     .sort((a, b) => (b[1].alerts || 0) - (a[1].alerts || 0))
@@ -1299,21 +1362,31 @@ function buildDailySummaryText(dateKey) {
   return `📊 <b>D-ALRT DAILY OVERVIEW</b>
 <b>UTC DATE</b> ${escapeHtml(dateKey)}
 
-<b>ALERTS</b> ${stat.alerts}
+<b>TODAY'S TRADES</b>
+<b>ALERTS OPENED</b> ${stat.alerts}
 <b>TP HITS</b> ${stat.tp}
 <b>SL HITS</b> ${stat.sl}
 <b>TIME EXIT PROFIT</b> ${stat.timeExitProfit || 0}
 <b>TIME EXIT LOSS</b> ${stat.timeExitLoss || 0}
 <b>EXPIRED</b> ${stat.expired || 0}
-<b>CLOSED TOTAL</b> ${closed}
-<b>WINRATE</b> ${closed > 0 ? escapeHtml(fmtPct(winrate)) : "N/A"}
-<b>OPEN TRADES</b> ${openCount}
+<b>CLOSED FROM TODAY</b> ${todayClosed}
+<b>WINRATE TODAY</b> ${todayClosed > 0 ? escapeHtml(fmtPct(todayWinrate)) : "N/A"}
+<b>STILL OPEN TODAY</b> ${openToday}
 
+<b>OLD TRADES CLOSED TODAY</b>
+<b>OLD TP</b> ${old.tp || 0}
+<b>OLD SL</b> ${old.sl || 0}
+<b>OLD TIME EXIT PROFIT</b> ${old.timeExitProfit || 0}
+<b>OLD TIME EXIT LOSS</b> ${old.timeExitLoss || 0}
+<b>OLD EXPIRED</b> ${old.expired || 0}
+<b>OLD CLOSED TOTAL</b> ${oldClosed}
+
+<b>OPEN TRADES TOTAL</b> ${openTotal}
 <b>FREE POSTS</b> ${stat.freeAlerts}/${FREE_DAILY_LIMIT}
 
-${symbols.length ? `<b>BY SYMBOL</b>\n${escapeHtml(symbols.join("\n"))}` : "<b>BY SYMBOL</b>\nN/A"}
+${symbols.length ? `<b>BY SYMBOL - TODAY OPENED</b>\n${escapeHtml(symbols.join("\n"))}` : "<b>BY SYMBOL - TODAY OPENED</b>\nN/A"}
 
-${setups.length ? `<b>BY SETUP</b>\n${escapeHtml(setups.join("\n"))}` : "<b>BY SETUP</b>\nN/A"}
+${setups.length ? `<b>BY SETUP - TODAY OPENED</b>\n${escapeHtml(setups.join("\n"))}` : "<b>BY SETUP - TODAY OPENED</b>\nN/A"}
 
 NFA`;
 }
