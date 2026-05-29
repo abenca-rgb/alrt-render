@@ -5,6 +5,8 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { promises as fs } from "fs";
 import { chromium } from "playwright";
+import { ALLOWED_SYMBOLS, getSymbolConfig, isAllowedTradingSymbol } from "./src/config/symbols.js";
+import { scoreAlertQuality } from "./src/services/alertScoring.js";
 
 dotenv.config();
 
@@ -12,7 +14,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ===== VERSION =====
-const APP_VERSION = "v25.2-singlefile-lifecycle-summary-fixed";
+const APP_VERSION = "v25.3-lifecycle-state-quality-foundation";
 
 // ===== CONFIG =====
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -53,6 +55,8 @@ const FREE_DAILY_LIMIT = 2;
 
 const MIN_RR_TO_SEND = Number(process.env.MIN_RR_TO_SEND || 0);
 const MAX_OPEN_TRADES_PER_SYMBOL = Number(process.env.MAX_OPEN_TRADES_PER_SYMBOL || 1);
+const ALERT_QUALITY_FILTER_ENABLED =
+  String(process.env.ALERT_QUALITY_FILTER_ENABLED || "false").toLowerCase() === "true";
 
 // Belangrijk: laatste live ref was al boven 100127.
 // Zet in Render eventueel NEXT_REF_START=100127 of hoger.
@@ -232,7 +236,7 @@ function sleep(ms) {
 }
 
 function isMajorSymbol(symbol) {
-  return ["BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT"].includes(symbol);
+  return Boolean(getSymbolConfig(symbol).major);
 }
 
 function toTvSymbol(symbol) {
@@ -341,12 +345,12 @@ function validateTradeSanity({ symbol, side, entry, tp, sl, rr }) {
   const tpPct = Math.abs(tpPctFromLevels(side, e, t));
   const slPct = Math.abs(slPctFromLevels(side, e, s));
 
-  const major = isMajorSymbol(symbol);
+  const symbolConfig = getSymbolConfig(symbol);
 
   // Realistische harde caps voor 15M / intraday.
-  // Later kunnen we dit per coin tunen.
-  const maxTpPct = major ? 4.0 : 5.0;
-  const maxSlPct = major ? 2.0 : 2.8;
+  // Per-symbol config voorkomt dat BTC en kleinere alts dezelfde caps krijgen.
+  const maxTpPct = symbolConfig.maxTpPct;
+  const maxSlPct = symbolConfig.maxSlPct;
 
   if (!Number.isFinite(tpPct) || tpPct <= 0) {
     return { ok: false, reason: "tp_pct_invalid" };
@@ -395,15 +399,14 @@ function applyFallbackLevels(side, entry, strength, symbol) {
   const e = parseNum(entry);
   if (!Number.isFinite(e) || e <= 0) return { tp: null, sl: null };
 
-  const major = isMajorSymbol(symbol);
+  const symbolConfig = getSymbolConfig(symbol);
 
   const tpPct =
     strength === "A+"
-      ? major ? 2.2 : 2.8
-      : major ? 1.7 : 2.2;
+      ? symbolConfig.fallbackTpPctAPlus
+      : symbolConfig.fallbackTpPctA;
 
-  const slPct =
-    major ? 1.0 : 1.35;
+  const slPct = symbolConfig.fallbackSlPct;
 
   if (side === "LONG") {
     return {
@@ -487,8 +490,8 @@ function resolveLeverage(body, symbol, strength) {
     return String(raw).trim();
   }
 
-  if (strength === "A+" || strength === "A") return isMajorSymbol(symbol) ? "4x" : "3x";
-  return isMajorSymbol(symbol) ? "3x" : "2x";
+  if (strength === "A+" || strength === "A") return getSymbolConfig(symbol).leverageStrong;
+  return getSymbolConfig(symbol).leverageNormal;
 }
 
 function deriveSetupType({ body, side, rsi, atrPct }) {
@@ -541,10 +544,6 @@ function allocNextRef() {
     nextRef = REF_START_FLOOR;
   }
 
-  if (nextRef > 999999) {
-    nextRef = REF_START_FLOOR;
-  }
-
   return String(nextRef).padStart(6, "0");
 }
 
@@ -580,6 +579,13 @@ function getDailyStat(dateKey = getUtcDateKey(Date.now())) {
         timeExitLoss: 0,
         expired: 0,
       },
+      orphanClosures: {
+        tp: 0,
+        sl: 0,
+        timeExitProfit: 0,
+        timeExitLoss: 0,
+        expired: 0,
+      },
 
       bySymbol: {},
       bySetup: {},
@@ -594,6 +600,15 @@ function getDailyStat(dateKey = getUtcDateKey(Date.now())) {
   if (stat.expired === undefined) stat.expired = 0;
   if (!stat.oldClosures) {
     stat.oldClosures = {
+      tp: 0,
+      sl: 0,
+      timeExitProfit: 0,
+      timeExitLoss: 0,
+      expired: 0,
+    };
+  }
+  if (!stat.orphanClosures) {
+    stat.orphanClosures = {
       tp: 0,
       sl: 0,
       timeExitProfit: 0,
@@ -661,6 +676,8 @@ async function recordSignalStat({
   strength,
   setupType,
   setupScore,
+  qualityScore,
+  qualityGrade,
   trendStrength,
   volatilityState,
   marketRegime,
@@ -695,6 +712,8 @@ async function recordSignalStat({
     strength,
     setupType,
     setupScore,
+    qualityScore,
+    qualityGrade,
     trendStrength,
     volatilityState,
     marketRegime,
@@ -760,7 +779,23 @@ async function recordCloseStat({
     return false;
   }
 
-  if (belongsToToday) {
+  if (!item) {
+    const orphan = stat.orphanClosures || {
+      tp: 0,
+      sl: 0,
+      timeExitProfit: 0,
+      timeExitLoss: 0,
+      expired: 0,
+    };
+
+    if (result === "TP") orphan.tp += 1;
+    if (result === "SL") orphan.sl += 1;
+    if (result === "TIME_EXIT_PROFIT") orphan.timeExitProfit += 1;
+    if (result === "TIME_EXIT_LOSS") orphan.timeExitLoss += 1;
+    if (result === "EXPIRED") orphan.expired += 1;
+
+    stat.orphanClosures = orphan;
+  } else if (belongsToToday) {
     const symbolStat = ensureSymbolStats(targetStat, symbol);
     const setupStat = ensureSetupStats(targetStat, finalSetupType);
 
@@ -1332,12 +1367,27 @@ function buildDailySummaryText(dateKey) {
     expired: 0,
   };
 
+  const orphan = stat.orphanClosures || {
+    tp: 0,
+    sl: 0,
+    timeExitProfit: 0,
+    timeExitLoss: 0,
+    expired: 0,
+  };
+
   const oldClosed =
     old.tp +
     old.sl +
     old.timeExitProfit +
     old.timeExitLoss +
     old.expired;
+
+  const orphanClosed =
+    orphan.tp +
+    orphan.sl +
+    orphan.timeExitProfit +
+    orphan.timeExitLoss +
+    orphan.expired;
 
   const openToday = Object.values(stat.byRef || {}).filter((t) => {
     return t.openedDateKey === dateKey && t.result === "OPEN";
@@ -1380,6 +1430,14 @@ function buildDailySummaryText(dateKey) {
 <b>OLD TIME EXIT LOSS</b> ${old.timeExitLoss || 0}
 <b>OLD EXPIRED</b> ${old.expired || 0}
 <b>OLD CLOSED TOTAL</b> ${oldClosed}
+
+<b>ORPHAN / UNMATCHED CLOSES TODAY</b>
+<b>ORPHAN TP</b> ${orphan.tp || 0}
+<b>ORPHAN SL</b> ${orphan.sl || 0}
+<b>ORPHAN TIME EXIT PROFIT</b> ${orphan.timeExitProfit || 0}
+<b>ORPHAN TIME EXIT LOSS</b> ${orphan.timeExitLoss || 0}
+<b>ORPHAN EXPIRED</b> ${orphan.expired || 0}
+<b>ORPHAN CLOSED TOTAL</b> ${orphanClosed}
 
 <b>OPEN TRADES TOTAL</b> ${openTotal}
 <b>FREE POSTS</b> ${stat.freeAlerts}/${FREE_DAILY_LIMIT}
@@ -1457,7 +1515,21 @@ async function persistState() {
         freeMembers: Array.from(freeMembers.entries()).map(([email, info]) => [email, info]),
       };
 
-      await fs.writeFile(STATE_FILE, JSON.stringify(payload, null, 2), "utf8");
+      const serialized = JSON.stringify(payload, null, 2);
+      const tmpFile = `${STATE_FILE}.tmp`;
+      const backupFile = `${STATE_FILE}.bak`;
+
+      await fs.writeFile(tmpFile, serialized, "utf8");
+
+      try {
+        await fs.copyFile(STATE_FILE, backupFile);
+      } catch (err) {
+        if (err.code !== "ENOENT") {
+          console.error("PERSIST BACKUP ERROR:", err);
+        }
+      }
+
+      await fs.rename(tmpFile, STATE_FILE);
     })
     .catch((err) => {
       console.error("PERSIST SAVE ERROR:", err);
@@ -1466,12 +1538,25 @@ async function persistState() {
   return savePromise;
 }
 
+async function readStatePayload() {
+  try {
+    const raw = await fs.readFile(STATE_FILE, "utf8");
+    return JSON.parse(raw);
+  } catch (err) {
+    if (err.code === "ENOENT") throw err;
+
+    console.error("PRIMARY STATE READ FAILED, TRYING BACKUP:", err?.message || String(err));
+
+    const rawBackup = await fs.readFile(`${STATE_FILE}.bak`, "utf8");
+    return JSON.parse(rawBackup);
+  }
+}
+
 async function loadState() {
   try {
     await ensureDataDir();
 
-    const raw = await fs.readFile(STATE_FILE, "utf8");
-    const parsed = JSON.parse(raw);
+    const parsed = await readStatePayload();
 
     const active = Array.isArray(parsed?.activeTrades) ? parsed.activeTrades : [];
     const hits = Array.isArray(parsed?.recentHitKeys) ? parsed.recentHitKeys : [];
@@ -1481,7 +1566,7 @@ async function loadState() {
     const now = Date.now();
 
     if (Number.isFinite(Number(parsed?.nextRef))) {
-      nextRef = Math.max(REF_START_FLOOR, Math.min(999999, Number(parsed.nextRef)));
+      nextRef = Math.max(REF_START_FLOOR, Number(parsed.nextRef));
     } else {
       nextRef = REF_START_FLOOR;
     }
@@ -1974,12 +2059,14 @@ async function closeTrade({
   }
 
   const trade = matched.trade;
+  const closedAtMs = eventTimeToMs(eventTime);
+  const hitEventBucket = Number.isFinite(closedAtMs) ? Math.floor(closedAtMs / 60000) : eventTime;
 
   const hitKey = buildRecentHitKey({
     symbol: trade.symbol,
     closeType,
     refId: trade.refId,
-    eventTime,
+    eventTime: hitEventBucket,
   });
 
   if (wasRecentHitSent(hitKey)) {
@@ -2003,7 +2090,7 @@ async function closeTrade({
 
   trade.hit = true;
   trade.hitType = finalCloseType;
-  trade.hitAtMs = Date.now();
+  trade.hitAtMs = closedAtMs;
 
   const sent = await sendHitAlert({
     trade,
@@ -2035,7 +2122,7 @@ async function closeTrade({
     result: finalCloseType,
     exitPrice: sent.exitPrice,
     movePct: sent.movePct,
-    ts: Date.now(),
+    ts: closedAtMs,
   });
 
   await markRecentHit(hitKey);
@@ -2327,6 +2414,8 @@ app.get("/health", (req, res) => {
     maxTradeAgeHours: MAX_TRADE_AGE_MS / 1000 / 60 / 60,
     minRrToSend: MIN_RR_TO_SEND,
     maxOpenTradesPerSymbol: MAX_OPEN_TRADES_PER_SYMBOL,
+    alertQualityFilterEnabled: ALERT_QUALITY_FILTER_ENABLED,
+    allowedSymbols: ALLOWED_SYMBOLS,
     freeEnabled: Boolean(FREE_CHAT_ID),
     freePostDate,
     freePostsToday,
@@ -2702,7 +2791,7 @@ async function handleTradingViewWebhook(req, res) {
             matchType: "price_inference",
           },
           closeType: inferredHit,
-          eventTime: Math.floor(receivedAtMs / 60000),
+          eventTime: receivedAtMs,
           currentPrice,
           source: "price_inference",
         });
@@ -2724,6 +2813,16 @@ async function handleTradingViewWebhook(req, res) {
       });
       return;
     }
+
+    if (!isAllowedTradingSymbol(symbol)) {
+      console.log("SIGNAL SKIPPED BY SYMBOL FILTER:", {
+        symbol,
+        allowedSymbols: ALLOWED_SYMBOLS,
+      });
+      return;
+    }
+
+    const symbolConfig = getSymbolConfig(symbol);
 
     const sanity = validateTradeSanity({
       symbol,
@@ -2760,11 +2859,44 @@ async function handleTradingViewWebhook(req, res) {
       return;
     }
 
-    if (Number.isFinite(MIN_RR_TO_SEND) && MIN_RR_TO_SEND > 0 && (!Number.isFinite(rr) || rr < MIN_RR_TO_SEND)) {
+    const effectiveMinRr =
+      Number.isFinite(MIN_RR_TO_SEND) && MIN_RR_TO_SEND > 0
+        ? MIN_RR_TO_SEND
+        : symbolConfig.minRr;
+
+    if (Number.isFinite(effectiveMinRr) && effectiveMinRr > 0 && (!Number.isFinite(rr) || rr < effectiveMinRr)) {
       console.log("SIGNAL SKIPPED BY MIN RR FILTER:", {
-        minRequired: MIN_RR_TO_SEND,
+        minRequired: effectiveMinRr,
         symbol,
         rr: fmtRR(rr),
+      });
+      return;
+    }
+
+    const quality = scoreAlertQuality({
+      symbolConfig,
+      side,
+      rr,
+      strength,
+      setupScore,
+      trendStrength,
+      volatilityState,
+      marketRegime,
+      session,
+      rsi,
+      atrPct,
+    });
+
+    if (ALERT_QUALITY_FILTER_ENABLED && !quality.passed) {
+      console.log("SIGNAL SKIPPED BY QUALITY FILTER:", {
+        symbol,
+        side,
+        qualityScore: quality.score,
+        qualityGrade: quality.grade,
+        minScore: quality.minScore,
+        minGrade: quality.minGrade,
+        reasons: quality.reasons,
+        penalties: quality.penalties,
       });
       return;
     }
@@ -2879,6 +3011,8 @@ async function handleTradingViewWebhook(req, res) {
       alertIds: candidateIds,
       setupType,
       setupScore,
+      qualityScore: quality.score,
+      qualityGrade: quality.grade,
       trendStrength,
       volatilityState,
       marketRegime,
@@ -2899,6 +3033,8 @@ async function handleTradingViewWebhook(req, res) {
       strength,
       setupType,
       setupScore,
+      qualityScore: quality.score,
+      qualityGrade: quality.grade,
       trendStrength,
       volatilityState,
       marketRegime,
@@ -2920,6 +3056,8 @@ async function handleTradingViewWebhook(req, res) {
       refId,
       setupType,
       setupScore,
+      qualityScore: quality.score,
+      qualityGrade: quality.grade,
       rr: fmtRR(rr),
       tpPct: fmtPct(tpPct),
       imageUsed: sendResult.usedPhoto,
