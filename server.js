@@ -1302,6 +1302,7 @@ function buildAlertText({
 
 <b>WHY</b> ${escapeHtml(whyLine)}
 
+<b>UTC</b> ${escapeHtml(prettyTime)}
 <b>CONTEXT</b> ${escapeHtml(marketRegime || "N/A")} • ${escapeHtml(session || "N/A")} • 15M/1H${confidenceLevel ? ` • ${escapeHtml(confidenceLevel)}` : ""}${showChartLink ? `
 
 <b>CHART</b> ${formatChartHtml(chartLink)}` : ""}
