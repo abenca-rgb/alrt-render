@@ -37,7 +37,7 @@ const DAILY_SUMMARY_UTC_MINUTE = Number(process.env.DAILY_SUMMARY_UTC_MINUTE || 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const DATA_DIR = process.env.RENDER_DISK_PATH || "/var/data";
+const DATA_DIR = process.env.RENDER_DISK_PATH || process.env.DATA_DIR || "/var/data";
 const STATE_FILE = path.join(DATA_DIR, "state.json");
 
 // ===== STATE =====
@@ -2426,6 +2426,7 @@ app.get("/health", (req, res) => {
     dailySummaryEnabled: DAILY_SUMMARY_ENABLED,
     dailySummaryUtcHour: DAILY_SUMMARY_UTC_HOUR,
     dailySummaryUtcMinute: DAILY_SUMMARY_UTC_MINUTE,
+    manualSummaryEnabled: Boolean(SUMMARY_ADMIN_TOKEN),
     paidMembers: paidMembers.size,
     freeMembers: freeMembers.size,
   });
