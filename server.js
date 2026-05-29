@@ -5,7 +5,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { promises as fs } from "fs";
 import { chromium } from "playwright";
-import { ALLOWED_SYMBOLS, getSymbolConfig, isAllowedTradingSymbol } from "./src/config/symbols.js";
+import { getAllowedSymbolsFromEnv, getSymbolConfig, isAllowedTradingSymbol } from "./src/config/symbols.js";
 import { scoreAlertQuality } from "./src/services/alertScoring.js";
 
 dotenv.config();
@@ -14,7 +14,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ===== VERSION =====
-const APP_VERSION = "v25.3-lifecycle-state-quality-foundation";
+const APP_VERSION = "v25.4-alert-quality-symbol-profiles";
 
 // ===== CONFIG =====
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -57,6 +57,7 @@ const MIN_RR_TO_SEND = Number(process.env.MIN_RR_TO_SEND || 0);
 const MAX_OPEN_TRADES_PER_SYMBOL = Number(process.env.MAX_OPEN_TRADES_PER_SYMBOL || 1);
 const ALERT_QUALITY_FILTER_ENABLED =
   String(process.env.ALERT_QUALITY_FILTER_ENABLED || "false").toLowerCase() === "true";
+const ALLOWED_SYMBOLS = getAllowedSymbolsFromEnv(process.env.ALLOWED_SYMBOLS || "");
 
 // Belangrijk: laatste live ref was al boven 100127.
 // Zet in Render eventueel NEXT_REF_START=100127 of hoger.
@@ -360,6 +361,24 @@ function validateTradeSanity({ symbol, side, entry, tp, sl, rr }) {
     return { ok: false, reason: "sl_pct_invalid" };
   }
 
+  if (tpPct < symbolConfig.minTpPct) {
+    return {
+      ok: false,
+      reason: "tp_pct_too_small",
+      tpPct,
+      minTpPct: symbolConfig.minTpPct,
+    };
+  }
+
+  if (slPct < symbolConfig.minSlPct) {
+    return {
+      ok: false,
+      reason: "sl_pct_too_small",
+      slPct,
+      minSlPct: symbolConfig.minSlPct,
+    };
+  }
+
   if (tpPct > maxTpPct) {
     return {
       ok: false,
@@ -390,6 +409,8 @@ function validateTradeSanity({ symbol, side, entry, tp, sl, rr }) {
     ok: true,
     tpPct,
     slPct,
+    minTpPct: symbolConfig.minTpPct,
+    minSlPct: symbolConfig.minSlPct,
   };
 }
 
@@ -1246,18 +1267,12 @@ function formatChartHtml(chartLink) {
   return `<a href="${escapeAttr(chartLink)}">Open chart</a>`;
 }
 
-function getStrengthText(strength) {
-  return strength || "N/A";
-}
-
 function buildAlertText({
   symbol,
   side,
   entry,
   tp,
-  sl,
   rr,
-  leverage,
   strength,
   prettyTime,
   whyLine,
@@ -1267,31 +1282,24 @@ function buildAlertText({
   tpPct,
   setupType,
   setupScore,
+  qualityScore,
+  qualityGrade,
   session,
   marketRegime,
   confidenceLevel,
 }) {
-  return `🚨 <b>ALERT • ${escapeHtml(symbol)}</b>
-<b>REF</b> ${escapeHtml(refId)}
+  return `🚨 <b>${escapeHtml(symbol)} ${escapeHtml(side)}</b>
 
-<b>DIRECTION</b> ${escapeHtml(side)}
 <b>SETUP</b> ${escapeHtml(setupType || "N/A")}
-<b>SCORE</b> ${escapeHtml(setupScore || "N/A")}
-<b>CONFIDENCE</b> ${escapeHtml(confidenceLevel || "N/A")}
+<b>GRADE</b> ${escapeHtml(qualityGrade || strength || "N/A")} ${qualityScore ? `(${escapeHtml(qualityScore)}/100)` : ""}
 
 <b>ENTRY</b> ${escapeHtml(fmtPrice(entry))}
 <b>TP</b> ${escapeHtml(fmtPrice(tp))} (${escapeHtml(fmtPct(tpPct))})
-<b>SL</b> ${escapeHtml(fmtPrice(sl))}
 <b>RR</b> ${escapeHtml(fmtRR(rr))}
-<b>STRENGTH</b> ${escapeHtml(getStrengthText(strength))}
-<b>LEVERAGE</b> ${escapeHtml(leverage)}
 
-<b>SESSION</b> ${escapeHtml(session || "N/A")}
-<b>REGIME</b> ${escapeHtml(marketRegime || "N/A")}
-<b>TIMEFRAME</b> 15M / 60M bias
-<b>UTC</b> ${escapeHtml(prettyTime)}
+<b>WHY</b> ${escapeHtml(whyLine)}
 
-<b>WHY</b> ${escapeHtml(whyLine)}${showChartLink ? `
+<b>CONTEXT</b> ${escapeHtml(marketRegime || "N/A")} • ${escapeHtml(session || "N/A")} • 15M/1H${confidenceLevel ? ` • ${escapeHtml(confidenceLevel)}` : ""}${showChartLink ? `
 
 <b>CHART</b> ${formatChartHtml(chartLink)}` : ""}
 
@@ -2815,7 +2823,7 @@ async function handleTradingViewWebhook(req, res) {
       return;
     }
 
-    if (!isAllowedTradingSymbol(symbol)) {
+    if (!isAllowedTradingSymbol(symbol, ALLOWED_SYMBOLS)) {
       console.log("SIGNAL SKIPPED BY SYMBOL FILTER:", {
         symbol,
         allowedSymbols: ALLOWED_SYMBOLS,
@@ -2845,6 +2853,8 @@ async function handleTradingViewWebhook(req, res) {
         rr: fmtRR(rr),
         tpPct: sanity.tpPct,
         slPct: sanity.slPct,
+        minTpPct: sanity.minTpPct,
+        minSlPct: sanity.minSlPct,
         maxTpPct: sanity.maxTpPct,
         maxSlPct: sanity.maxSlPct,
       });
@@ -2878,6 +2888,8 @@ async function handleTradingViewWebhook(req, res) {
       symbolConfig,
       side,
       rr,
+      tpPct,
+      slPct: sanity.slPct,
       strength,
       setupScore,
       trendStrength,
@@ -2948,6 +2960,8 @@ async function handleTradingViewWebhook(req, res) {
       tpPct,
       setupType,
       setupScore,
+      qualityScore: quality.score,
+      qualityGrade: quality.grade,
       session,
       marketRegime,
       confidenceLevel,
