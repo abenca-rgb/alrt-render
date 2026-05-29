@@ -35,6 +35,8 @@ export function scoreAlertQuality({
   symbolConfig,
   side,
   rr,
+  tpPct,
+  slPct,
   strength,
   setupScore,
   trendStrength,
@@ -54,6 +56,8 @@ export function scoreAlertQuality({
   const numericRsi = parseNum(rsi);
   const numericAtr = parseNum(atrPct);
   const numericRr = parseNum(rr);
+  const numericTpPct = parseNum(tpPct);
+  const numericSlPct = parseNum(slPct);
 
   if (incomingGrade === "A+") score += 20;
   else if (incomingGrade === "A") score += 14;
@@ -83,37 +87,53 @@ export function scoreAlertQuality({
   }
 
   if (Number.isFinite(numericRr)) {
-    if (numericRr >= 2.0) score += 8;
+    if (numericRr >= symbolConfig.preferredRr) score += 10;
     else if (numericRr >= symbolConfig.minRr) score += 3;
     else {
-      score -= 18;
+      score -= 24;
       penalties.push("risk/reward below symbol requirement");
     }
   }
 
-  if (Number.isFinite(numericAtr)) {
-    if (numericAtr >= 0.25 && numericAtr <= 2.8) score += 7;
-    else if (numericAtr > 3.5) {
-      score -= 12;
-      penalties.push("volatility is too stretched");
-    } else if (numericAtr < 0.15) {
+  if (Number.isFinite(numericTpPct)) {
+    if (numericTpPct >= symbolConfig.minTpPct && numericTpPct <= symbolConfig.maxTpPct) score += 4;
+    if (numericTpPct < symbolConfig.minTpPct) {
       score -= 8;
+      penalties.push("target is too small to justify the trade");
+    }
+  }
+
+  if (Number.isFinite(numericSlPct)) {
+    if (numericSlPct >= symbolConfig.minSlPct && numericSlPct <= symbolConfig.maxSlPct) score += 4;
+    if (numericSlPct < symbolConfig.minSlPct) {
+      score -= 10;
+      penalties.push("stop is too tight and likely to be wicked");
+    }
+  }
+
+  if (Number.isFinite(numericAtr)) {
+    if (numericAtr >= symbolConfig.atrMinPct && numericAtr <= symbolConfig.atrMaxPct) score += 8;
+    else if (numericAtr > symbolConfig.atrMaxPct) {
+      score -= 14;
+      penalties.push("volatility is too stretched");
+    } else if (numericAtr < symbolConfig.atrMinPct) {
+      score -= 10;
       penalties.push("volatility is too compressed");
     }
   }
 
   if (side === "LONG" && Number.isFinite(numericRsi)) {
-    if (numericRsi >= 48 && numericRsi <= 68) score += 7;
-    if (numericRsi > 74) {
-      score -= 12;
+    if (numericRsi >= symbolConfig.rsiLongMin && numericRsi <= symbolConfig.rsiLongMax) score += 8;
+    if (numericRsi > symbolConfig.rsiLongMax + 6) {
+      score -= 14;
       penalties.push("long signal is near RSI exhaustion");
     }
   }
 
   if (side === "SHORT" && Number.isFinite(numericRsi)) {
-    if (numericRsi >= 32 && numericRsi <= 52) score += 7;
-    if (numericRsi < 26) {
-      score -= 12;
+    if (numericRsi >= symbolConfig.rsiShortMin && numericRsi <= symbolConfig.rsiShortMax) score += 8;
+    if (numericRsi < symbolConfig.rsiShortMin - 6) {
+      score -= 14;
       penalties.push("short signal is near RSI exhaustion");
     }
   }
@@ -123,16 +143,21 @@ export function scoreAlertQuality({
     score += 8;
     reasons.push("market regime is supportive");
   }
-  if (/(chop|range|sideways|noise)/.test(regimeText)) {
-    score -= 18;
+  if (/(chop|range|sideways|noise|mean_reversion)/.test(regimeText)) {
+    score -= 24;
     penalties.push("market regime is choppy");
   }
 
   const sessionText = String(session || "").toLowerCase();
   if (/(london|new_york|ny|us|eu|overlap)/.test(sessionText)) score += 5;
-  if (/(dead|late|illiquid|asia_late)/.test(sessionText)) {
-    score -= 6;
+  if (symbolConfig.avoidSessions.some((bad) => sessionText.includes(bad))) {
+    score -= 10;
     penalties.push("session quality is weak");
+  }
+
+  if (symbolConfig.tier === "satellite") {
+    score -= 4;
+    penalties.push("satellite symbol requires stronger confirmation");
   }
 
   const clampedScore = Math.max(0, Math.min(100, Math.round(score)));
