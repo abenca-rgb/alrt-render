@@ -14,7 +14,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ===== VERSION =====
-const APP_VERSION = "v25.4-alert-quality-symbol-profiles";
+const APP_VERSION = "v25.4.1-alert-ref-sl-utc";
 
 // ===== CONFIG =====
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -1291,6 +1291,7 @@ function buildAlertText({
 }) {
   return `🚨 <b>${escapeHtml(symbol)} ${escapeHtml(side)}</b>
 <b>REF</b> ${escapeHtml(refId)}
+<b>UTC</b> ${escapeHtml(prettyTime)}
 
 <b>SETUP</b> ${escapeHtml(setupType || "N/A")}
 <b>GRADE</b> ${escapeHtml(qualityGrade || strength || "N/A")} ${qualityScore ? `(${escapeHtml(qualityScore)}/100)` : ""}
@@ -1302,7 +1303,6 @@ function buildAlertText({
 
 <b>WHY</b> ${escapeHtml(whyLine)}
 
-<b>UTC</b> ${escapeHtml(prettyTime)}
 <b>CONTEXT</b> ${escapeHtml(marketRegime || "N/A")} • ${escapeHtml(session || "N/A")} • 15M/1H${confidenceLevel ? ` • ${escapeHtml(confidenceLevel)}` : ""}${showChartLink ? `
 
 <b>CHART</b> ${formatChartHtml(chartLink)}` : ""}
