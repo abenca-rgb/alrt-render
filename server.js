@@ -1272,6 +1272,7 @@ function buildAlertText({
   side,
   entry,
   tp,
+  sl,
   rr,
   strength,
   prettyTime,
@@ -1289,12 +1290,14 @@ function buildAlertText({
   confidenceLevel,
 }) {
   return `🚨 <b>${escapeHtml(symbol)} ${escapeHtml(side)}</b>
+<b>REF</b> ${escapeHtml(refId)}
 
 <b>SETUP</b> ${escapeHtml(setupType || "N/A")}
 <b>GRADE</b> ${escapeHtml(qualityGrade || strength || "N/A")} ${qualityScore ? `(${escapeHtml(qualityScore)}/100)` : ""}
 
 <b>ENTRY</b> ${escapeHtml(fmtPrice(entry))}
 <b>TP</b> ${escapeHtml(fmtPrice(tp))} (${escapeHtml(fmtPct(tpPct))})
+<b>SL</b> ${escapeHtml(fmtPrice(sl))}
 <b>RR</b> ${escapeHtml(fmtRR(rr))}
 
 <b>WHY</b> ${escapeHtml(whyLine)}
