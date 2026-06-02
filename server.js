@@ -14,7 +14,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ===== VERSION =====
-const APP_VERSION = "v25.4.1-alert-ref-sl-utc";
+const APP_VERSION = "v25.5.0-candidate-diagnostics";
 
 // ===== CONFIG =====
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -57,6 +57,8 @@ const MIN_RR_TO_SEND = Number(process.env.MIN_RR_TO_SEND || 0);
 const MAX_OPEN_TRADES_PER_SYMBOL = Number(process.env.MAX_OPEN_TRADES_PER_SYMBOL || 1);
 const ALERT_QUALITY_FILTER_ENABLED =
   String(process.env.ALERT_QUALITY_FILTER_ENABLED || "false").toLowerCase() === "true";
+const CANDIDATE_QUALITY_FILTER_ENABLED =
+  String(process.env.CANDIDATE_QUALITY_FILTER_ENABLED || "true").toLowerCase() !== "false";
 const ALLOWED_SYMBOLS = getAllowedSymbolsFromEnv(process.env.ALLOWED_SYMBOLS || "");
 
 // Belangrijk: laatste live ref was al boven 100127.
@@ -592,6 +594,8 @@ function getDailyStat(dateKey = getUtcDateKey(Date.now())) {
       timeExitLoss: 0,
       expired: 0,
       freeAlerts: 0,
+      rejectedSignals: 0,
+      rejectsByReason: {},
 
       oldClosures: {
         tp: 0,
@@ -619,6 +623,8 @@ function getDailyStat(dateKey = getUtcDateKey(Date.now())) {
   if (stat.timeExitProfit === undefined) stat.timeExitProfit = 0;
   if (stat.timeExitLoss === undefined) stat.timeExitLoss = 0;
   if (stat.expired === undefined) stat.expired = 0;
+  if (stat.rejectedSignals === undefined) stat.rejectedSignals = 0;
+  if (!stat.rejectsByReason) stat.rejectsByReason = {};
   if (!stat.oldClosures) {
     stat.oldClosures = {
       tp: 0,
@@ -894,6 +900,28 @@ async function recordCloseStat({
 
   await persistState();
   return true;
+}
+
+async function recordRejectStat({
+  symbol,
+  side,
+  setupType = "UNKNOWN",
+  reason,
+  ts = Date.now(),
+}) {
+  const stat = getDailyStat(getUtcDateKey(ts));
+  const reasonKey = String(reason || "unknown").toLowerCase();
+
+  stat.rejectedSignals += 1;
+  stat.rejectsByReason[reasonKey] = (stat.rejectsByReason[reasonKey] || 0) + 1;
+
+  const symbolStat = ensureSymbolStats(stat, symbol || "UNKNOWN");
+  symbolStat.rejected = (symbolStat.rejected || 0) + 1;
+
+  const setupStat = ensureSetupStats(stat, setupType || "UNKNOWN");
+  setupStat.rejected = (setupStat.rejected || 0) + 1;
+
+  await persistState();
 }
 // ===== FREE CHANNEL =====
 function resetFreeCounterIfNeeded(nowMs = Date.now()) {
@@ -1407,6 +1435,11 @@ function buildDailySummaryText(dateKey) {
 
   const openTotal = Array.from(activeTrades.values()).filter((t) => !t.hit).length;
 
+  const rejectReasons = Object.entries(stat.rejectsByReason || {})
+    .sort((a, b) => (b[1] || 0) - (a[1] || 0))
+    .slice(0, 8)
+    .map(([reason, count]) => `${reason}: ${count}`);
+
   const symbols = Object.entries(stat.bySymbol || {})
     .sort((a, b) => (b[1].alerts || 0) - (a[1].alerts || 0))
     .slice(0, 10)
@@ -1434,6 +1467,7 @@ function buildDailySummaryText(dateKey) {
 <b>CLOSED FROM TODAY</b> ${todayClosed}
 <b>WINRATE TODAY</b> ${todayClosed > 0 ? escapeHtml(fmtPct(todayWinrate)) : "N/A"}
 <b>STILL OPEN TODAY</b> ${openToday}
+<b>REJECTED / NOT POSTED</b> ${stat.rejectedSignals || 0}
 
 <b>OLD TRADES CLOSED TODAY</b>
 <b>OLD TP</b> ${old.tp || 0}
@@ -1453,6 +1487,8 @@ function buildDailySummaryText(dateKey) {
 
 <b>OPEN TRADES TOTAL</b> ${openTotal}
 <b>FREE POSTS</b> ${stat.freeAlerts}/${FREE_DAILY_LIMIT}
+
+${rejectReasons.length ? `<b>REJECT REASONS</b>\n${escapeHtml(rejectReasons.join("\n"))}` : "<b>REJECT REASONS</b>\nN/A"}
 
 ${symbols.length ? `<b>BY SYMBOL - TODAY OPENED</b>\n${escapeHtml(symbols.join("\n"))}` : "<b>BY SYMBOL - TODAY OPENED</b>\nN/A"}
 
@@ -2427,6 +2463,7 @@ app.get("/health", (req, res) => {
     minRrToSend: MIN_RR_TO_SEND,
     maxOpenTradesPerSymbol: MAX_OPEN_TRADES_PER_SYMBOL,
     alertQualityFilterEnabled: ALERT_QUALITY_FILTER_ENABLED,
+    candidateQualityFilterEnabled: CANDIDATE_QUALITY_FILTER_ENABLED,
     allowedSymbols: ALLOWED_SYMBOLS,
     freeEnabled: Boolean(FREE_CHAT_ID),
     freePostDate,
@@ -2632,6 +2669,12 @@ async function handleTradingViewWebhook(req, res) {
       ""
     );
 
+    const normalizedEventType = normalizeEventType(eventType);
+    const isCandidateEvent =
+      normalizedEventType.includes("candidate") ||
+      normalizedEventType.includes("setup_candidate") ||
+      normalizedEventType.includes("trade_candidate");
+
     const currentPrice = parseNum(
       pick(body.hit_price, body.last_price, body.market_price, body.price, body.close, body.last)
     );
@@ -2832,6 +2875,13 @@ async function handleTradingViewWebhook(req, res) {
         symbol,
         allowedSymbols: ALLOWED_SYMBOLS,
       });
+      await recordRejectStat({
+        symbol,
+        side,
+        setupType,
+        reason: "symbol_filter",
+        ts: receivedAtMs,
+      });
       return;
     }
 
@@ -2862,6 +2912,13 @@ async function handleTradingViewWebhook(req, res) {
         maxTpPct: sanity.maxTpPct,
         maxSlPct: sanity.maxSlPct,
       });
+      await recordRejectStat({
+        symbol,
+        side,
+        setupType,
+        reason: sanity.reason || "sanity_filter",
+        ts: receivedAtMs,
+      });
       return;
     }
 
@@ -2870,6 +2927,13 @@ async function handleTradingViewWebhook(req, res) {
         symbol,
         openTradesForSymbol: countOpenTradesForSymbol(symbol),
         maxOpenTradesPerSymbol: MAX_OPEN_TRADES_PER_SYMBOL,
+      });
+      await recordRejectStat({
+        symbol,
+        side,
+        setupType,
+        reason: "open_trade_filter",
+        ts: receivedAtMs,
       });
       return;
     }
@@ -2884,6 +2948,13 @@ async function handleTradingViewWebhook(req, res) {
         minRequired: effectiveMinRr,
         symbol,
         rr: fmtRR(rr),
+      });
+      await recordRejectStat({
+        symbol,
+        side,
+        setupType,
+        reason: "min_rr_filter",
+        ts: receivedAtMs,
       });
       return;
     }
@@ -2904,16 +2975,28 @@ async function handleTradingViewWebhook(req, res) {
       atrPct,
     });
 
-    if (ALERT_QUALITY_FILTER_ENABLED && !quality.passed) {
+    const enforceQualityFilter =
+      ALERT_QUALITY_FILTER_ENABLED ||
+      (CANDIDATE_QUALITY_FILTER_ENABLED && isCandidateEvent);
+
+    if (enforceQualityFilter && !quality.passed) {
       console.log("SIGNAL SKIPPED BY QUALITY FILTER:", {
         symbol,
         side,
+        isCandidateEvent,
         qualityScore: quality.score,
         qualityGrade: quality.grade,
         minScore: quality.minScore,
         minGrade: quality.minGrade,
         reasons: quality.reasons,
         penalties: quality.penalties,
+      });
+      await recordRejectStat({
+        symbol,
+        side,
+        setupType,
+        reason: "quality_filter",
+        ts: receivedAtMs,
       });
       return;
     }
