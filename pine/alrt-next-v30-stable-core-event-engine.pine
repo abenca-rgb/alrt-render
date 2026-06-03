@@ -1,5 +1,5 @@
 //@version=6
-indicator("ALRT-Next v30 STABLE CORE EVENT ENGINE", overlay=true, max_labels_count=500)
+indicator("ALRT-Next v30.1 STABLE CORE EVENT ENGINE", overlay=true, max_labels_count=500)
 
 // ==========================
 // PURPOSE
@@ -51,7 +51,7 @@ showDebugLbl = input.bool(false, "Show debug labels")
 // ==========================
 // HELPERS
 // ==========================
-engineId = "ALRT_NEXT_V30_STABLE_CORE_15M_1H"
+engineId = "ALRT_NEXT_V30_1_STABLE_CORE_15M_1H"
 secret = "alrt_secret_01061970"
 
 fmt(_x) =>
@@ -77,7 +77,7 @@ calcRR(_side, _entry, _tp, _sl) =>
     risk > 0 and reward > 0 ? reward / risk : 0.0
 
 jsonBase(_event, _side, _alertId) =>
-    '{"secret":"' + secret + '","event":"' + _event + '","system":"ALRT-NEXT","version":"v30","engine_id":"' + engineId + '","side":"' + _side + '","symbol":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","alert_id":"' + _alertId + '","signal_alert_id":"' + _alertId + '","parent_alert_id":"' + _alertId + '","time_close":"' + str.tostring(nowMs()) + '","timestamp":"' + str.tostring(nowMs()) + '"'
+    '{"secret":"' + secret + '","event":"' + _event + '","system":"ALRT-NEXT","version":"v30.1","engine_id":"' + engineId + '","side":"' + _side + '","symbol":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","alert_id":"' + _alertId + '","signal_alert_id":"' + _alertId + '","parent_alert_id":"' + _alertId + '","time_close":"' + str.tostring(nowMs()) + '","timestamp":"' + str.tostring(nowMs()) + '"'
 
 // ==========================
 // SYMBOLS
@@ -104,6 +104,14 @@ isSatellite =
 allowed = isCore or (useSatelliteCoins and isSatellite)
 isMajor = syminfo.ticker == "BTCUSDT" or syminfo.ticker == "ETHUSDT" or syminfo.ticker == "BNBUSDT" or syminfo.ticker == "XRPUSDT"
 lev = isMajor ? 4 : isCore ? 3 : 2
+
+maxTpPct = isMajor ? 3.8 : isCore ? 4.5 : 5.2
+maxSlPct = isMajor ? 1.6 : isCore ? 2.0 : 2.4
+minTpPct = isMajor ? 0.35 : isCore ? 0.45 : 0.55
+minSlPct = isMajor ? 0.20 : isCore ? 0.25 : 0.30
+
+pctDistance(_a, _b) =>
+    _a > 0 ? math.abs(_a - _b) / _a * 100.0 : 999.0
 
 // ==========================
 // 15M DATA
@@ -195,11 +203,11 @@ breakdownShort =
 
 continuationLong =
      localBull and (htfBull or htfClose > htfEmaSlow) and close > high[1] and close > emaFast and
-     closePos >= 0.52 and rsiVal >= 46 and rsiVal <= 72 and volOk and not chop
+     closePos >= 0.52 and rsiVal >= 46 and rsiVal <= 72 and volOk and htfTrendOk and not chop and not compression
 
 continuationShort =
      localBear and (htfBear or htfClose < htfEmaSlow) and close < low[1] and close < emaFast and
-     closePos <= 0.48 and rsiVal <= 54 and rsiVal >= 16 and volOk and not chop
+     closePos <= 0.48 and rsiVal <= 54 and rsiVal >= 16 and volOk and htfTrendOk and not chop and not compression
 
 reclaimLong =
      htfBull and low < ta.lowest(low[1], swingLookback) and close > low[1] and close > emaFast and
@@ -273,7 +281,7 @@ calcLongLevels(_entry, _strength) =>
     swingLow = ta.lowest(low, swingLookback)
     slRaw = swingLow - atrVal * 0.12
     slAtr = _entry - atrVal * atrSlMult
-    sl = math.min(slRaw, slAtr)
+    sl = math.max(slRaw, slAtr)
     risk = _entry - sl
     rawTp = _entry + atrVal * (_strength == "A+" ? atrTpMultAP : atrTpMultA)
     minTp = _entry + risk * minRR
@@ -285,7 +293,7 @@ calcShortLevels(_entry, _strength) =>
     swingHigh = ta.highest(high, swingLookback)
     slRaw = swingHigh + atrVal * 0.12
     slAtr = _entry + atrVal * atrSlMult
-    sl = math.max(slRaw, slAtr)
+    sl = math.min(slRaw, slAtr)
     risk = sl - _entry
     rawTp = _entry - atrVal * (_strength == "A+" ? atrTpMultAP : atrTpMultA)
     minTp = _entry - risk * minRR
@@ -367,18 +375,33 @@ shortCooldownOk = na(lastShortBar) or bar_index - lastShortBar > cooldownBars
 [longTpPreview, longSlPreview, longRRPreview] = calcLongLevels(close, longStrength)
 [shortTpPreview, shortSlPreview, shortRRPreview] = calcShortLevels(close, shortStrength)
 
-longLevelsOk = longRRPreview >= minRR and longTpPreview > close and longSlPreview < close
-shortLevelsOk = shortRRPreview >= minRR and shortTpPreview < close and shortSlPreview > close
+longTpPctPreview = pctDistance(close, longTpPreview)
+longSlPctPreview = pctDistance(close, longSlPreview)
+shortTpPctPreview = pctDistance(close, shortTpPreview)
+shortSlPctPreview = pctDistance(close, shortSlPreview)
+
+longSetupRegimeOk = longSetupType != "HTF_CONTINUATION" or marketRegime != "COMPRESSION"
+shortSetupRegimeOk = shortSetupType != "HTF_CONTINUATION" or marketRegime != "COMPRESSION"
+
+longLevelsOk =
+     longRRPreview >= minRR and longTpPreview > close and longSlPreview < close and
+     longTpPctPreview >= minTpPct and longTpPctPreview <= maxTpPct and
+     longSlPctPreview >= minSlPct and longSlPctPreview <= maxSlPct
+
+shortLevelsOk =
+     shortRRPreview >= minRR and shortTpPreview < close and shortSlPreview > close and
+     shortTpPctPreview >= minTpPct and shortTpPctPreview <= maxTpPct and
+     shortSlPctPreview >= minSlPct and shortSlPctPreview <= maxSlPct
 
 canOpenNew = confirmed and activeSide == 0 and not hadActiveAtBarStart and not eventSentThisBar
 
 longValid =
      useLongs and is15M and allowed and canOpenNew and sessionAllowed and
-     longSetupType != "NONE" and longScore >= minSetupScore and longLevelsOk and longCooldownOk
+     longSetupType != "NONE" and longSetupRegimeOk and longScore >= minSetupScore and longLevelsOk and longCooldownOk
 
 shortValid =
      useShorts and is15M and allowed and canOpenNew and sessionAllowed and
-     shortSetupType != "NONE" and shortScore >= minSetupScore and shortLevelsOk and shortCooldownOk
+     shortSetupType != "NONE" and shortSetupRegimeOk and shortScore >= minSetupScore and shortLevelsOk and shortCooldownOk
 
 if longValid
     seq += 1
@@ -429,7 +452,7 @@ plotshape(showMarkers and slHitNow, title="SL", style=shape.circle, location=loc
 plotshape(showMarkers and tradeTooOld, title="TIME", style=shape.circle, location=location.abovebar, color=color.gray, text="TIME", size=size.tiny)
 
 if showDebugLbl and longValid
-    label.new(bar_index, low, "LONG v30\n" + longSetupType + "\nScore " + str.tostring(longScore) + "\nRR " + str.tostring(longRRPreview, "#.##") + "\n" + sessionName, style=label.style_label_up, textcolor=color.white, color=color.green)
+    label.new(bar_index, low, "LONG v30.1\n" + longSetupType + "\nScore " + str.tostring(longScore) + "\nRR " + str.tostring(longRRPreview, "#.##") + "\n" + sessionName, style=label.style_label_up, textcolor=color.white, color=color.green)
 
 if showDebugLbl and shortValid
-    label.new(bar_index, high, "SHORT v30\n" + shortSetupType + "\nScore " + str.tostring(shortScore) + "\nRR " + str.tostring(shortRRPreview, "#.##") + "\n" + sessionName, style=label.style_label_down, textcolor=color.white, color=color.red)
+    label.new(bar_index, high, "SHORT v30.1\n" + shortSetupType + "\nScore " + str.tostring(shortScore) + "\nRR " + str.tostring(shortRRPreview, "#.##") + "\n" + sessionName, style=label.style_label_down, textcolor=color.white, color=color.red)

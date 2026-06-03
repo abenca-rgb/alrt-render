@@ -1,5 +1,5 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Copy ALRT Pine v30</title><style>body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;background:#101318;color:#f4f7fb}header{padding:18px 22px;background:#161b22;border-bottom:1px solid #30363d;position:sticky;top:0}h1{font-size:20px;margin:0 0 8px}p{margin:0;color:#b7c0cc}main{padding:18px 22px}button{background:#2f81f7;color:white;border:0;border-radius:6px;padding:10px 14px;font-size:15px;cursor:pointer;margin-bottom:12px}textarea{width:100%;height:75vh;box-sizing:border-box;background:#0b0f14;color:#e6edf3;border:1px solid #30363d;border-radius:8px;padding:14px;font-family:Menlo,Consolas,monospace;font-size:12px;line-height:1.45;white-space:pre}.status{display:inline-block;margin-left:10px;color:#8ee68e}</style></head><body><header><h1>ALRT-Next v30 Stable Core Pine Script</h1><p>Click Copy, then paste into TradingView Pine Editor. If the button does not work, click inside the box, press Cmd+A, then Cmd+C.</p></header><main><button id="copy">Copy Pine Code</button><span id="status" class="status"></span><textarea id="code" spellcheck="false">//@version=6
-indicator("ALRT-Next v30 STABLE CORE EVENT ENGINE", overlay=true, max_labels_count=500)
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Copy ALRT Pine v30.1</title><style>body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;background:#101318;color:#f4f7fb}header{padding:18px 22px;background:#161b22;border-bottom:1px solid #30363d;position:sticky;top:0}h1{font-size:20px;margin:0 0 8px}p{margin:0;color:#b7c0cc}main{padding:18px 22px}button{background:#2f81f7;color:white;border:0;border-radius:6px;padding:10px 14px;font-size:15px;cursor:pointer;margin-bottom:12px}textarea{width:100%;height:75vh;box-sizing:border-box;background:#0b0f14;color:#e6edf3;border:1px solid #30363d;border-radius:8px;padding:14px;font-family:Menlo,Consolas,monospace;font-size:12px;line-height:1.45;white-space:pre}.status{display:inline-block;margin-left:10px;color:#8ee68e}</style></head><body><header><h1>ALRT-Next v30.1 Stable Core Pine Script</h1><p>Click Copy, then paste into TradingView Pine Editor. If the button does not work, click inside the box, press Cmd+A, then Cmd+C.</p></header><main><button id="copy">Copy Pine Code</button><span id="status" class="status"></span><textarea id="code" spellcheck="false">//@version=6
+indicator("ALRT-Next v30.1 STABLE CORE EVENT ENGINE", overlay=true, max_labels_count=500)
 
 // ==========================
 // PURPOSE
@@ -51,7 +51,7 @@ showDebugLbl = input.bool(false, "Show debug labels")
 // ==========================
 // HELPERS
 // ==========================
-engineId = "ALRT_NEXT_V30_STABLE_CORE_15M_1H"
+engineId = "ALRT_NEXT_V30_1_STABLE_CORE_15M_1H"
 secret = "alrt_secret_01061970"
 
 fmt(_x) =&gt;
@@ -77,7 +77,7 @@ calcRR(_side, _entry, _tp, _sl) =&gt;
     risk &gt; 0 and reward &gt; 0 ? reward / risk : 0.0
 
 jsonBase(_event, _side, _alertId) =&gt;
-    '{"secret":"' + secret + '","event":"' + _event + '","system":"ALRT-NEXT","version":"v30","engine_id":"' + engineId + '","side":"' + _side + '","symbol":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","alert_id":"' + _alertId + '","signal_alert_id":"' + _alertId + '","parent_alert_id":"' + _alertId + '","time_close":"' + str.tostring(nowMs()) + '","timestamp":"' + str.tostring(nowMs()) + '"'
+    '{"secret":"' + secret + '","event":"' + _event + '","system":"ALRT-NEXT","version":"v30.1","engine_id":"' + engineId + '","side":"' + _side + '","symbol":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","alert_id":"' + _alertId + '","signal_alert_id":"' + _alertId + '","parent_alert_id":"' + _alertId + '","time_close":"' + str.tostring(nowMs()) + '","timestamp":"' + str.tostring(nowMs()) + '"'
 
 // ==========================
 // SYMBOLS
@@ -104,6 +104,14 @@ isSatellite =
 allowed = isCore or (useSatelliteCoins and isSatellite)
 isMajor = syminfo.ticker == "BTCUSDT" or syminfo.ticker == "ETHUSDT" or syminfo.ticker == "BNBUSDT" or syminfo.ticker == "XRPUSDT"
 lev = isMajor ? 4 : isCore ? 3 : 2
+
+maxTpPct = isMajor ? 3.8 : isCore ? 4.5 : 5.2
+maxSlPct = isMajor ? 1.6 : isCore ? 2.0 : 2.4
+minTpPct = isMajor ? 0.35 : isCore ? 0.45 : 0.55
+minSlPct = isMajor ? 0.20 : isCore ? 0.25 : 0.30
+
+pctDistance(_a, _b) =&gt;
+    _a &gt; 0 ? math.abs(_a - _b) / _a * 100.0 : 999.0
 
 // ==========================
 // 15M DATA
@@ -195,11 +203,11 @@ breakdownShort =
 
 continuationLong =
      localBull and (htfBull or htfClose &gt; htfEmaSlow) and close &gt; high[1] and close &gt; emaFast and
-     closePos &gt;= 0.52 and rsiVal &gt;= 46 and rsiVal &lt;= 72 and volOk and not chop
+     closePos &gt;= 0.52 and rsiVal &gt;= 46 and rsiVal &lt;= 72 and volOk and htfTrendOk and not chop and not compression
 
 continuationShort =
      localBear and (htfBear or htfClose &lt; htfEmaSlow) and close &lt; low[1] and close &lt; emaFast and
-     closePos &lt;= 0.48 and rsiVal &lt;= 54 and rsiVal &gt;= 16 and volOk and not chop
+     closePos &lt;= 0.48 and rsiVal &lt;= 54 and rsiVal &gt;= 16 and volOk and htfTrendOk and not chop and not compression
 
 reclaimLong =
      htfBull and low &lt; ta.lowest(low[1], swingLookback) and close &gt; low[1] and close &gt; emaFast and
@@ -273,7 +281,7 @@ calcLongLevels(_entry, _strength) =&gt;
     swingLow = ta.lowest(low, swingLookback)
     slRaw = swingLow - atrVal * 0.12
     slAtr = _entry - atrVal * atrSlMult
-    sl = math.min(slRaw, slAtr)
+    sl = math.max(slRaw, slAtr)
     risk = _entry - sl
     rawTp = _entry + atrVal * (_strength == "A+" ? atrTpMultAP : atrTpMultA)
     minTp = _entry + risk * minRR
@@ -285,7 +293,7 @@ calcShortLevels(_entry, _strength) =&gt;
     swingHigh = ta.highest(high, swingLookback)
     slRaw = swingHigh + atrVal * 0.12
     slAtr = _entry + atrVal * atrSlMult
-    sl = math.max(slRaw, slAtr)
+    sl = math.min(slRaw, slAtr)
     risk = sl - _entry
     rawTp = _entry - atrVal * (_strength == "A+" ? atrTpMultAP : atrTpMultA)
     minTp = _entry - risk * minRR
@@ -367,18 +375,33 @@ shortCooldownOk = na(lastShortBar) or bar_index - lastShortBar &gt; cooldownBars
 [longTpPreview, longSlPreview, longRRPreview] = calcLongLevels(close, longStrength)
 [shortTpPreview, shortSlPreview, shortRRPreview] = calcShortLevels(close, shortStrength)
 
-longLevelsOk = longRRPreview &gt;= minRR and longTpPreview &gt; close and longSlPreview &lt; close
-shortLevelsOk = shortRRPreview &gt;= minRR and shortTpPreview &lt; close and shortSlPreview &gt; close
+longTpPctPreview = pctDistance(close, longTpPreview)
+longSlPctPreview = pctDistance(close, longSlPreview)
+shortTpPctPreview = pctDistance(close, shortTpPreview)
+shortSlPctPreview = pctDistance(close, shortSlPreview)
+
+longSetupRegimeOk = longSetupType != "HTF_CONTINUATION" or marketRegime != "COMPRESSION"
+shortSetupRegimeOk = shortSetupType != "HTF_CONTINUATION" or marketRegime != "COMPRESSION"
+
+longLevelsOk =
+     longRRPreview &gt;= minRR and longTpPreview &gt; close and longSlPreview &lt; close and
+     longTpPctPreview &gt;= minTpPct and longTpPctPreview &lt;= maxTpPct and
+     longSlPctPreview &gt;= minSlPct and longSlPctPreview &lt;= maxSlPct
+
+shortLevelsOk =
+     shortRRPreview &gt;= minRR and shortTpPreview &lt; close and shortSlPreview &gt; close and
+     shortTpPctPreview &gt;= minTpPct and shortTpPctPreview &lt;= maxTpPct and
+     shortSlPctPreview &gt;= minSlPct and shortSlPctPreview &lt;= maxSlPct
 
 canOpenNew = confirmed and activeSide == 0 and not hadActiveAtBarStart and not eventSentThisBar
 
 longValid =
      useLongs and is15M and allowed and canOpenNew and sessionAllowed and
-     longSetupType != "NONE" and longScore &gt;= minSetupScore and longLevelsOk and longCooldownOk
+     longSetupType != "NONE" and longSetupRegimeOk and longScore &gt;= minSetupScore and longLevelsOk and longCooldownOk
 
 shortValid =
      useShorts and is15M and allowed and canOpenNew and sessionAllowed and
-     shortSetupType != "NONE" and shortScore &gt;= minSetupScore and shortLevelsOk and shortCooldownOk
+     shortSetupType != "NONE" and shortSetupRegimeOk and shortScore &gt;= minSetupScore and shortLevelsOk and shortCooldownOk
 
 if longValid
     seq += 1
@@ -429,8 +452,8 @@ plotshape(showMarkers and slHitNow, title="SL", style=shape.circle, location=loc
 plotshape(showMarkers and tradeTooOld, title="TIME", style=shape.circle, location=location.abovebar, color=color.gray, text="TIME", size=size.tiny)
 
 if showDebugLbl and longValid
-    label.new(bar_index, low, "LONG v30\n" + longSetupType + "\nScore " + str.tostring(longScore) + "\nRR " + str.tostring(longRRPreview, "#.##") + "\n" + sessionName, style=label.style_label_up, textcolor=color.white, color=color.green)
+    label.new(bar_index, low, "LONG v30.1\n" + longSetupType + "\nScore " + str.tostring(longScore) + "\nRR " + str.tostring(longRRPreview, "#.##") + "\n" + sessionName, style=label.style_label_up, textcolor=color.white, color=color.green)
 
 if showDebugLbl and shortValid
-    label.new(bar_index, high, "SHORT v30\n" + shortSetupType + "\nScore " + str.tostring(shortScore) + "\nRR " + str.tostring(shortRRPreview, "#.##") + "\n" + sessionName, style=label.style_label_down, textcolor=color.white, color=color.red)
+    label.new(bar_index, high, "SHORT v30.1\n" + shortSetupType + "\nScore " + str.tostring(shortScore) + "\nRR " + str.tostring(shortRRPreview, "#.##") + "\n" + sessionName, style=label.style_label_down, textcolor=color.white, color=color.red)
 </textarea></main><script>const code=document.getElementById('code');const status=document.getElementById('status');document.getElementById('copy').addEventListener('click',async()=>{code.focus();code.select();try{await navigator.clipboard.writeText(code.value);status.textContent='Copied.';}catch(e){document.execCommand('copy');status.textContent='Selected. Press Cmd+C if needed.';}});</script></body></html>
