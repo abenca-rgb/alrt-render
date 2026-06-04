@@ -14,7 +14,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ===== VERSION =====
-const APP_VERSION = "v25.5.1-ignore-unmatched-live-closes";
+const APP_VERSION = "v25.5.2-loss-guard";
 
 // ===== CONFIG =====
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -43,6 +43,7 @@ const STATE_FILE = path.join(DATA_DIR, "state.json");
 // ===== STATE =====
 const activeTrades = new Map();
 const recentHitKeys = new Map();
+const recentLossStops = new Map();
 const freeSharedRefs = new Map();
 const dailyStats = new Map();
 const paidMembers = new Map();
@@ -50,6 +51,15 @@ const freeMembers = new Map();
 
 const MAX_TRADE_AGE_MS = 24 * 60 * 60 * 1000;
 const HIT_DEDUP_TTL_MS = 36 * 60 * 60 * 1000;
+const LOSS_GUARD_SYMBOL_COOLDOWN_MS = Number(process.env.LOSS_GUARD_SYMBOL_COOLDOWN_MINUTES || 180) * 60 * 1000;
+const LOSS_GUARD_MARKET_WINDOW_MS = Number(process.env.LOSS_GUARD_MARKET_WINDOW_MINUTES || 120) * 60 * 1000;
+const LOSS_GUARD_MARKET_COOLDOWN_MS = Number(process.env.LOSS_GUARD_MARKET_COOLDOWN_MINUTES || 90) * 60 * 1000;
+const LOSS_GUARD_MARKET_LIMIT = Number(process.env.LOSS_GUARD_MARKET_LIMIT || 3);
+const LOSS_GUARD_RETENTION_MS = Math.max(
+  LOSS_GUARD_SYMBOL_COOLDOWN_MS,
+  LOSS_GUARD_MARKET_WINDOW_MS + LOSS_GUARD_MARKET_COOLDOWN_MS,
+  24 * 60 * 60 * 1000,
+);
 const FREE_REF_TTL_MS = 48 * 60 * 60 * 1000;
 const FREE_DAILY_LIMIT = 2;
 
@@ -1042,6 +1052,69 @@ async function markRecentHit(hitKey) {
   await persistState();
 }
 
+function registerLossStop(trade, closeType, ts) {
+  if (!trade || closeType !== "SL") return;
+
+  const atMs = Number.isFinite(Number(ts)) ? Number(ts) : Date.now();
+  const key = `${trade.symbol}|${trade.side}|${trade.refId}|${atMs}`;
+
+  recentLossStops.set(key, {
+    symbol: trade.symbol,
+    side: trade.side,
+    setupType: trade.setupType || "UNKNOWN",
+    refId: trade.refId,
+    atMs,
+    atUtc: new Date(atMs).toISOString(),
+  });
+}
+
+function getFreshLossStops(now = Date.now()) {
+  return Array.from(recentLossStops.values()).filter((item) => {
+    if (!item?.atMs) return false;
+    return now - Number(item.atMs) <= LOSS_GUARD_RETENTION_MS;
+  });
+}
+
+function getLossGuardBlock({ symbol, side, now = Date.now() }) {
+  const recentStops = getFreshLossStops(now);
+  const sameSymbolSide = recentStops
+    .filter((item) => item.symbol === symbol && item.side === side)
+    .sort((a, b) => Number(b.atMs) - Number(a.atMs));
+
+  const latestSymbolStop = sameSymbolSide[0];
+
+  if (latestSymbolStop && now - Number(latestSymbolStop.atMs) <= LOSS_GUARD_SYMBOL_COOLDOWN_MS) {
+    return {
+      blocked: true,
+      reason: "loss_guard_symbol",
+      latestRef: latestSymbolStop.refId,
+      latestAtUtc: latestSymbolStop.atUtc,
+      cooldownMinutes: Math.round(LOSS_GUARD_SYMBOL_COOLDOWN_MS / 60000),
+    };
+  }
+
+  const marketSideStops = recentStops
+    .filter((item) => item.side === side && now - Number(item.atMs) <= LOSS_GUARD_MARKET_WINDOW_MS)
+    .sort((a, b) => Number(b.atMs) - Number(a.atMs));
+
+  if (marketSideStops.length >= LOSS_GUARD_MARKET_LIMIT) {
+    const latestMarketStop = marketSideStops[0];
+
+    if (now - Number(latestMarketStop.atMs) <= LOSS_GUARD_MARKET_COOLDOWN_MS) {
+      return {
+        blocked: true,
+        reason: "loss_guard_market",
+        stopCount: marketSideStops.length,
+        latestRef: latestMarketStop.refId,
+        latestAtUtc: latestMarketStop.atUtc,
+        cooldownMinutes: Math.round(LOSS_GUARD_MARKET_COOLDOWN_MS / 60000),
+      };
+    }
+  }
+
+  return { blocked: false };
+}
+
 function findTradeByRefId(refId) {
   if (!refId) return null;
 
@@ -1554,6 +1627,7 @@ async function persistState() {
         refStartFloor: REF_START_FLOOR,
         activeTrades: Array.from(activeTrades.entries()).map(([key, trade]) => [key, trade]),
         recentHitKeys: Array.from(recentHitKeys.entries()).map(([key, ts]) => [key, ts]),
+        recentLossStops: Array.from(recentLossStops.entries()).map(([key, info]) => [key, info]),
         freePostDate,
         freePostsToday,
         freeSharedRefs: Array.from(freeSharedRefs.entries()).map(([refId, info]) => [refId, info]),
@@ -1608,6 +1682,7 @@ async function loadState() {
 
     const active = Array.isArray(parsed?.activeTrades) ? parsed.activeTrades : [];
     const hits = Array.isArray(parsed?.recentHitKeys) ? parsed.recentHitKeys : [];
+    const lossStops = Array.isArray(parsed?.recentLossStops) ? parsed.recentLossStops : [];
     const freeRefs = Array.isArray(parsed?.freeSharedRefs) ? parsed.freeSharedRefs : [];
     const stats = Array.isArray(parsed?.dailyStats) ? parsed.dailyStats : [];
 
@@ -1645,6 +1720,18 @@ async function loadState() {
       if (!ts || now - ts > HIT_DEDUP_TTL_MS) continue;
 
       recentHitKeys.set(key, ts);
+    }
+
+    for (const item of lossStops) {
+      if (!Array.isArray(item) || item.length !== 2) continue;
+
+      const [key, info] = item;
+      const atMs = Number(info?.atMs);
+
+      if (!key || !Number.isFinite(atMs)) continue;
+      if (now - atMs > LOSS_GUARD_RETENTION_MS) continue;
+
+      recentLossStops.set(String(key), info);
     }
 
     for (const item of freeRefs) {
@@ -1696,6 +1783,7 @@ async function loadState() {
 
     console.log(`Loaded ${activeTrades.size} active trades from disk`);
     console.log(`Loaded ${recentHitKeys.size} recent hit keys from disk`);
+    console.log(`Loaded ${recentLossStops.size} recent loss stops from disk`);
     console.log(`Loaded ${freeSharedRefs.size} free shared refs from disk`);
     console.log(`Loaded ${dailyStats.size} daily stat days from disk`);
     console.log(`Loaded ${paidMembers.size} paid members from disk`);
@@ -1736,6 +1824,13 @@ function cleanupState() {
   for (const [key, ts] of recentHitKeys.entries()) {
     if (!ts || now - ts > HIT_DEDUP_TTL_MS) {
       recentHitKeys.delete(key);
+      changed = true;
+    }
+  }
+
+  for (const [key, info] of recentLossStops.entries()) {
+    if (!info?.atMs || now - Number(info.atMs) > LOSS_GUARD_RETENTION_MS) {
+      recentLossStops.delete(key);
       changed = true;
     }
   }
@@ -2173,6 +2268,7 @@ async function closeTrade({
     ts: closedAtMs,
   });
 
+  registerLossStop(trade, finalCloseType, closedAtMs);
   await markRecentHit(hitKey);
   await removeTrade(matched.key);
 
@@ -2456,10 +2552,15 @@ app.get("/health", (req, res) => {
     stateFile: STATE_FILE,
     activeTrades: activeTrades.size,
     recentHitKeys: recentHitKeys.size,
+    recentLossStops: recentLossStops.size,
     nextRef,
     refStartFloor: REF_START_FLOOR,
     nextRefFloorSafe: nextRef >= REF_START_FLOOR,
     maxTradeAgeHours: MAX_TRADE_AGE_MS / 1000 / 60 / 60,
+    lossGuardSymbolCooldownMinutes: Math.round(LOSS_GUARD_SYMBOL_COOLDOWN_MS / 60000),
+    lossGuardMarketWindowMinutes: Math.round(LOSS_GUARD_MARKET_WINDOW_MS / 60000),
+    lossGuardMarketCooldownMinutes: Math.round(LOSS_GUARD_MARKET_COOLDOWN_MS / 60000),
+    lossGuardMarketLimit: LOSS_GUARD_MARKET_LIMIT,
     minRrToSend: MIN_RR_TO_SEND,
     maxOpenTradesPerSymbol: MAX_OPEN_TRADES_PER_SYMBOL,
     alertQualityFilterEnabled: ALERT_QUALITY_FILTER_ENABLED,
@@ -2924,6 +3025,33 @@ async function handleTradingViewWebhook(req, res) {
         side,
         setupType,
         reason: "open_trade_filter",
+        ts: receivedAtMs,
+      });
+      return;
+    }
+
+    const lossGuard = getLossGuardBlock({
+      symbol,
+      side,
+      now: receivedAtMs,
+    });
+
+    if (lossGuard.blocked) {
+      console.log("SIGNAL SKIPPED BY LOSS GUARD:", {
+        reason: lossGuard.reason,
+        symbol,
+        side,
+        setupType,
+        latestRef: lossGuard.latestRef,
+        latestAtUtc: lossGuard.latestAtUtc,
+        stopCount: lossGuard.stopCount,
+        cooldownMinutes: lossGuard.cooldownMinutes,
+      });
+      await recordRejectStat({
+        symbol,
+        side,
+        setupType,
+        reason: lossGuard.reason,
         ts: receivedAtMs,
       });
       return;
