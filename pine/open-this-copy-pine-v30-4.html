@@ -1,0 +1,474 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Copy ALRT Pine v30.4 DEFENSIVE</title><style>body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;background:#101318;color:#f4f7fb}header{padding:18px 22px;background:#161b22;border-bottom:1px solid #30363d;position:sticky;top:0}h1{font-size:20px;margin:0 0 8px}p{margin:0;color:#b7c0cc}main{padding:18px 22px}button{background:#2f81f7;color:white;border:0;border-radius:6px;padding:10px 14px;font-size:15px;cursor:pointer;margin-bottom:12px}textarea{width:100%;height:75vh;box-sizing:border-box;background:#0b0f14;color:#e6edf3;border:1px solid #30363d;border-radius:8px;padding:14px;font-family:Menlo,Consolas,monospace;font-size:12px;line-height:1.45;white-space:pre}.status{display:inline-block;margin-left:10px;color:#8ee68e}</style></head><body><header><h1>ALRT-Next v30.4 LIVE DEFENSIVE Pine Script</h1><p>Click Copy, then paste into TradingView Pine Editor. Recreate alerts with Any alert() function call.</p></header><main><button id="copy">Copy Pine Code</button><span id="status" class="status"></span><textarea id="code" spellcheck="false">//@version=6
+indicator("ALRT-Next v30.4 LIVE DEFENSIVE CORE EVENT ENGINE", overlay=true, max_labels_count=500)
+
+// ==========================
+// PURPOSE
+// ==========================
+// Pine should not be the final quality gate.
+// Pine detects robust 15M market events and sends candidates.
+// Render decides publish/reject, keeps REF/SL/UTC/lifecycle/stats.
+
+// ==========================
+// INPUTS
+// ==========================
+useLongs  = input.bool(true, "Enable LONG")
+useShorts = input.bool(true, "Enable SHORT")
+useSatelliteCoins = input.bool(false, "Enable satellite coins")
+realtimeAlerts = input.bool(true, "Live alerts before candle close")
+minLiveBarAgeMinutes = input.int(3, "Min live bar age minutes", minval=0)
+maxExtensionAtr = input.float(1.15, "Max EMA extension ATR", step=0.05)
+
+htfTf = input.timeframe("60", "HTF bias timeframe")
+
+fastLen  = input.int(9, "Fast EMA")
+slowLen  = input.int(21, "Slow EMA")
+trendLen = input.int(50, "Trend EMA")
+
+rsiLen = input.int(14, "RSI Length")
+atrLen = input.int(14, "ATR Length")
+adxLen = input.int(14, "ADX Length")
+
+atrMinPct = input.float(0.14, "Min ATR %", step=0.01)
+atrMaxPct = input.float(4.20, "Max ATR %", step=0.01)
+adxMin = input.float(10.0, "Min ADX", step=0.5)
+
+cooldownBars = input.int(3, "Cooldown 15M bars", minval=0)
+maxTradeBars = input.int(96, "Max trade age 15M bars", minval=1)
+
+swingLookback = input.int(10, "Swing lookback", minval=3)
+breakLookback = input.int(8, "Breakout/breakdown lookback", minval=3)
+
+atrSlMult = input.float(0.90, "ATR SL multiplier", step=0.05)
+atrTpMultA = input.float(1.85, "ATR TP multiplier A", step=0.05)
+atrTpMultAP = input.float(2.25, "ATR TP multiplier A+", step=0.05)
+minRR = input.float(1.70, "Minimum RR", step=0.05)
+maxRR = input.float(3.20, "Maximum RR cap", step=0.05)
+
+minSetupScore = input.int(8, "Minimum Pine setup score", minval=1)
+eliteScore = input.int(13, "A+ Pine setup score", minval=1)
+
+showMarkers = input.bool(true, "Show markers")
+showEMAs = input.bool(true, "Show EMAs")
+showDebugLbl = input.bool(false, "Show debug labels")
+
+// ==========================
+// HELPERS
+// ==========================
+engineId = "ALRT_NEXT_V30_4_LIVE_DEFENSIVE_CORE_15M_1H"
+secret = "alrt_secret_01061970"
+
+fmt(_x) =&gt;
+    str.tostring(_x, format.mintick)
+
+nowMs() =&gt;
+    na(timenow) ? time : timenow
+
+f_adx(_len) =&gt;
+    upMove = high - high[1]
+    downMove = low[1] - low
+    plusDM = upMove &gt; downMove and upMove &gt; 0 ? upMove : 0.0
+    minusDM = downMove &gt; upMove and downMove &gt; 0 ? downMove : 0.0
+    trur = ta.rma(ta.tr(true), _len)
+    plusDI = 100 * ta.rma(plusDM, _len) / trur
+    minusDI = 100 * ta.rma(minusDM, _len) / trur
+    dx = 100 * math.abs(plusDI - minusDI) / math.max(plusDI + minusDI, 1)
+    ta.rma(dx, _len)
+
+calcRR(_side, _entry, _tp, _sl) =&gt;
+    reward = _side == 1 ? _tp - _entry : _entry - _tp
+    risk = _side == 1 ? _entry - _sl : _sl - _entry
+    risk &gt; 0 and reward &gt; 0 ? reward / risk : 0.0
+
+jsonBase(_event, _side, _alertId) =&gt;
+    '{"secret":"' + secret + '","event":"' + _event + '","system":"ALRT-NEXT","version":"v30.4","engine_id":"' + engineId + '","side":"' + _side + '","symbol":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","alert_id":"' + _alertId + '","signal_alert_id":"' + _alertId + '","parent_alert_id":"' + _alertId + '","time_close":"' + str.tostring(nowMs()) + '","timestamp":"' + str.tostring(nowMs()) + '"'
+
+// ==========================
+// SYMBOLS
+// ==========================
+is15M = timeframe.period == "15"
+
+isCore =
+     syminfo.ticker == "BTCUSDT" or
+     syminfo.ticker == "ETHUSDT" or
+     syminfo.ticker == "SOLUSDT" or
+     syminfo.ticker == "BNBUSDT" or
+     syminfo.ticker == "XRPUSDT" or
+     syminfo.ticker == "LINKUSDT"
+
+isSatellite =
+     syminfo.ticker == "AVAXUSDT" or
+     syminfo.ticker == "ADAUSDT" or
+     syminfo.ticker == "DOGEUSDT" or
+     syminfo.ticker == "LTCUSDT" or
+     syminfo.ticker == "OPUSDT" or
+     syminfo.ticker == "ARBUSDT" or
+     syminfo.ticker == "ATOMUSDT"
+
+allowed = isCore or (useSatelliteCoins and isSatellite)
+isMajor = syminfo.ticker == "BTCUSDT" or syminfo.ticker == "ETHUSDT" or syminfo.ticker == "BNBUSDT" or syminfo.ticker == "XRPUSDT"
+lev = isMajor ? 4 : isCore ? 3 : 2
+
+maxTpPct = isMajor ? 3.8 : isCore ? 4.5 : 5.2
+maxSlPct = isMajor ? 1.6 : isCore ? 2.0 : 2.4
+minTpPct = isMajor ? 0.35 : isCore ? 0.45 : 0.55
+minSlPct = isMajor ? 0.20 : isCore ? 0.25 : 0.30
+
+pctDistance(_a, _b) =&gt;
+    _a &gt; 0 ? math.abs(_a - _b) / _a * 100.0 : 999.0
+
+// ==========================
+// 15M DATA
+// ==========================
+emaFast = ta.ema(close, fastLen)
+emaSlow = ta.ema(close, slowLen)
+emaTrend = ta.ema(close, trendLen)
+
+rsiVal = ta.rsi(close, rsiLen)
+atrVal = ta.atr(atrLen)
+atrPct = close &gt; 0 ? atrVal / close * 100.0 : 0.0
+adxVal = f_adx(adxLen)
+
+barRange = high - low
+bodySize = math.abs(close - open)
+bodyAtr = atrVal &gt; 0 ? bodySize / atrVal : 99.0
+closePos = barRange &gt; 0 ? (close - low) / barRange : 0.5
+
+bullBody = close &gt; open
+bearBody = close &lt; open
+
+emaFastSlope = emaFast - emaFast[3]
+emaSlowSlope = emaSlow - emaSlow[3]
+emaTrendSlope = emaTrend - emaTrend[3]
+
+localBull = close &gt; emaFast and emaFast &gt; emaSlow and emaSlow &gt; emaTrend
+localBear = close &lt; emaFast and emaFast &lt; emaSlow and emaSlow &lt; emaTrend
+localBullFlow = emaFastSlope &gt; 0 and emaSlowSlope &gt; 0
+localBearFlow = emaFastSlope &lt; 0 and emaSlowSlope &lt; 0
+
+// ==========================
+// 1H BIAS
+// ==========================
+htfClose = request.security(syminfo.tickerid, htfTf, close, barmerge.gaps_off, barmerge.lookahead_off)
+htfEmaFast = request.security(syminfo.tickerid, htfTf, ta.ema(close, fastLen), barmerge.gaps_off, barmerge.lookahead_off)
+htfEmaSlow = request.security(syminfo.tickerid, htfTf, ta.ema(close, slowLen), barmerge.gaps_off, barmerge.lookahead_off)
+htfEmaTrend = request.security(syminfo.tickerid, htfTf, ta.ema(close, trendLen), barmerge.gaps_off, barmerge.lookahead_off)
+htfRsi = request.security(syminfo.tickerid, htfTf, ta.rsi(close, rsiLen), barmerge.gaps_off, barmerge.lookahead_off)
+htfAdx = request.security(syminfo.tickerid, htfTf, f_adx(adxLen), barmerge.gaps_off, barmerge.lookahead_off)
+htfAtrPct = request.security(syminfo.tickerid, htfTf, ta.atr(atrLen) / close * 100.0, barmerge.gaps_off, barmerge.lookahead_off)
+
+htfBull = htfClose &gt; htfEmaSlow and htfEmaFast &gt;= htfEmaSlow and htfRsi &gt;= 42
+htfBear = htfClose &lt; htfEmaSlow and htfEmaFast &lt;= htfEmaSlow and htfRsi &lt;= 58
+htfTrendOk = htfAdx &gt;= adxMin
+htfVolOk = htfAtrPct &gt;= atrMinPct and htfAtrPct &lt;= atrMaxPct
+
+// ==========================
+// SESSION
+// ==========================
+h = hour(time, "Etc/UTC")
+london = h &gt;= 7 and h &lt; 12
+ny = h &gt;= 13 and h &lt; 20
+overlap = h &gt;= 13 and h &lt; 16
+deadZone = h &gt;= 22 or h &lt; 6
+sessionName = overlap ? "LONDON_NY_OVERLAP" : london ? "LONDON" : ny ? "NEW_YORK" : deadZone ? "DEAD_ZONE" : "NEUTRAL"
+sessionScore = overlap ? 3 : london ? 2 : ny ? 2 : deadZone ? -2 : 0
+sessionAllowed = not deadZone
+
+// ==========================
+// MARKET STATE
+// ==========================
+atrAvg = ta.sma(atrPct, 30)
+expansion = atrPct &gt; atrAvg * 1.03
+compression = atrPct &lt; atrAvg * 0.84
+rangeHigh = ta.highest(high, 20)
+rangeLow = ta.lowest(low, 20)
+rangePct = close &gt; 0 ? (rangeHigh - rangeLow) / close * 100.0 : 0.0
+chop = adxVal &lt; 10 and rangePct &lt; atrPct * 2.2 and not expansion
+volOk = atrPct &gt;= atrMinPct and atrPct &lt;= atrMaxPct
+
+extensionAtr = atrVal &gt; 0 ? math.abs(close - emaFast) / atrVal : 99.0
+threeUp = close &gt; close[1] and close[1] &gt; close[2] and close[2] &gt; close[3]
+threeDown = close &lt; close[1] and close[1] &lt; close[2] and close[2] &lt; close[3]
+longChaseRisk = extensionAtr &gt; maxExtensionAtr or threeUp or rsiVal &gt; 72
+shortChaseRisk = extensionAtr &gt; maxExtensionAtr or threeDown or rsiVal &lt; 30
+
+// ==========================
+// SETUPS
+// ==========================
+trendPullbackLong =
+     htfBull and localBullFlow and low &lt;= emaFast and close &gt; emaFast and bullBody and
+     closePos &gt;= 0.50 and rsiVal &gt;= 42 and rsiVal &lt;= 68 and volOk and not longChaseRisk
+
+trendPullbackShort =
+     htfBear and localBearFlow and high &gt;= emaFast and close &lt; emaFast and bearBody and
+     closePos &lt;= 0.50 and rsiVal &lt;= 58 and rsiVal &gt;= 34 and volOk and not shortChaseRisk
+
+breakoutLong =
+     (htfBull or localBull) and close &gt; ta.highest(high[1], breakLookback) and close &gt; emaFast and
+     closePos &gt;= 0.55 and rsiVal &gt;= 48 and rsiVal &lt;= 70 and adxVal &gt;= adxMin and volOk and not longChaseRisk
+
+breakdownShort =
+     (htfBear or localBear) and close &lt; ta.lowest(low[1], breakLookback) and close &lt; emaFast and
+     closePos &lt;= 0.45 and rsiVal &lt;= 52 and rsiVal &gt;= 32 and adxVal &gt;= adxMin and volOk and not shortChaseRisk
+
+continuationLong =
+     localBull and (htfBull or htfClose &gt; htfEmaSlow) and close &gt; high[1] and close &gt; emaFast and
+     closePos &gt;= 0.52 and rsiVal &gt;= 46 and rsiVal &lt;= 68 and volOk and htfTrendOk and not chop and not compression and not longChaseRisk
+
+continuationShort =
+     localBear and (htfBear or htfClose &lt; htfEmaSlow) and close &lt; low[1] and close &lt; emaFast and
+     closePos &lt;= 0.48 and rsiVal &lt;= 54 and rsiVal &gt;= 34 and volOk and htfTrendOk and not chop and not compression and not shortChaseRisk
+
+reclaimLong =
+     htfBull and low &lt; ta.lowest(low[1], swingLookback) and close &gt; low[1] and close &gt; emaFast and
+     bullBody and closePos &gt;= 0.55 and rsiVal &gt;= 38 and rsiVal &lt;= 64 and volOk and not longChaseRisk
+
+reclaimShort =
+     htfBear and high &gt; ta.highest(high[1], swingLookback) and close &lt; high[1] and close &lt; emaFast and
+     bearBody and closePos &lt;= 0.45 and rsiVal &lt;= 62 and rsiVal &gt;= 36 and volOk and not shortChaseRisk
+
+longSetupType =
+     reclaimLong ? "LIQUIDITY_RECLAIM" :
+     breakoutLong ? "MOMENTUM_BREAKOUT" :
+     trendPullbackLong ? "TREND_PULLBACK" :
+     continuationLong ? "HTF_CONTINUATION" :
+     "NONE"
+
+shortSetupType =
+     reclaimShort ? "LIQUIDITY_RECLAIM" :
+     breakdownShort ? "MOMENTUM_BREAKDOWN" :
+     trendPullbackShort ? "TREND_PULLBACK" :
+     continuationShort ? "HTF_CONTINUATION" :
+     "NONE"
+
+// ==========================
+// SCORE
+// ==========================
+longScore = 0
+longScore += htfBull ? 3 : 0
+longScore += htfTrendOk ? 1 : 0
+longScore += htfVolOk ? 1 : 0
+longScore += localBullFlow ? 2 : 0
+longScore += trendPullbackLong ? 3 : 0
+longScore += breakoutLong ? 4 : 0
+longScore += continuationLong ? 3 : 0
+longScore += reclaimLong ? 4 : 0
+longScore += rsiVal &gt;= 46 and rsiVal &lt;= 64 ? 1 : 0
+longScore += sessionScore
+longScore -= chop ? 3 : 0
+longScore -= longChaseRisk ? 5 : 0
+longScore -= isCore ? 0 : 2
+
+shortScore = 0
+shortScore += htfBear ? 3 : 0
+shortScore += htfTrendOk ? 1 : 0
+shortScore += htfVolOk ? 1 : 0
+shortScore += localBearFlow ? 2 : 0
+shortScore += trendPullbackShort ? 3 : 0
+shortScore += breakdownShort ? 4 : 0
+shortScore += continuationShort ? 3 : 0
+shortScore += reclaimShort ? 4 : 0
+shortScore += rsiVal &lt;= 54 and rsiVal &gt;= 28 ? 1 : 0
+shortScore += sessionScore
+shortScore -= chop ? 3 : 0
+shortScore -= shortChaseRisk ? 5 : 0
+shortScore -= isCore ? 0 : 2
+
+longStrength = longScore &gt;= eliteScore ? "A+" : "A"
+shortStrength = shortScore &gt;= eliteScore ? "A+" : "A"
+longConfidence = longScore &gt;= eliteScore ? "HIGH" : "GOOD"
+shortConfidence = shortScore &gt;= eliteScore ? "HIGH" : "GOOD"
+
+marketRegime =
+     longChaseRisk or shortChaseRisk ? "EXTENDED" :
+     chop ? "CHOP" :
+     expansion ? "EXPANSION" :
+     compression ? "COMPRESSION" :
+     htfTrendOk ? "TREND" :
+     "NEUTRAL"
+
+// ==========================
+// LEVELS
+// ==========================
+calcLongLevels(_entry, _strength) =&gt;
+    swingLow = ta.lowest(low, swingLookback)
+    slRaw = swingLow - atrVal * 0.12
+    slAtr = _entry - atrVal * atrSlMult
+    sl = math.max(slRaw, slAtr)
+    risk = _entry - sl
+    rawTp = _entry + atrVal * (_strength == "A+" ? atrTpMultAP : atrTpMultA)
+    minTp = _entry + risk * minRR
+    maxTp = _entry + risk * maxRR
+    tp = math.min(math.max(rawTp, minTp), maxTp)
+    [tp, sl, calcRR(1, _entry, tp, sl)]
+
+calcShortLevels(_entry, _strength) =&gt;
+    swingHigh = ta.highest(high, swingLookback)
+    slRaw = swingHigh + atrVal * 0.12
+    slAtr = _entry + atrVal * atrSlMult
+    sl = math.min(slRaw, slAtr)
+    risk = sl - _entry
+    rawTp = _entry - atrVal * (_strength == "A+" ? atrTpMultAP : atrTpMultA)
+    minTp = _entry - risk * minRR
+    maxTp = _entry - risk * maxRR
+    tp = math.max(math.min(rawTp, minTp), maxTp)
+    [tp, sl, calcRR(-1, _entry, tp, sl)]
+
+// ==========================
+// STATE
+// ==========================
+varip int seq = 0
+varip int lastLongBar = na
+varip int lastShortBar = na
+varip int activeSide = 0
+varip string activeAlertId = ""
+varip float activeEntry = na
+varip float activeTp1 = na
+varip float activeSl = na
+varip int activeOpenedBar = na
+varip bool eventSentThisBar = false
+
+if barstate.isnew
+    eventSentThisBar := false
+
+confirmed = barstate.isconfirmed
+barAgeMs = na(timenow) ? 999999999 : timenow - time
+liveSignalReady = realtimeAlerts ? (barstate.isconfirmed or (barstate.isrealtime and barAgeMs &gt;= minLiveBarAgeMinutes * 60000)) : barstate.isconfirmed
+liveHitReady = realtimeAlerts ? (barstate.isrealtime or barstate.isconfirmed) : barstate.isconfirmed
+hadActiveAtBarStart = activeSide != 0
+canCheck = activeSide != 0 and (bar_index &gt; activeOpenedBar or barstate.isrealtime)
+
+longTpHit = canCheck and activeSide == 1 and high &gt;= activeTp1
+longSlHit = canCheck and activeSide == 1 and not longTpHit and low &lt;= activeSl
+shortTpHit = canCheck and activeSide == -1 and low &lt;= activeTp1
+shortSlHit = canCheck and activeSide == -1 and not shortTpHit and high &gt;= activeSl
+
+tpHitNow = liveHitReady and not eventSentThisBar and (longTpHit or shortTpHit)
+slHitNow = liveHitReady and not eventSentThisBar and (longSlHit or shortSlHit)
+hitSideStr = activeSide == 1 ? "LONG" : "SHORT"
+
+if tpHitNow
+    alert(jsonBase("tp_hit", hitSideStr, activeAlertId) + ',"price":"' + fmt(activeTp1) + '","hit_price":"' + fmt(activeTp1) + '","hit_type":"tp"}', alert.freq_once_per_bar)
+    eventSentThisBar := true
+    activeSide := 0
+    activeAlertId := ""
+    activeEntry := na
+    activeTp1 := na
+    activeSl := na
+    activeOpenedBar := na
+
+if slHitNow
+    alert(jsonBase("sl_hit", hitSideStr, activeAlertId) + ',"price":"' + fmt(activeSl) + '","hit_price":"' + fmt(activeSl) + '","hit_type":"sl"}', alert.freq_once_per_bar)
+    eventSentThisBar := true
+    activeSide := 0
+    activeAlertId := ""
+    activeEntry := na
+    activeTp1 := na
+    activeSl := na
+    activeOpenedBar := na
+
+tradeTooOld = confirmed and activeSide != 0 and not na(activeOpenedBar) and bar_index - activeOpenedBar &gt;= maxTradeBars and not eventSentThisBar
+
+if tradeTooOld
+    movePct = activeSide == 1 ? ((close - activeEntry) / activeEntry) * 100.0 : ((activeEntry - close) / activeEntry) * 100.0
+    exitType = movePct &gt; 0.05 ? "time_exit_profit" : movePct &lt; -0.05 ? "time_exit_loss" : "expired"
+    sideStr = activeSide == 1 ? "LONG" : "SHORT"
+    alert(jsonBase(exitType, sideStr, activeAlertId) + ',"entry":"' + fmt(activeEntry) + '","tp1":"' + fmt(activeTp1) + '","sl":"' + fmt(activeSl) + '","price":"' + fmt(close) + '","hit_price":"' + fmt(close) + '","move_pct":"' + str.tostring(movePct, "#.##") + '","hit_type":"' + exitType + '"}', alert.freq_once_per_bar)
+    eventSentThisBar := true
+    activeSide := 0
+    activeAlertId := ""
+    activeEntry := na
+    activeTp1 := na
+    activeSl := na
+    activeOpenedBar := na
+
+// ==========================
+// NEW CANDIDATES
+// ==========================
+longCooldownOk = na(lastLongBar) or bar_index - lastLongBar &gt; cooldownBars
+shortCooldownOk = na(lastShortBar) or bar_index - lastShortBar &gt; cooldownBars
+
+[longTpPreview, longSlPreview, longRRPreview] = calcLongLevels(close, longStrength)
+[shortTpPreview, shortSlPreview, shortRRPreview] = calcShortLevels(close, shortStrength)
+
+longTpPctPreview = pctDistance(close, longTpPreview)
+longSlPctPreview = pctDistance(close, longSlPreview)
+shortTpPctPreview = pctDistance(close, shortTpPreview)
+shortSlPctPreview = pctDistance(close, shortSlPreview)
+
+longSetupRegimeOk = longSetupType != "HTF_CONTINUATION" or marketRegime != "COMPRESSION"
+shortSetupRegimeOk = shortSetupType != "HTF_CONTINUATION" or marketRegime != "COMPRESSION"
+
+longLevelsOk =
+     longRRPreview &gt;= minRR and longTpPreview &gt; close and longSlPreview &lt; close and
+     longTpPctPreview &gt;= minTpPct and longTpPctPreview &lt;= maxTpPct and
+     longSlPctPreview &gt;= minSlPct and longSlPctPreview &lt;= maxSlPct
+
+shortLevelsOk =
+     shortRRPreview &gt;= minRR and shortTpPreview &lt; close and shortSlPreview &gt; close and
+     shortTpPctPreview &gt;= minTpPct and shortTpPctPreview &lt;= maxTpPct and
+     shortSlPctPreview &gt;= minSlPct and shortSlPctPreview &lt;= maxSlPct
+
+canOpenNew = liveSignalReady and activeSide == 0 and not hadActiveAtBarStart and not eventSentThisBar
+
+longValid =
+     useLongs and is15M and allowed and canOpenNew and sessionAllowed and
+     longSetupType != "NONE" and longSetupRegimeOk and longScore &gt;= minSetupScore and longLevelsOk and longCooldownOk
+
+shortValid =
+     useShorts and is15M and allowed and canOpenNew and sessionAllowed and
+     shortSetupType != "NONE" and shortSetupRegimeOk and shortScore &gt;= minSetupScore and shortLevelsOk and shortCooldownOk
+
+if longValid
+    seq += 1
+    [tpNow, slNow, rrNow] = calcLongLevels(close, longStrength)
+    activeSide := 1
+    activeAlertId := engineId + "-" + syminfo.ticker + "-LONG-" + str.tostring(time) + "-" + str.tostring(seq)
+    activeEntry := close
+    activeTp1 := tpNow
+    activeSl := slNow
+    activeOpenedBar := bar_index
+    lastLongBar := bar_index
+    eventSentThisBar := true
+    alert(jsonBase("candidate", "LONG", activeAlertId) + ',"entry":"' + fmt(activeEntry) + '","tp1":"' + fmt(activeTp1) + '","tp2":"' + fmt(activeEntry + (activeTp1 - activeEntry) * 2.0) + '","sl":"' + fmt(activeSl) + '","rr":"' + str.tostring(rrNow, "#.##") + '","rsi":"' + str.tostring(rsiVal, "#.##") + '","atr_pct":"' + str.tostring(atrPct, "#.##") + '","adx":"' + str.tostring(htfAdx, "#.##") + '","risk":"5","leverage":"' + str.tostring(lev) + '","strength":"' + longStrength + '","setup_type":"' + longSetupType + '","setup_score":"' + str.tostring(longScore) + '","trend_strength":"' + str.tostring(htfAdx, "#.##") + '","volatility_state":"' + marketRegime + '","market_regime":"' + marketRegime + '","session":"' + sessionName + '","confidence_level":"' + longConfidence + '","expected_rr":"' + str.tostring(rrNow, "#.##") + '","estimated_hold_duration":"UNDER_24H","reason":"15M live event aligned with 1H context, volatility is tradable and RR remains honest.","nfa":"NFA"}', alert.freq_once_per_bar)
+
+if shortValid
+    seq += 1
+    [tpNow, slNow, rrNow] = calcShortLevels(close, shortStrength)
+    activeSide := -1
+    activeAlertId := engineId + "-" + syminfo.ticker + "-SHORT-" + str.tostring(time) + "-" + str.tostring(seq)
+    activeEntry := close
+    activeTp1 := tpNow
+    activeSl := slNow
+    activeOpenedBar := bar_index
+    lastShortBar := bar_index
+    eventSentThisBar := true
+    alert(jsonBase("candidate", "SHORT", activeAlertId) + ',"entry":"' + fmt(activeEntry) + '","tp1":"' + fmt(activeTp1) + '","tp2":"' + fmt(activeEntry - (activeEntry - activeTp1) * 2.0) + '","sl":"' + fmt(activeSl) + '","rr":"' + str.tostring(rrNow, "#.##") + '","rsi":"' + str.tostring(rsiVal, "#.##") + '","atr_pct":"' + str.tostring(atrPct, "#.##") + '","adx":"' + str.tostring(htfAdx, "#.##") + '","risk":"5","leverage":"' + str.tostring(lev) + '","strength":"' + shortStrength + '","setup_type":"' + shortSetupType + '","setup_score":"' + str.tostring(shortScore) + '","trend_strength":"' + str.tostring(htfAdx, "#.##") + '","volatility_state":"' + marketRegime + '","market_regime":"' + marketRegime + '","session":"' + sessionName + '","confidence_level":"' + shortConfidence + '","expected_rr":"' + str.tostring(rrNow, "#.##") + '","estimated_hold_duration":"UNDER_24H","reason":"15M live event aligned with 1H context, volatility is tradable and RR remains honest.","nfa":"NFA"}', alert.freq_once_per_bar)
+
+// ==========================
+// ALERTCONDITIONS
+// ==========================
+alertcondition(longValid, title="ALRT LONG CANDIDATE", message="ALRT LONG CANDIDATE")
+alertcondition(shortValid, title="ALRT SHORT CANDIDATE", message="ALRT SHORT CANDIDATE")
+alertcondition(tpHitNow, title="ALRT TP HIT", message="ALRT TP HIT")
+alertcondition(slHitNow, title="ALRT SL HIT", message="ALRT SL HIT")
+alertcondition(tradeTooOld, title="ALRT TIME EXIT", message="ALRT TIME EXIT")
+
+// ==========================
+// VISUALS
+// ==========================
+plot(showEMAs ? emaFast : na, "EMA Fast", color=color.blue)
+plot(showEMAs ? emaSlow : na, "EMA Slow", color=color.orange)
+plot(showEMAs ? emaTrend : na, "EMA Trend", color=color.gray)
+
+plotshape(showMarkers and longValid, title="LONG", style=shape.labelup, location=location.belowbar, color=color.green, text="LONG", size=size.tiny)
+plotshape(showMarkers and shortValid, title="SHORT", style=shape.labeldown, location=location.abovebar, color=color.red, text="SHORT", size=size.tiny)
+plotshape(showMarkers and tpHitNow, title="TP", style=shape.circle, location=location.abovebar, color=color.aqua, text="TP", size=size.tiny)
+plotshape(showMarkers and slHitNow, title="SL", style=shape.circle, location=location.belowbar, color=color.yellow, text="SL", size=size.tiny)
+plotshape(showMarkers and tradeTooOld, title="TIME", style=shape.circle, location=location.abovebar, color=color.gray, text="TIME", size=size.tiny)
+
+if showDebugLbl and longValid
+    label.new(bar_index, low, "LONG v30.4 LIVE\n" + longSetupType + "\nScore " + str.tostring(longScore) + "\nRR " + str.tostring(longRRPreview, "#.##") + "\n" + sessionName, style=label.style_label_up, textcolor=color.white, color=color.green)
+
+if showDebugLbl and shortValid
+    label.new(bar_index, high, "SHORT v30.4 LIVE\n" + shortSetupType + "\nScore " + str.tostring(shortScore) + "\nRR " + str.tostring(shortRRPreview, "#.##") + "\n" + sessionName, style=label.style_label_down, textcolor=color.white, color=color.red)
+</textarea></main><script>const b=document.getElementById('copy'),c=document.getElementById('code'),s=document.getElementById('status');b.onclick=async()=>{c.select();c.setSelectionRange(0,c.value.length);await navigator.clipboard.writeText(c.value);s.textContent='Copied';setTimeout(()=>s.textContent='',2000)};</script></body></html>
