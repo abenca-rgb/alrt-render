@@ -1,5 +1,5 @@
 //@version=6
-indicator("ALRT-Next v30.2 LIVE STABLE CORE EVENT ENGINE", overlay=true, max_labels_count=500)
+indicator("ALRT-Next v30.3 LIVE RESET STABLE CORE EVENT ENGINE", overlay=true, max_labels_count=500)
 
 // ==========================
 // PURPOSE
@@ -52,7 +52,7 @@ showDebugLbl = input.bool(false, "Show debug labels")
 // ==========================
 // HELPERS
 // ==========================
-engineId = "ALRT_NEXT_V30_2_LIVE_CORE_15M_1H"
+engineId = "ALRT_NEXT_V30_3_LIVE_RESET_CORE_15M_1H"
 secret = "alrt_secret_01061970"
 
 fmt(_x) =>
@@ -78,7 +78,7 @@ calcRR(_side, _entry, _tp, _sl) =>
     risk > 0 and reward > 0 ? reward / risk : 0.0
 
 jsonBase(_event, _side, _alertId) =>
-    '{"secret":"' + secret + '","event":"' + _event + '","system":"ALRT-NEXT","version":"v30.2","engine_id":"' + engineId + '","side":"' + _side + '","symbol":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","alert_id":"' + _alertId + '","signal_alert_id":"' + _alertId + '","parent_alert_id":"' + _alertId + '","time_close":"' + str.tostring(nowMs()) + '","timestamp":"' + str.tostring(nowMs()) + '"'
+    '{"secret":"' + secret + '","event":"' + _event + '","system":"ALRT-NEXT","version":"v30.3","engine_id":"' + engineId + '","side":"' + _side + '","symbol":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","alert_id":"' + _alertId + '","signal_alert_id":"' + _alertId + '","parent_alert_id":"' + _alertId + '","time_close":"' + str.tostring(nowMs()) + '","timestamp":"' + str.tostring(nowMs()) + '"'
 
 // ==========================
 // SYMBOLS
@@ -454,7 +454,7 @@ plotshape(showMarkers and slHitNow, title="SL", style=shape.circle, location=loc
 plotshape(showMarkers and tradeTooOld, title="TIME", style=shape.circle, location=location.abovebar, color=color.gray, text="TIME", size=size.tiny)
 
 if showDebugLbl and longValid
-    label.new(bar_index, low, "LONG v30.2 LIVE\n" + longSetupType + "\nScore " + str.tostring(longScore) + "\nRR " + str.tostring(longRRPreview, "#.##") + "\n" + sessionName, style=label.style_label_up, textcolor=color.white, color=color.green)
+    label.new(bar_index, low, "LONG v30.3 LIVE\n" + longSetupType + "\nScore " + str.tostring(longScore) + "\nRR " + str.tostring(longRRPreview, "#.##") + "\n" + sessionName, style=label.style_label_up, textcolor=color.white, color=color.green)
 
 if showDebugLbl and shortValid
-    label.new(bar_index, high, "SHORT v30.2 LIVE\n" + shortSetupType + "\nScore " + str.tostring(shortScore) + "\nRR " + str.tostring(shortRRPreview, "#.##") + "\n" + sessionName, style=label.style_label_down, textcolor=color.white, color=color.red)
+    label.new(bar_index, high, "SHORT v30.3 LIVE\n" + shortSetupType + "\nScore " + str.tostring(shortScore) + "\nRR " + str.tostring(shortRRPreview, "#.##") + "\n" + sessionName, style=label.style_label_down, textcolor=color.white, color=color.red)

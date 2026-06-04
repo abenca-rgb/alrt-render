@@ -14,7 +14,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ===== VERSION =====
-const APP_VERSION = "v25.5.0-candidate-diagnostics";
+const APP_VERSION = "v25.5.1-ignore-unmatched-live-closes";
 
 // ===== CONFIG =====
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -2797,7 +2797,7 @@ async function handleTradingViewWebhook(req, res) {
         return;
       }
 
-      console.log("EXPLICIT CLOSE RECEIVED BUT NO MATCHED TRADE FOUND - COUNTING ORPHAN CLOSE:", {
+      console.log("EXPLICIT CLOSE RECEIVED BUT NO MATCHED TRADE FOUND - IGNORING OLD/UNMATCHED CLOSE:", {
         symbol,
         explicitCloseType,
         incomingRef,
@@ -2805,20 +2805,11 @@ async function handleTradingViewWebhook(req, res) {
         openTradesForSymbol: getOpenTradesForSymbol(symbol),
       });
 
-      const orphanRef =
-        incomingRef ||
-        pick(body.alert_id, body.signal_alert_id, body.parent_alert_id) ||
-        `ORPHAN-${symbol}-${Date.now()}`;
-
-      const orphanMovePct = null;
-
-      await recordCloseStat({
-        refId: orphanRef,
+      await recordRejectStat({
         symbol,
+        side,
         setupType,
-        result: explicitCloseType,
-        exitPrice: Number.isFinite(currentPrice) ? currentPrice : null,
-        movePct: orphanMovePct,
+        reason: `unmatched_${String(explicitCloseType).toLowerCase()}`,
         ts: receivedAtMs,
       });
 

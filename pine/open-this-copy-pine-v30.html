@@ -1,5 +1,5 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Copy ALRT Pine v30.2 LIVE</title><style>body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;background:#101318;color:#f4f7fb}header{padding:18px 22px;background:#161b22;border-bottom:1px solid #30363d;position:sticky;top:0}h1{font-size:20px;margin:0 0 8px}p{margin:0;color:#b7c0cc}main{padding:18px 22px}button{background:#2f81f7;color:white;border:0;border-radius:6px;padding:10px 14px;font-size:15px;cursor:pointer;margin-bottom:12px}textarea{width:100%;height:75vh;box-sizing:border-box;background:#0b0f14;color:#e6edf3;border:1px solid #30363d;border-radius:8px;padding:14px;font-family:Menlo,Consolas,monospace;font-size:12px;line-height:1.45;white-space:pre}.status{display:inline-block;margin-left:10px;color:#8ee68e}</style></head><body><header><h1>ALRT-Next v30.2 LIVE Stable Core Pine Script</h1><p>Click Copy, then paste into TradingView Pine Editor. Create alerts with Once per bar, not Once per bar close.</p></header><main><button id="copy">Copy Pine Code</button><span id="status" class="status"></span><textarea id="code" spellcheck="false">//@version=6
-indicator("ALRT-Next v30.2 LIVE STABLE CORE EVENT ENGINE", overlay=true, max_labels_count=500)
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Copy ALRT Pine v30.3 LIVE RESET</title><style>body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;background:#101318;color:#f4f7fb}header{padding:18px 22px;background:#161b22;border-bottom:1px solid #30363d;position:sticky;top:0}h1{font-size:20px;margin:0 0 8px}p{margin:0;color:#b7c0cc}main{padding:18px 22px}button{background:#2f81f7;color:white;border:0;border-radius:6px;padding:10px 14px;font-size:15px;cursor:pointer;margin-bottom:12px}textarea{width:100%;height:75vh;box-sizing:border-box;background:#0b0f14;color:#e6edf3;border:1px solid #30363d;border-radius:8px;padding:14px;font-family:Menlo,Consolas,monospace;font-size:12px;line-height:1.45;white-space:pre}.status{display:inline-block;margin-left:10px;color:#8ee68e}</style></head><body><header><h1>ALRT-Next v30.3 LIVE RESET Pine Script</h1><p>Click Copy, then paste into TradingView Pine Editor. Delete and recreate alerts with Once per bar.</p></header><main><button id="copy">Copy Pine Code</button><span id="status" class="status"></span><textarea id="code" spellcheck="false">//@version=6
+indicator("ALRT-Next v30.3 LIVE RESET STABLE CORE EVENT ENGINE", overlay=true, max_labels_count=500)
 
 // ==========================
 // PURPOSE
@@ -52,7 +52,7 @@ showDebugLbl = input.bool(false, "Show debug labels")
 // ==========================
 // HELPERS
 // ==========================
-engineId = "ALRT_NEXT_V30_2_LIVE_CORE_15M_1H"
+engineId = "ALRT_NEXT_V30_3_LIVE_RESET_CORE_15M_1H"
 secret = "alrt_secret_01061970"
 
 fmt(_x) =&gt;
@@ -78,7 +78,7 @@ calcRR(_side, _entry, _tp, _sl) =&gt;
     risk &gt; 0 and reward &gt; 0 ? reward / risk : 0.0
 
 jsonBase(_event, _side, _alertId) =&gt;
-    '{"secret":"' + secret + '","event":"' + _event + '","system":"ALRT-NEXT","version":"v30.2","engine_id":"' + engineId + '","side":"' + _side + '","symbol":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","alert_id":"' + _alertId + '","signal_alert_id":"' + _alertId + '","parent_alert_id":"' + _alertId + '","time_close":"' + str.tostring(nowMs()) + '","timestamp":"' + str.tostring(nowMs()) + '"'
+    '{"secret":"' + secret + '","event":"' + _event + '","system":"ALRT-NEXT","version":"v30.3","engine_id":"' + engineId + '","side":"' + _side + '","symbol":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","alert_id":"' + _alertId + '","signal_alert_id":"' + _alertId + '","parent_alert_id":"' + _alertId + '","time_close":"' + str.tostring(nowMs()) + '","timestamp":"' + str.tostring(nowMs()) + '"'
 
 // ==========================
 // SYMBOLS
@@ -454,8 +454,8 @@ plotshape(showMarkers and slHitNow, title="SL", style=shape.circle, location=loc
 plotshape(showMarkers and tradeTooOld, title="TIME", style=shape.circle, location=location.abovebar, color=color.gray, text="TIME", size=size.tiny)
 
 if showDebugLbl and longValid
-    label.new(bar_index, low, "LONG v30.2 LIVE\n" + longSetupType + "\nScore " + str.tostring(longScore) + "\nRR " + str.tostring(longRRPreview, "#.##") + "\n" + sessionName, style=label.style_label_up, textcolor=color.white, color=color.green)
+    label.new(bar_index, low, "LONG v30.3 LIVE\n" + longSetupType + "\nScore " + str.tostring(longScore) + "\nRR " + str.tostring(longRRPreview, "#.##") + "\n" + sessionName, style=label.style_label_up, textcolor=color.white, color=color.green)
 
 if showDebugLbl and shortValid
-    label.new(bar_index, high, "SHORT v30.2 LIVE\n" + shortSetupType + "\nScore " + str.tostring(shortScore) + "\nRR " + str.tostring(shortRRPreview, "#.##") + "\n" + sessionName, style=label.style_label_down, textcolor=color.white, color=color.red)
+    label.new(bar_index, high, "SHORT v30.3 LIVE\n" + shortSetupType + "\nScore " + str.tostring(shortScore) + "\nRR " + str.tostring(shortRRPreview, "#.##") + "\n" + sessionName, style=label.style_label_down, textcolor=color.white, color=color.red)
 </textarea></main><script>const code=document.getElementById('code');const status=document.getElementById('status');document.getElementById('copy').addEventListener('click',async()=>{code.focus();code.select();try{await navigator.clipboard.writeText(code.value);status.textContent='Copied.';}catch(e){document.execCommand('copy');status.textContent='Selected. Press Cmd+C if needed.';}});</script></body></html>
