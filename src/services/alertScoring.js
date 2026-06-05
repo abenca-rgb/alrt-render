@@ -18,9 +18,9 @@ function normalizeGrade(value) {
 }
 
 function gradeFromScore(score) {
-  if (score >= 85) return "A+";
-  if (score >= 75) return "A";
-  if (score >= 65) return "B";
+  if (score >= 92) return "A+";
+  if (score >= 84) return "A";
+  if (score >= 72) return "B";
   return "C";
 }
 
@@ -34,6 +34,7 @@ function meetsMinGrade(grade, minGrade) {
 export function scoreAlertQuality({
   symbolConfig,
   side,
+  setupType,
   rr,
   tpPct,
   slPct,
@@ -59,19 +60,19 @@ export function scoreAlertQuality({
   const numericTpPct = parseNum(tpPct);
   const numericSlPct = parseNum(slPct);
 
-  if (incomingGrade === "A+") score += 20;
-  else if (incomingGrade === "A") score += 14;
-  else if (incomingGrade === "B") score += 5;
+  if (incomingGrade === "A+") score += 4;
+  else if (incomingGrade === "A") score += 2;
+  else if (incomingGrade === "B") score -= 4;
   else if (incomingGrade === "C") score -= 10;
 
   if (Number.isFinite(numericSetupScore)) {
-    if (numericSetupScore >= 8) {
-      score += 10;
+    if (numericSetupScore >= 13) {
+      score += 6;
       reasons.push("strong setup score");
-    } else if (numericSetupScore >= 6) {
-      score += 4;
+    } else if (numericSetupScore >= 10) {
+      score += 2;
     } else {
-      score -= 8;
+      score -= 10;
       penalties.push("weak setup score");
     }
   }
@@ -139,9 +140,17 @@ export function scoreAlertQuality({
   }
 
   const regimeText = String(marketRegime || volatilityState || "").toLowerCase();
-  if (/(trend|expansion|continuation|clean)/.test(regimeText)) {
+  if (/(trend|continuation|clean)/.test(regimeText)) {
     score += 8;
     reasons.push("market regime is supportive");
+  }
+  if (/expansion/.test(regimeText)) {
+    score -= 8;
+    penalties.push("expansion can be late after a fast move");
+  }
+  if (/extended/.test(regimeText)) {
+    score -= 30;
+    penalties.push("price is extended from value");
   }
   if (/(chop|range|sideways|noise|mean_reversion)/.test(regimeText)) {
     score -= 24;
@@ -149,10 +158,28 @@ export function scoreAlertQuality({
   }
 
   const sessionText = String(session || "").toLowerCase();
-  if (/(london|new_york|ny|us|eu|overlap)/.test(sessionText)) score += 5;
+  if (/(overlap)/.test(sessionText)) score += 4;
+  else if (/(london|new_york|ny|us|eu)/.test(sessionText)) score += 2;
+  else {
+    score -= 12;
+    penalties.push("session quality is neutral");
+  }
   if (symbolConfig.avoidSessions.some((bad) => sessionText.includes(bad))) {
     score -= 10;
     penalties.push("session quality is weak");
+  }
+
+  const setupText = String(setupType || "").toLowerCase();
+  if (/continuation/.test(setupText)) {
+    score -= 8;
+    penalties.push("continuation setup needs extra confirmation");
+  }
+  if (/break/.test(setupText) && /expansion/.test(regimeText)) {
+    score -= 10;
+    penalties.push("breakout during expansion is prone to chase entries");
+  }
+  if (/pullback|reclaim/.test(setupText)) {
+    score += 3;
   }
 
   if (symbolConfig.tier === "satellite") {

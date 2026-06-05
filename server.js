@@ -14,7 +14,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ===== VERSION =====
-const APP_VERSION = "v25.5.2-loss-guard";
+const APP_VERSION = "v25.5.3-product-guard";
 
 // ===== CONFIG =====
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -65,6 +65,8 @@ const FREE_DAILY_LIMIT = 2;
 
 const MIN_RR_TO_SEND = Number(process.env.MIN_RR_TO_SEND || 0);
 const MAX_OPEN_TRADES_PER_SYMBOL = Number(process.env.MAX_OPEN_TRADES_PER_SYMBOL || 1);
+const MAX_OPEN_TRADES_PER_SIDE = Number(process.env.MAX_OPEN_TRADES_PER_SIDE || 1);
+const DAILY_SL_CIRCUIT_BREAKER = Number(process.env.DAILY_SL_CIRCUIT_BREAKER || 2);
 const ALERT_QUALITY_FILTER_ENABLED =
   String(process.env.ALERT_QUALITY_FILTER_ENABLED || "false").toLowerCase() === "true";
 const CANDIDATE_QUALITY_FILTER_ENABLED =
@@ -557,16 +559,16 @@ function deriveSetupType({ body, side, rsi, atrPct }) {
 function buildWhyLine({ body, symbol, side, setupType, strength, rr, session, marketRegime }) {
   const incomingReason = pick(body.reason, body.why, body.comment, body.market_bias);
 
-  if (incomingReason) {
+  if (incomingReason && !/15m live event aligned/i.test(String(incomingReason))) {
     return String(incomingReason).trim();
   }
 
-  const directionText = side === "LONG" ? "upside continuation" : "downside continuation";
   const setupText = setupType || "structured setup";
-  const sessionText = session ? ` during ${session}` : "";
-  const regimeText = marketRegime ? ` in ${marketRegime} conditions` : "";
+  const sessionText = session ? `${session}` : "session OK";
+  const regimeText = marketRegime ? `${marketRegime}` : "market OK";
+  const directionText = side === "LONG" ? "upside follow-through" : "downside follow-through";
 
-  return `${setupText} ${side} setup${sessionText}${regimeText}. Cleaner structure with ${fmtRR(rr)} planned risk/reward; idea is ${directionText}, not a late chase.`;
+  return `${setupText} ${side}: ${regimeText} context, ${sessionText}, RR ${fmtRR(rr)}. Looking for ${directionText}; blocked if extended or after recent SL pressure.`;
 }
 
 // ===== REF HELPERS =====
@@ -1196,6 +1198,18 @@ function countOpenTradesForSymbol(symbol) {
   return count;
 }
 
+function countOpenTradesForSide(side) {
+  let count = 0;
+
+  for (const [, trade] of activeTrades.entries()) {
+    if (!trade) continue;
+    if (trade.hit) continue;
+    if (trade.side === side) count += 1;
+  }
+
+  return count;
+}
+
 function hasOpenTradeForSymbol(symbol) {
   return countOpenTradesForSymbol(symbol) >= MAX_OPEN_TRADES_PER_SYMBOL;
 }
@@ -1510,62 +1524,39 @@ function buildDailySummaryText(dateKey) {
 
   const rejectReasons = Object.entries(stat.rejectsByReason || {})
     .sort((a, b) => (b[1] || 0) - (a[1] || 0))
-    .slice(0, 8)
+    .slice(0, 3)
     .map(([reason, count]) => `${reason}: ${count}`);
 
-  const symbols = Object.entries(stat.bySymbol || {})
-    .sort((a, b) => (b[1].alerts || 0) - (a[1].alerts || 0))
-    .slice(0, 10)
+  const worstSymbols = Object.entries(stat.bySymbol || {})
+    .filter(([, s]) => (s.alerts || 0) > 0)
+    .sort((a, b) => (b[1].sl || 0) - (a[1].sl || 0))
+    .slice(0, 4)
     .map(([symbol, s]) => {
-      return `${symbol}: ${s.alerts || 0} alerts | TP ${s.tp || 0} | SL ${s.sl || 0} | T+ ${s.timeExitProfit || 0} | T- ${s.timeExitLoss || 0} | EXP ${s.expired || 0}`;
+      return `${symbol} ${s.tp || 0}TP/${s.sl || 0}SL`;
     });
 
-  const setups = Object.entries(stat.bySetup || {})
+  const setupSnapshot = Object.entries(stat.bySetup || {})
+    .filter(([, s]) => (s.alerts || 0) > 0)
     .sort((a, b) => (b[1].alerts || 0) - (a[1].alerts || 0))
-    .slice(0, 10)
+    .slice(0, 3)
     .map(([setup, s]) => {
-      return `${setup}: ${s.alerts || 0} alerts | TP ${s.tp || 0} | SL ${s.sl || 0} | T+ ${s.timeExitProfit || 0} | T- ${s.timeExitLoss || 0} | EXP ${s.expired || 0}`;
+      return `${setup} ${s.tp || 0}TP/${s.sl || 0}SL`;
     });
 
   return `📊 <b>D-ALRT DAILY OVERVIEW</b>
 <b>UTC DATE</b> ${escapeHtml(dateKey)}
 
-<b>TODAY'S TRADES</b>
-<b>ALERTS OPENED</b> ${stat.alerts}
-<b>TP HITS</b> ${stat.tp}
-<b>SL HITS</b> ${stat.sl}
-<b>TIME EXIT PROFIT</b> ${stat.timeExitProfit || 0}
-<b>TIME EXIT LOSS</b> ${stat.timeExitLoss || 0}
-<b>EXPIRED</b> ${stat.expired || 0}
-<b>CLOSED FROM TODAY</b> ${todayClosed}
-<b>WINRATE TODAY</b> ${todayClosed > 0 ? escapeHtml(fmtPct(todayWinrate)) : "N/A"}
-<b>STILL OPEN TODAY</b> ${openToday}
-<b>REJECTED / NOT POSTED</b> ${stat.rejectedSignals || 0}
+<b>POSTED</b> ${stat.alerts}
+<b>CLOSED</b> ${todayClosed} | TP ${stat.tp} | SL ${stat.sl} | TIME ${stat.timeExitProfit || 0}/${stat.timeExitLoss || 0}
+<b>WINRATE</b> ${todayClosed > 0 ? escapeHtml(fmtPct(todayWinrate)) : "N/A"}
+<b>OPEN</b> ${openTotal} total | ${openToday} from today
+<b>REJECTED</b> ${stat.rejectedSignals || 0}
 
-<b>OLD TRADES CLOSED TODAY</b>
-<b>OLD TP</b> ${old.tp || 0}
-<b>OLD SL</b> ${old.sl || 0}
-<b>OLD TIME EXIT PROFIT</b> ${old.timeExitProfit || 0}
-<b>OLD TIME EXIT LOSS</b> ${old.timeExitLoss || 0}
-<b>OLD EXPIRED</b> ${old.expired || 0}
-<b>OLD CLOSED TOTAL</b> ${oldClosed}
+<b>SYMBOLS</b> ${worstSymbols.length ? escapeHtml(worstSymbols.join(" • ")) : "N/A"}
+<b>SETUPS</b> ${setupSnapshot.length ? escapeHtml(setupSnapshot.join(" • ")) : "N/A"}
+<b>FILTERS</b> ${rejectReasons.length ? escapeHtml(rejectReasons.join(" • ")) : "N/A"}
 
-<b>ORPHAN / UNMATCHED CLOSES TODAY</b>
-<b>ORPHAN TP</b> ${orphan.tp || 0}
-<b>ORPHAN SL</b> ${orphan.sl || 0}
-<b>ORPHAN TIME EXIT PROFIT</b> ${orphan.timeExitProfit || 0}
-<b>ORPHAN TIME EXIT LOSS</b> ${orphan.timeExitLoss || 0}
-<b>ORPHAN EXPIRED</b> ${orphan.expired || 0}
-<b>ORPHAN CLOSED TOTAL</b> ${orphanClosed}
-
-<b>OPEN TRADES TOTAL</b> ${openTotal}
-<b>FREE POSTS</b> ${stat.freeAlerts}/${FREE_DAILY_LIMIT}
-
-${rejectReasons.length ? `<b>REJECT REASONS</b>\n${escapeHtml(rejectReasons.join("\n"))}` : "<b>REJECT REASONS</b>\nN/A"}
-
-${symbols.length ? `<b>BY SYMBOL - TODAY OPENED</b>\n${escapeHtml(symbols.join("\n"))}` : "<b>BY SYMBOL - TODAY OPENED</b>\nN/A"}
-
-${setups.length ? `<b>BY SETUP - TODAY OPENED</b>\n${escapeHtml(setups.join("\n"))}` : "<b>BY SETUP - TODAY OPENED</b>\nN/A"}
+<b>OLD / ORPHAN CLOSED</b> ${oldClosed} / ${orphanClosed}
 
 NFA`;
 }
@@ -2563,6 +2554,8 @@ app.get("/health", (req, res) => {
     lossGuardMarketLimit: LOSS_GUARD_MARKET_LIMIT,
     minRrToSend: MIN_RR_TO_SEND,
     maxOpenTradesPerSymbol: MAX_OPEN_TRADES_PER_SYMBOL,
+    maxOpenTradesPerSide: MAX_OPEN_TRADES_PER_SIDE,
+    dailySlCircuitBreaker: DAILY_SL_CIRCUIT_BREAKER,
     alertQualityFilterEnabled: ALERT_QUALITY_FILTER_ENABLED,
     candidateQualityFilterEnabled: CANDIDATE_QUALITY_FILTER_ENABLED,
     allowedSymbols: ALLOWED_SYMBOLS,
@@ -3030,6 +3023,45 @@ async function handleTradingViewWebhook(req, res) {
       return;
     }
 
+    const todayStat = getDailyStat(getUtcDateKey(receivedAtMs));
+
+    if (DAILY_SL_CIRCUIT_BREAKER > 0 && (todayStat.sl || 0) >= DAILY_SL_CIRCUIT_BREAKER) {
+      console.log("SIGNAL SKIPPED BY DAILY SL CIRCUIT BREAKER:", {
+        symbol,
+        side,
+        setupType,
+        slToday: todayStat.sl || 0,
+        dailySlCircuitBreaker: DAILY_SL_CIRCUIT_BREAKER,
+      });
+      await recordRejectStat({
+        symbol,
+        side,
+        setupType,
+        reason: "daily_sl_circuit_breaker",
+        ts: receivedAtMs,
+      });
+      return;
+    }
+
+    const openTradesForSide = countOpenTradesForSide(side);
+
+    if (openTradesForSide >= MAX_OPEN_TRADES_PER_SIDE) {
+      console.log("SIGNAL SKIPPED BY SIDE EXPOSURE FILTER:", {
+        symbol,
+        side,
+        openTradesForSide,
+        maxOpenTradesPerSide: MAX_OPEN_TRADES_PER_SIDE,
+      });
+      await recordRejectStat({
+        symbol,
+        side,
+        setupType,
+        reason: "side_exposure_filter",
+        ts: receivedAtMs,
+      });
+      return;
+    }
+
     const lossGuard = getLossGuardBlock({
       symbol,
       side,
@@ -3081,6 +3113,7 @@ async function handleTradingViewWebhook(req, res) {
     const quality = scoreAlertQuality({
       symbolConfig,
       side,
+      setupType,
       rr,
       tpPct,
       slPct: sanity.slPct,
