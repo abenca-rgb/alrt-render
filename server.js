@@ -14,7 +14,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ===== VERSION =====
-const APP_VERSION = "v25.5.3-product-guard";
+const APP_VERSION = "v25.5.4-supabase-write";
 
 // ===== CONFIG =====
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -25,6 +25,9 @@ const PAID_TELEGRAM_CHAT_ID = process.env.PAID_TELEGRAM_CHAT_ID || CHAT_ID;
 const PUBLIC_SITE_URL = (process.env.PUBLIC_SITE_URL || "https://dalrt.com").replace(/\/+$/, "");
 const APP_BASE_URL = (process.env.APP_BASE_URL || "").replace(/\/+$/, "");
 const CHART_IMAGE_TEMPLATE = process.env.CHART_IMAGE_TEMPLATE || "";
+const SUPABASE_ENABLED = String(process.env.SUPABASE_ENABLED || "false").toLowerCase() === "true";
+const SUPABASE_URL = (process.env.SUPABASE_URL || "").replace(/\/+$/, "");
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 
 const SUMMARY_ADMIN_TOKEN = process.env.SUMMARY_ADMIN_TOKEN || "";
 
@@ -98,6 +101,182 @@ function pick(...values) {
 
 function uniqueStrings(values) {
   return [...new Set(values.filter(Boolean).map((v) => String(v).trim()).filter(Boolean))];
+}
+
+function supabaseReady() {
+  return Boolean(SUPABASE_ENABLED && SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
+}
+
+async function supabaseRequest(table, { method = "POST", body, query = "", prefer = "return=minimal" } = {}) {
+  if (!supabaseReady()) return { skipped: true };
+
+  const url = `${SUPABASE_URL}/rest/v1/${table}${query}`;
+  const response = await fetch(url, {
+    method,
+    headers: {
+      apikey: SUPABASE_SERVICE_ROLE_KEY,
+      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+      "Content-Type": "application/json",
+      Prefer: prefer,
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`Supabase ${table} ${method} failed ${response.status}: ${text}`);
+  }
+
+  return { ok: true };
+}
+
+function backgroundSupabase(label, task) {
+  if (!supabaseReady()) return;
+
+  Promise.resolve()
+    .then(task)
+    .catch((err) => {
+      console.error(`SUPABASE ${label} FAILED:`, err?.message || String(err));
+    });
+}
+
+function isoFromMs(ms) {
+  const n = Number(ms);
+  return Number.isFinite(n) ? new Date(n).toISOString() : new Date().toISOString();
+}
+
+function sanitizePayloadForStorage(payload) {
+  if (!payload || typeof payload !== "object") return null;
+
+  const copy = { ...payload };
+
+  for (const key of Object.keys(copy)) {
+    if (/secret|token|key|password/i.test(key)) {
+      copy[key] = "[redacted]";
+    }
+  }
+
+  return copy;
+}
+
+function persistAlertToSupabase({
+  alertId,
+  refId,
+  symbol,
+  side,
+  timeframe,
+  setupType,
+  entry,
+  tp,
+  sl,
+  rr,
+  riskScore,
+  qualityScore,
+  qualityGrade,
+  whyText,
+  signalTimeMs,
+  session,
+  marketRegime,
+  pineVersion,
+  isFreeShared,
+  rawPayload,
+}) {
+  backgroundSupabase("ALERT INSERT", () =>
+    supabaseRequest("alerts", {
+      body: {
+        alert_id: String(alertId),
+        ref_id: String(refId),
+        symbol,
+        direction: side,
+        timeframe,
+        setup_type: setupType,
+        entry_price: entry,
+        tp_price: tp,
+        sl_price: sl,
+        rr,
+        risk_score: riskScore ?? null,
+        quality_score: qualityScore ?? null,
+        quality_grade: qualityGrade || null,
+        why_text: whyText || null,
+        signal_time_utc: isoFromMs(signalTimeMs),
+        session_name: session || null,
+        market_regime: marketRegime || null,
+        pine_version: pineVersion || null,
+        backend_version: APP_VERSION,
+        is_free_shared: Boolean(isFreeShared),
+        raw_payload: rawPayload || null,
+      },
+    })
+  );
+}
+
+function persistOutcomeToSupabase({ trade, outcomeType, outcomeTimeMs, pnlPercent, durationMinutes, exitPrice, rawPayload }) {
+  const alertId = trade?.primaryAlertId || trade?.alertIds?.[0] || trade?.refId;
+  if (!alertId || !trade?.refId) return;
+
+  backgroundSupabase("OUTCOME INSERT", () =>
+    supabaseRequest("outcomes", {
+      body: {
+        alert_id: String(alertId),
+        ref_id: String(trade.refId),
+        outcome_type: outcomeType,
+        outcome_time_utc: isoFromMs(outcomeTimeMs),
+        pnl_percent: pnlPercent ?? null,
+        duration_minutes: durationMinutes ?? null,
+        exit_price: exitPrice ?? null,
+        raw_payload: rawPayload || null,
+      },
+    })
+  );
+}
+
+function persistRejectionToSupabase({ symbol, side, setupType, reason, qualityScore, qualityGrade, rawPayload }) {
+  backgroundSupabase("REJECTION INSERT", () =>
+    supabaseRequest("alert_rejections", {
+      body: {
+        symbol: symbol || null,
+        direction: side || null,
+        setup_type: setupType || "UNKNOWN",
+        reason: String(reason || "unknown").toLowerCase(),
+        quality_score: qualityScore ?? null,
+        quality_grade: qualityGrade || null,
+        raw_payload: rawPayload || null,
+      },
+    })
+  );
+}
+
+function persistDailySummaryToSupabase(dateKey) {
+  const stat = getDailyStat(dateKey);
+  const closed =
+    stat.tp +
+    stat.sl +
+    (stat.timeExitProfit || 0) +
+    (stat.timeExitLoss || 0) +
+    (stat.expired || 0);
+  const wins = stat.tp + (stat.timeExitProfit || 0);
+  const winrate = closed > 0 ? (wins / closed) * 100 : null;
+  const openCount = Array.from(activeTrades.values()).filter((t) => !t.hit).length;
+
+  backgroundSupabase("DAILY SUMMARY UPSERT", () =>
+    supabaseRequest("daily_summaries", {
+      query: "?on_conflict=date_key",
+      prefer: "resolution=merge-duplicates,return=minimal",
+      body: {
+        date_key: dateKey,
+        alerts_count: stat.alerts || 0,
+        tp_count: stat.tp || 0,
+        sl_count: stat.sl || 0,
+        expired_count: stat.expired || 0,
+        time_exit_profit_count: stat.timeExitProfit || 0,
+        time_exit_loss_count: stat.timeExitLoss || 0,
+        open_count: openCount,
+        rejected_count: stat.rejectedSignals || 0,
+        winrate,
+        updated_at: new Date().toISOString(),
+      },
+    })
+  );
 }
 
 function parseNum(v) {
@@ -919,6 +1098,9 @@ async function recordRejectStat({
   side,
   setupType = "UNKNOWN",
   reason,
+  qualityScore = null,
+  qualityGrade = null,
+  rawPayload = null,
   ts = Date.now(),
 }) {
   const stat = getDailyStat(getUtcDateKey(ts));
@@ -934,6 +1116,16 @@ async function recordRejectStat({
   setupStat.rejected = (setupStat.rejected || 0) + 1;
 
   await persistState();
+
+  persistRejectionToSupabase({
+    symbol,
+    side,
+    setupType,
+    reason,
+    qualityScore,
+    qualityGrade,
+    rawPayload,
+  });
 }
 // ===== FREE CHANNEL =====
 function resetFreeCounterIfNeeded(nowMs = Date.now()) {
@@ -1572,6 +1764,8 @@ async function sendDailySummary(dateKey, force = false) {
   if (FREE_CHAT_ID) {
     await sendTelegramMessage(text, FREE_CHAT_ID);
   }
+
+  persistDailySummaryToSupabase(dateKey);
 
   lastSummarySentDate = dateKey;
   await persistState();
@@ -2259,6 +2453,21 @@ async function closeTrade({
     ts: closedAtMs,
   });
 
+  persistOutcomeToSupabase({
+    trade,
+    outcomeType: finalCloseType,
+    outcomeTimeMs: closedAtMs,
+    pnlPercent: sent.movePct,
+    durationMinutes: Number.isFinite(closedAtMs) && Number.isFinite(trade.createdAtMs)
+      ? Math.max(0, Math.round((closedAtMs - trade.createdAtMs) / 60000))
+      : null,
+    exitPrice: sent.exitPrice,
+    rawPayload: {
+      source,
+      matchType: matched.matchType,
+    },
+  });
+
   registerLossStop(trade, finalCloseType, closedAtMs);
   await markRecentHit(hitKey);
   await removeTrade(matched.key);
@@ -2541,6 +2750,8 @@ app.get("/health", (req, res) => {
     timestamp: new Date().toISOString(),
     dataDir: DATA_DIR,
     stateFile: STATE_FILE,
+    supabaseEnabled: SUPABASE_ENABLED,
+    supabaseReady: supabaseReady(),
     activeTrades: activeTrades.size,
     recentHitKeys: recentHitKeys.size,
     recentLossStops: recentLossStops.size,
@@ -2743,6 +2954,8 @@ async function handleTradingViewWebhook(req, res) {
     const session = pick(body.session, body.session_name);
     const confidenceLevel = pick(body.confidence_level, body.confidence);
     const estimatedHoldDuration = pick(body.estimated_hold_duration, body.hold_duration);
+    const timeframe = pick(body.tf, body.timeframe, body.interval);
+    const pineVersion = pick(body.version, body.pine_version, body.engine_version);
 
     const eventTime = pick(
       body.time_close,
@@ -3301,6 +3514,29 @@ async function handleTradingViewWebhook(req, res) {
       rr,
       sharedToFree,
       ts: receivedAtMs,
+    });
+
+    persistAlertToSupabase({
+      alertId: primaryAlertId,
+      refId,
+      symbol,
+      side,
+      timeframe,
+      setupType,
+      entry: entryParsed,
+      tp: tpParsed,
+      sl: slParsed,
+      rr,
+      riskScore: parseNum(risk),
+      qualityScore: quality.score,
+      qualityGrade: quality.grade,
+      whyText: whyLine,
+      signalTimeMs: receivedAtMs,
+      session,
+      marketRegime,
+      pineVersion,
+      isFreeShared: sharedToFree,
+      rawPayload: sanitizePayloadForStorage(body),
     });
 
     console.log("ALERT SENT:", {
