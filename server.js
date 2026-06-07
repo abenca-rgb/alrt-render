@@ -14,7 +14,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ===== VERSION =====
-const APP_VERSION = "v25.5.4-supabase-write";
+const APP_VERSION = "v25.5.5-supabase-ref-allocator";
 
 // ===== CONFIG =====
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -128,6 +128,28 @@ async function supabaseRequest(table, { method = "POST", body, query = "", prefe
   }
 
   return { ok: true };
+}
+
+async function supabaseRpc(functionName, body = {}) {
+  if (!supabaseReady()) return { skipped: true };
+
+  const url = `${SUPABASE_URL}/rest/v1/rpc/${functionName}`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      apikey: SUPABASE_SERVICE_ROLE_KEY,
+      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`Supabase RPC ${functionName} failed ${response.status}: ${text}`);
+  }
+
+  return response.json();
 }
 
 function backgroundSupabase(label, task) {
@@ -759,6 +781,26 @@ function allocNextRef() {
   }
 
   return String(nextRef).padStart(6, "0");
+}
+
+async function allocSignalRef() {
+  if (supabaseReady()) {
+    try {
+      const allocated = await supabaseRpc("next_alert_ref", {
+        floor_value: Math.max(REF_START_FLOOR, Number(nextRef) || REF_START_FLOOR),
+      });
+      const numericRef = Number(allocated);
+
+      if (Number.isFinite(numericRef) && numericRef >= REF_START_FLOOR) {
+        nextRef = Math.max(nextRef, numericRef);
+        return String(numericRef).padStart(6, "0");
+      }
+    } catch (err) {
+      console.error("SUPABASE REF ALLOCATOR FAILED - FALLING BACK TO STATE REF:", err?.message || String(err));
+    }
+  }
+
+  return allocNextRef();
 }
 
 function parseIncomingRef(body) {
@@ -3366,7 +3408,7 @@ async function handleTradingViewWebhook(req, res) {
       return;
     }
 
-    const refId = incomingRef || allocNextRef();
+    const refId = incomingRef || await allocSignalRef();
 
     const candidateIds = uniqueStrings([
       ...candidateIdsBase,

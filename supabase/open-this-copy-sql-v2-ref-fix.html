@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Copy D-ALRT Supabase REF Fix SQL</title>
+  <style>
+    body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;background:#101318;color:#f4f7fb}
+    header{padding:18px 22px;background:#161b22;border-bottom:1px solid #30363d;position:sticky;top:0}
+    h1{font-size:20px;margin:0 0 8px}
+    p{margin:0;color:#b7c0cc}
+    main{padding:18px 22px}
+    button{background:#2f81f7;color:white;border:0;border-radius:6px;padding:10px 14px;font-size:15px;cursor:pointer;margin-bottom:12px}
+    textarea{width:100%;height:75vh;box-sizing:border-box;background:#0b0f14;color:#e6edf3;border:1px solid #30363d;border-radius:8px;padding:14px;font-family:Menlo,Consolas,monospace;font-size:12px;line-height:1.45;white-space:pre}
+    .status{display:inline-block;margin-left:10px;color:#8ee68e}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>D-ALRT Supabase REF Fix</h1>
+    <p>Click Copy, paste into Supabase SQL Editor, then run it once.</p>
+  </header>
+  <main>
+    <button id="copy">Copy SQL</button><span id="status" class="status"></span>
+    <textarea id="code" spellcheck="false">alter table public.alerts drop constraint if exists alerts_ref_id_key;
+
+create index if not exists alerts_ref_id_idx on public.alerts(ref_id);
+
+create table if not exists public.ref_counters (
+  name text primary key,
+  current_value bigint not null,
+  updated_at timestamptz not null default now()
+);
+
+insert into public.ref_counters (name, current_value)
+values ('global_alert_ref', 100274)
+on conflict (name) do update
+set
+  current_value = greatest(public.ref_counters.current_value, excluded.current_value),
+  updated_at = now();
+
+create or replace function public.next_alert_ref(floor_value bigint default 100127)
+returns bigint
+language plpgsql
+security definer
+as $$
+declare
+  allocated bigint;
+begin
+  insert into public.ref_counters (name, current_value)
+  values ('global_alert_ref', greatest(floor_value, 100127))
+  on conflict (name) do update
+  set
+    current_value = greatest(public.ref_counters.current_value, excluded.current_value),
+    updated_at = now();
+
+  update public.ref_counters
+  set
+    current_value = greatest(current_value, floor_value, 100127) + 1,
+    updated_at = now()
+  where name = 'global_alert_ref'
+  returning current_value into allocated;
+
+  return allocated;
+end;
+$$;</textarea>
+  </main>
+  <script>
+    const button = document.getElementById("copy");
+    const status = document.getElementById("status");
+    const code = document.getElementById("code");
+    button.addEventListener("click", async () => {
+      code.select();
+      await navigator.clipboard.writeText(code.value);
+      status.textContent = "Copied";
+      setTimeout(() => status.textContent = "", 2000);
+    });
+  </script>
+</body>
+</html>
