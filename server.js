@@ -52,6 +52,7 @@ import { buildDailySummaryText as buildDailySummaryMessage } from "./src/service
 import { createSupabaseService } from "./src/services/supabaseService.js";
 import { createTelegramService } from "./src/services/telegramService.js";
 import { registerChartRoutes } from "./src/routes/chartRoutes.js";
+import { registerMemberRoutes } from "./src/routes/memberRoutes.js";
 import { registerSystemRoutes } from "./src/routes/systemRoutes.js";
 import { eventTimeToMs, formatUtc, getUtcDateKey } from "./src/utils/date.js";
 import { fmtPct, fmtPrice, fmtRR, parseNum } from "./src/utils/numbers.js";
@@ -1905,85 +1906,15 @@ registerSystemRoutes(app, {
   getUtcDateKey,
 });
 
-app.post("/signup/free", async (req, res) => {
-  try {
-    const email = normalizeEmail(req.body?.email);
-
-    if (!email || !email.includes("@")) {
-      return res.status(400).json({
-        ok: false,
-        error: "valid email required",
-      });
-    }
-
-    const existing = freeMembers.get(email);
-
-    if (existing?.inviteLink) {
-      return res.status(200).json({
-        ok: true,
-        email,
-        inviteLink: existing.inviteLink,
-        existing: true,
-      });
-    }
-
-    const inviteLink = await createFreeTelegramInviteLink({ expireHours: 48 });
-
-    freeMembers.set(email, {
-      email,
-      status: "free",
-      active: true,
-      inviteLink,
-      inviteCreatedAt: new Date().toISOString(),
-      inviteExpireHours: 48,
-      telegramUserId: null,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    });
-
-    await persistState();
-
-    await sendTelegramMessage(
-`🆓 <b>NEW FREE MEMBER</b>
-
-<b>Email</b> ${escapeHtml(email)}
-
-<b>Free Invite</b>
-${inviteLink}`
-    );
-
-    return res.status(200).json({
-      ok: true,
-      email,
-      inviteLink,
-    });
-  } catch (err) {
-    console.error("FREE SIGNUP ERROR:", err);
-
-    return res.status(500).json({
-      ok: false,
-      error: "free signup failed",
-    });
-  }
-});
-
-app.get("/admin/members", async (req, res) => {
-  const token = String(req.query.token || "");
-
-  if (!SUMMARY_ADMIN_TOKEN || token !== SUMMARY_ADMIN_TOKEN) {
-    return res.status(403).json({
-      ok: false,
-      error: "forbidden",
-    });
-  }
-
-  res.status(200).json({
-    ok: true,
-    paidCount: paidMembers.size,
-    freeCount: freeMembers.size,
-    paidMembers: Array.from(paidMembers.values()),
-    freeMembers: Array.from(freeMembers.values()),
-  });
+registerMemberRoutes(app, {
+  summaryAdminToken: SUMMARY_ADMIN_TOKEN,
+  getFreeMember: (email) => freeMembers.get(email),
+  setFreeMember: (email, member) => freeMembers.set(email, member),
+  getPaidMembers: () => Array.from(paidMembers.values()),
+  getFreeMembers: () => Array.from(freeMembers.values()),
+  createFreeInviteLink: createFreeTelegramInviteLink,
+  persistState,
+  sendTelegramMessage,
 });
 
 // ===== WEBHOOK HANDLER =====
