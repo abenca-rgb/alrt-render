@@ -10,7 +10,7 @@ const thisDir = path.dirname(thisFile);
 
 export const ROOT_DIR = path.resolve(thisDir, "../..");
 export const PORT = process.env.PORT || 3000;
-export const APP_VERSION = "v25.5.15-tradingview-routes";
+export const APP_VERSION = "v25.5.16-trade-math-utils";
 
 export const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 export const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
