@@ -52,6 +52,7 @@ import { buildDailySummaryText as buildDailySummaryMessage } from "./src/service
 import { createSupabaseService } from "./src/services/supabaseService.js";
 import { createTelegramService } from "./src/services/telegramService.js";
 import { registerChartRoutes } from "./src/routes/chartRoutes.js";
+import { registerSystemRoutes } from "./src/routes/systemRoutes.js";
 import { eventTimeToMs, formatUtc, getUtcDateKey } from "./src/utils/date.js";
 import { fmtPct, fmtPrice, fmtRR, parseNum } from "./src/utils/numbers.js";
 import {
@@ -1854,35 +1855,36 @@ registerChartRoutes(app, {
   chartService,
 });
 
-app.get("/", (req, res) => {
-  res.status(200).json({
-    ok: true,
-    service: "ALRT-Render",
-    version: APP_VERSION,
-  });
-});
-
-app.get("/health", (req, res) => {
+function getHealthState() {
   resetFreeCounterIfNeeded(Date.now());
 
-  res.status(200).json({
-    ok: true,
-    version: APP_VERSION,
-    timestamp: new Date().toISOString(),
-    dataDir: DATA_DIR,
-    stateFile: STATE_FILE,
-    supabaseEnabled: SUPABASE_ENABLED,
+  return {
     supabaseReady: supabaseReady(),
     activeTrades: activeTrades.size,
     recentHitKeys: recentHitKeys.size,
     recentLossStops: recentLossStops.size,
     nextRef,
+    freePostDate,
+    freePostsToday,
+    freeSharedRefs: freeSharedRefs.size,
+    dailyStatsDays: dailyStats.size,
+    lastSummarySentDate,
+    paidMembers: paidMembers.size,
+    freeMembers: freeMembers.size,
+  };
+}
+
+registerSystemRoutes(app, {
+  config: {
+    appVersion: APP_VERSION,
+    dataDir: DATA_DIR,
+    stateFile: STATE_FILE,
+    supabaseEnabled: SUPABASE_ENABLED,
     refStartFloor: REF_START_FLOOR,
-    nextRefFloorSafe: nextRef >= REF_START_FLOOR,
-    maxTradeAgeHours: MAX_TRADE_AGE_MS / 1000 / 60 / 60,
-    lossGuardSymbolCooldownMinutes: Math.round(LOSS_GUARD_SYMBOL_COOLDOWN_MS / 60000),
-    lossGuardMarketWindowMinutes: Math.round(LOSS_GUARD_MARKET_WINDOW_MS / 60000),
-    lossGuardMarketCooldownMinutes: Math.round(LOSS_GUARD_MARKET_COOLDOWN_MS / 60000),
+    maxTradeAgeMs: MAX_TRADE_AGE_MS,
+    lossGuardSymbolCooldownMs: LOSS_GUARD_SYMBOL_COOLDOWN_MS,
+    lossGuardMarketWindowMs: LOSS_GUARD_MARKET_WINDOW_MS,
+    lossGuardMarketCooldownMs: LOSS_GUARD_MARKET_COOLDOWN_MS,
     lossGuardMarketLimit: LOSS_GUARD_MARKET_LIMIT,
     minRrToSend: MIN_RR_TO_SEND,
     maxOpenTradesPerSymbol: MAX_OPEN_TRADES_PER_SYMBOL,
@@ -1891,43 +1893,16 @@ app.get("/health", (req, res) => {
     alertQualityFilterEnabled: ALERT_QUALITY_FILTER_ENABLED,
     candidateQualityFilterEnabled: CANDIDATE_QUALITY_FILTER_ENABLED,
     allowedSymbols: ALLOWED_SYMBOLS,
-    freeEnabled: Boolean(FREE_CHAT_ID),
-    freePostDate,
-    freePostsToday,
+    freeChatId: FREE_CHAT_ID,
     freeDailyLimit: FREE_DAILY_LIMIT,
-    freeSharedRefs: freeSharedRefs.size,
-    dailyStatsDays: dailyStats.size,
-    lastSummarySentDate,
     dailySummaryEnabled: DAILY_SUMMARY_ENABLED,
     dailySummaryUtcHour: DAILY_SUMMARY_UTC_HOUR,
     dailySummaryUtcMinute: DAILY_SUMMARY_UTC_MINUTE,
-    manualSummaryEnabled: Boolean(SUMMARY_ADMIN_TOKEN),
-    paidMembers: paidMembers.size,
-    freeMembers: freeMembers.size,
-  });
-});
-
-app.post("/summary/send-now", async (req, res) => {
-  const token = String(req.query.token || req.headers["x-summary-token"] || "");
-
-  if (!SUMMARY_ADMIN_TOKEN || token !== SUMMARY_ADMIN_TOKEN) {
-    return res.status(403).json({
-      ok: false,
-      error: "manual summary disabled",
-    });
-  }
-
-  res.status(200).json({
-    ok: true,
-    message: "summary send requested",
-  });
-
-  try {
-    const dateKey = getUtcDateKey(Date.now());
-    await sendDailySummary(dateKey, true);
-  } catch (err) {
-    console.error("MANUAL SUMMARY ERROR:", err);
-  }
+    summaryAdminToken: SUMMARY_ADMIN_TOKEN,
+  },
+  getHealthState,
+  sendDailySummary,
+  getUtcDateKey,
 });
 
 app.post("/signup/free", async (req, res) => {
