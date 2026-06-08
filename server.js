@@ -1,6 +1,5 @@
 import express from "express";
 import fetch from "node-fetch";
-import path from "path";
 import { promises as fs } from "fs";
 import {
   ALERT_QUALITY_FILTER_ENABLED,
@@ -52,6 +51,7 @@ import { createInviteService } from "./src/services/inviteService.js";
 import { buildDailySummaryText as buildDailySummaryMessage } from "./src/services/summaryService.js";
 import { createSupabaseService } from "./src/services/supabaseService.js";
 import { createTelegramService } from "./src/services/telegramService.js";
+import { registerChartRoutes } from "./src/routes/chartRoutes.js";
 import { eventTimeToMs, formatUtc, getUtcDateKey } from "./src/utils/date.js";
 import { fmtPct, fmtPrice, fmtRR, parseNum } from "./src/utils/numbers.js";
 import {
@@ -1849,40 +1849,9 @@ app.post(
 app.use(express.json({ limit: "2mb" }));
 
 // ===== ROUTES =====
-app.get("/chart-template", async (req, res) => {
-  try {
-    const templatePath = path.join(ROOT_DIR, "chart-template.html");
-    const html = await fs.readFile(templatePath, "utf8");
-
-    res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.status(200).send(html);
-  } catch (err) {
-    console.error("CHART TEMPLATE ERROR:", err);
-    res.status(500).send("chart template error");
-  }
-});
-
-app.get("/chart-image", async (req, res) => {
-  try {
-    const symbol = String(req.query.symbol || "BINANCE:BTCUSDT");
-    const side = String(req.query.side || "LONG").toUpperCase();
-    const ref = String(req.query.ref || "");
-    const interval = String(req.query.interval || "60");
-
-    const png = await chartService.renderChartImagePngBuffer({
-      symbol,
-      side,
-      ref,
-      interval,
-    });
-
-    res.setHeader("Content-Type", "image/png");
-    res.setHeader("Cache-Control", "public, max-age=120");
-    res.status(200).send(png);
-  } catch (err) {
-    console.error("CHART IMAGE ERROR FULL:", err);
-    res.status(500).send(`chart image error: ${err?.message || String(err)}`);
-  }
+registerChartRoutes(app, {
+  rootDir: ROOT_DIR,
+  chartService,
 });
 
 app.get("/", (req, res) => {
