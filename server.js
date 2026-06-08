@@ -1,5 +1,5 @@
 import express from "express";
-import fetch, { FormData, Blob } from "node-fetch";
+import fetch from "node-fetch";
 import path from "path";
 import { promises as fs } from "fs";
 import { chromium } from "playwright";
@@ -44,6 +44,7 @@ import {
 import { getSymbolConfig, isAllowedTradingSymbol } from "./src/config/symbols.js";
 import { scoreAlertQuality } from "./src/services/alertScoring.js";
 import { createSupabaseService } from "./src/services/supabaseService.js";
+import { createTelegramService } from "./src/services/telegramService.js";
 import { eventTimeToMs, formatUtc, getUtcDateKey, sleep } from "./src/utils/date.js";
 import { fmtPct, fmtPrice, fmtRR, parseNum } from "./src/utils/numbers.js";
 import {
@@ -66,6 +67,7 @@ const supabase = createSupabaseService({
   serviceRoleKey: SUPABASE_SERVICE_ROLE_KEY,
   backendVersion: APP_VERSION,
 });
+let telegram = null;
 
 // ===== STATE =====
 const activeTrades = new Map();
@@ -1373,6 +1375,12 @@ function appendChartLinkIfMissing(text, chartLink) {
 <b>CHART</b> ${formatChartHtml(chartLink)}`;
 }
 
+telegram = createTelegramService({
+  botToken: BOT_TOKEN,
+  defaultChatId: CHAT_ID,
+  appendChartLinkIfMissing,
+});
+
 // ===== DAILY SUMMARY =====
 function buildDailySummaryText(dateKey) {
   const stat = getDailyStat(dateKey);
@@ -1756,27 +1764,7 @@ function cleanupState() {
 
 // ===== TELEGRAM =====
 async function sendTelegramMessage(text, chatId = CHAT_ID) {
-  const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text,
-      parse_mode: "HTML",
-      disable_web_page_preview: true,
-    }),
-  });
-
-  const data = await response.json();
-
-  console.log("TELEGRAM MESSAGE RESPONSE:", {
-    chatId,
-    data,
-  });
-
-  if (!response.ok || !data.ok) {
-    throw new Error(`Telegram sendMessage failed: ${JSON.stringify(data)}`);
-  }
+  return telegram.sendMessage(text, chatId);
 }
 
 async function sendTelegramPhoto({
@@ -1786,43 +1774,7 @@ async function sendTelegramPhoto({
   caption = "",
   chatId = CHAT_ID,
 }) {
-  let response;
-
-  if (photoBuffer) {
-    const form = new FormData();
-
-    form.append("chat_id", chatId);
-    form.append("caption", caption);
-    form.append("parse_mode", "HTML");
-    form.append("photo", new Blob([photoBuffer], { type: "image/png" }), filename);
-
-    response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
-      method: "POST",
-      body: form,
-    });
-  } else {
-    response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: chatId,
-        photo: photoUrl,
-        caption,
-        parse_mode: "HTML",
-      }),
-    });
-  }
-
-  const data = await response.json();
-
-  console.log("TELEGRAM PHOTO RESPONSE:", {
-    chatId,
-    data,
-  });
-
-  if (!response.ok || !data.ok) {
-    throw new Error(`Telegram sendPhoto failed: ${JSON.stringify(data)}`);
-  }
+  return telegram.sendPhoto({ photoUrl, photoBuffer, filename, caption, chatId });
 }
 
 async function sendTelegramAlert({
@@ -1833,31 +1785,14 @@ async function sendTelegramAlert({
   fallbackChartLink = "N/A",
   chatId = CHAT_ID,
 }) {
-  if (imageBuffer || imageUrl) {
-    try {
-      await sendTelegramPhoto({
-        photoUrl: imageUrl,
-        photoBuffer: imageBuffer,
-        filename: imageFilename,
-        caption: text,
-        chatId,
-      });
-
-      return { usedPhoto: true };
-    } catch (err) {
-      console.error("PHOTO SEND FAILED, FALLING BACK TO MESSAGE:", err.message);
-
-      const fallbackText = appendChartLinkIfMissing(text, fallbackChartLink);
-      await sendTelegramMessage(fallbackText, chatId);
-
-      return { usedPhoto: false, photoFailed: true };
-    }
-  }
-
-  const fallbackText = appendChartLinkIfMissing(text, fallbackChartLink);
-  await sendTelegramMessage(fallbackText, chatId);
-
-  return { usedPhoto: false };
+  return telegram.sendAlert({
+    text,
+    imageUrl,
+    imageBuffer,
+    imageFilename,
+    fallbackChartLink,
+    chatId,
+  });
 }
 
 // ===== CHART RENDER =====
