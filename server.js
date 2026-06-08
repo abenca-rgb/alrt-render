@@ -51,6 +51,14 @@ import { createInviteService } from "./src/services/inviteService.js";
 import { buildDailySummaryText as buildDailySummaryMessage } from "./src/services/summaryService.js";
 import { createSupabaseService } from "./src/services/supabaseService.js";
 import { createTelegramService } from "./src/services/telegramService.js";
+import {
+  countOpenTradesForSide,
+  countOpenTradesForSymbol,
+  findOpenTradeByCandidateIds,
+  findTradeByRefId,
+  getOpenTradesForSymbol,
+  hasOpenTradeForSymbol,
+} from "./src/services/tradeLookupService.js";
 import { registerChartRoutes } from "./src/routes/chartRoutes.js";
 import { registerMemberRoutes } from "./src/routes/memberRoutes.js";
 import { registerStripeRoutes } from "./src/routes/stripeRoutes.js";
@@ -807,128 +815,6 @@ function getLossGuardBlock({ symbol, side, now = Date.now() }) {
   }
 
   return { blocked: false };
-}
-
-function findTradeByRefId(refId) {
-  if (!refId) return null;
-
-  for (const [key, trade] of activeTrades.entries()) {
-    if (trade.hit) continue;
-
-    if (String(trade.refId) === String(refId)) {
-      return {
-        key,
-        trade,
-        matchType: "ref_id",
-        score: 2000,
-      };
-    }
-  }
-
-  return null;
-}
-
-function findOpenTradeByCandidateIds(ids) {
-  const wanted = uniqueStrings(ids);
-
-  if (wanted.length === 0) return null;
-
-  for (const [key, trade] of activeTrades.entries()) {
-    if (trade.hit) continue;
-
-    const tradeIds = uniqueStrings([
-      trade.primaryAlertId,
-      ...(Array.isArray(trade.alertIds) ? trade.alertIds : []),
-    ]);
-
-    const matched = tradeIds.some((id) => wanted.includes(id));
-
-    if (matched) {
-      return {
-        key,
-        trade,
-        matchType: "candidate_id",
-        score: 1000,
-      };
-    }
-  }
-
-  return null;
-}
-
-// Alleen voor infer hits vanuit actuele prijs.
-// Niet meer gebruiken voor explicit Pine closures.
-function findLatestOpenTradeBySymbolForInferenceOnly(symbol) {
-  let latest = null;
-
-  for (const [key, trade] of activeTrades.entries()) {
-    if (trade.symbol !== symbol) continue;
-    if (trade.hit) continue;
-
-    if (!latest || trade.createdAtMs > latest.trade.createdAtMs) {
-      latest = {
-        key,
-        trade,
-        matchType: "symbol_latest_inference_only",
-        score: 500,
-      };
-    }
-  }
-
-  return latest;
-}
-
-function countOpenTradesForSymbol(symbol) {
-  let count = 0;
-
-  for (const [, trade] of activeTrades.entries()) {
-    if (!trade) continue;
-    if (trade.hit) continue;
-    if (trade.symbol === symbol) count += 1;
-  }
-
-  return count;
-}
-
-function countOpenTradesForSide(side) {
-  let count = 0;
-
-  for (const [, trade] of activeTrades.entries()) {
-    if (!trade) continue;
-    if (trade.hit) continue;
-    if (trade.side === side) count += 1;
-  }
-
-  return count;
-}
-
-function hasOpenTradeForSymbol(symbol) {
-  return countOpenTradesForSymbol(symbol) >= MAX_OPEN_TRADES_PER_SYMBOL;
-}
-
-function getOpenTradesForSymbol(symbol) {
-  const items = [];
-
-  for (const [, trade] of activeTrades.entries()) {
-    if (trade.symbol !== symbol) continue;
-    if (trade.hit) continue;
-
-    items.push({
-      refId: trade.refId,
-      symbol: trade.symbol,
-      side: trade.side,
-      entry: trade.entry,
-      tp: trade.tp,
-      sl: trade.sl,
-      createdAtMs: trade.createdAtMs,
-      createdAtUtc: formatUtc(trade.createdAtMs),
-      primaryAlertId: trade.primaryAlertId || null,
-      alertIds: uniqueStrings(trade.alertIds || []),
-    });
-  }
-
-  items.sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0));
-  return items;
 }
 
 telegram = createTelegramService({
@@ -1857,8 +1743,8 @@ async function handleTradingViewWebhook(req, res) {
     // Alleen ref/candidate ID matching.
     if (explicitCloseType && symbol) {
       const matched =
-        findOpenTradeByCandidateIds(candidateIdsBase) ||
-        findTradeByRefId(incomingRef);
+        findOpenTradeByCandidateIds(activeTrades, candidateIdsBase) ||
+        findTradeByRefId(activeTrades, incomingRef);
 
       if (matched) {
         await closeTrade({
@@ -1877,7 +1763,7 @@ async function handleTradingViewWebhook(req, res) {
         explicitCloseType,
         incomingRef,
         candidateIdsBase,
-        openTradesForSymbol: getOpenTradesForSymbol(symbol),
+        openTradesForSymbol: getOpenTradesForSymbol(activeTrades, symbol),
       });
 
       await recordRejectStat({
@@ -1988,10 +1874,10 @@ async function handleTradingViewWebhook(req, res) {
       return;
     }
 
-    if (hasOpenTradeForSymbol(symbol)) {
+    if (hasOpenTradeForSymbol(activeTrades, symbol, MAX_OPEN_TRADES_PER_SYMBOL)) {
       console.log("SIGNAL SKIPPED BY OPEN TRADE FILTER:", {
         symbol,
-        openTradesForSymbol: countOpenTradesForSymbol(symbol),
+        openTradesForSymbol: countOpenTradesForSymbol(activeTrades, symbol),
         maxOpenTradesPerSymbol: MAX_OPEN_TRADES_PER_SYMBOL,
       });
       await recordRejectStat({
@@ -2024,7 +1910,7 @@ async function handleTradingViewWebhook(req, res) {
       return;
     }
 
-    const openTradesForSide = countOpenTradesForSide(side);
+    const openTradesForSide = countOpenTradesForSide(activeTrades, side);
 
     if (openTradesForSide >= MAX_OPEN_TRADES_PER_SIDE) {
       console.log("SIGNAL SKIPPED BY SIDE EXPOSURE FILTER:", {
