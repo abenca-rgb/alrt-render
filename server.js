@@ -53,6 +53,7 @@ import { createSupabaseService } from "./src/services/supabaseService.js";
 import { createTelegramService } from "./src/services/telegramService.js";
 import { registerChartRoutes } from "./src/routes/chartRoutes.js";
 import { registerMemberRoutes } from "./src/routes/memberRoutes.js";
+import { registerStripeRoutes } from "./src/routes/stripeRoutes.js";
 import { registerSystemRoutes } from "./src/routes/systemRoutes.js";
 import { eventTimeToMs, formatUtc, getUtcDateKey } from "./src/utils/date.js";
 import { fmtPct, fmtPrice, fmtRR, parseNum } from "./src/utils/numbers.js";
@@ -1825,28 +1826,9 @@ ${inviteLink}`
 }
 
 // Stripe raw body route MUST be before express.json()
-app.post(
-  "/webhook/stripe",
-  express.raw({ type: "application/json", limit: "2mb" }),
-  async (req, res) => {
-    let event;
-
-    try {
-      event = JSON.parse(req.body.toString("utf8"));
-    } catch (err) {
-      console.error("STRIPE WEBHOOK PARSE ERROR:", err);
-      return res.status(400).send("Invalid payload");
-    }
-
-    res.status(200).json({ received: true });
-
-    try {
-      await handleStripeEvent(event);
-    } catch (err) {
-      console.error("STRIPE EVENT HANDLE ERROR:", err);
-    }
-  }
-);
+registerStripeRoutes(app, {
+  handleStripeEvent,
+});
 
 app.use(express.json({ limit: "2mb" }));
 
