@@ -55,6 +55,7 @@ import { registerChartRoutes } from "./src/routes/chartRoutes.js";
 import { registerMemberRoutes } from "./src/routes/memberRoutes.js";
 import { registerStripeRoutes } from "./src/routes/stripeRoutes.js";
 import { registerSystemRoutes } from "./src/routes/systemRoutes.js";
+import { registerTradingViewRoutes } from "./src/routes/tradingViewRoutes.js";
 import { eventTimeToMs, formatUtc, getUtcDateKey } from "./src/utils/date.js";
 import { fmtPct, fmtPrice, fmtRR, parseNum } from "./src/utils/numbers.js";
 import {
@@ -2569,8 +2570,9 @@ async function handleTradingViewWebhook(req, res) {
 }
 
 // ===== WEBHOOK ROUTES =====
-app.post("/webhook", handleTradingViewWebhook);
-app.post("/webhook/tradingview", handleTradingViewWebhook);
+registerTradingViewRoutes(app, {
+  handleTradingViewWebhook,
+});
 
 // ===== 404 =====
 app.use((req, res) => {
