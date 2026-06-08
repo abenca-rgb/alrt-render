@@ -49,6 +49,10 @@ import {
 } from "./src/services/messageTemplates.js";
 import { createInviteService } from "./src/services/inviteService.js";
 import { buildDailySummaryText as buildDailySummaryMessage } from "./src/services/summaryService.js";
+import {
+  getLossGuardBlock,
+  registerLossStop,
+} from "./src/services/lossGuardService.js";
 import { createSupabaseService } from "./src/services/supabaseService.js";
 import { createTelegramService } from "./src/services/telegramService.js";
 import {
@@ -754,69 +758,6 @@ async function markRecentHit(hitKey) {
   await persistState();
 }
 
-function registerLossStop(trade, closeType, ts) {
-  if (!trade || closeType !== "SL") return;
-
-  const atMs = Number.isFinite(Number(ts)) ? Number(ts) : Date.now();
-  const key = `${trade.symbol}|${trade.side}|${trade.refId}|${atMs}`;
-
-  recentLossStops.set(key, {
-    symbol: trade.symbol,
-    side: trade.side,
-    setupType: trade.setupType || "UNKNOWN",
-    refId: trade.refId,
-    atMs,
-    atUtc: new Date(atMs).toISOString(),
-  });
-}
-
-function getFreshLossStops(now = Date.now()) {
-  return Array.from(recentLossStops.values()).filter((item) => {
-    if (!item?.atMs) return false;
-    return now - Number(item.atMs) <= LOSS_GUARD_RETENTION_MS;
-  });
-}
-
-function getLossGuardBlock({ symbol, side, now = Date.now() }) {
-  const recentStops = getFreshLossStops(now);
-  const sameSymbolSide = recentStops
-    .filter((item) => item.symbol === symbol && item.side === side)
-    .sort((a, b) => Number(b.atMs) - Number(a.atMs));
-
-  const latestSymbolStop = sameSymbolSide[0];
-
-  if (latestSymbolStop && now - Number(latestSymbolStop.atMs) <= LOSS_GUARD_SYMBOL_COOLDOWN_MS) {
-    return {
-      blocked: true,
-      reason: "loss_guard_symbol",
-      latestRef: latestSymbolStop.refId,
-      latestAtUtc: latestSymbolStop.atUtc,
-      cooldownMinutes: Math.round(LOSS_GUARD_SYMBOL_COOLDOWN_MS / 60000),
-    };
-  }
-
-  const marketSideStops = recentStops
-    .filter((item) => item.side === side && now - Number(item.atMs) <= LOSS_GUARD_MARKET_WINDOW_MS)
-    .sort((a, b) => Number(b.atMs) - Number(a.atMs));
-
-  if (marketSideStops.length >= LOSS_GUARD_MARKET_LIMIT) {
-    const latestMarketStop = marketSideStops[0];
-
-    if (now - Number(latestMarketStop.atMs) <= LOSS_GUARD_MARKET_COOLDOWN_MS) {
-      return {
-        blocked: true,
-        reason: "loss_guard_market",
-        stopCount: marketSideStops.length,
-        latestRef: latestMarketStop.refId,
-        latestAtUtc: latestMarketStop.atUtc,
-        cooldownMinutes: Math.round(LOSS_GUARD_MARKET_COOLDOWN_MS / 60000),
-      };
-    }
-  }
-
-  return { blocked: false };
-}
-
 telegram = createTelegramService({
   botToken: BOT_TOKEN,
   defaultChatId: CHAT_ID,
@@ -1306,7 +1247,7 @@ async function closeTrade({
     },
   });
 
-  registerLossStop(trade, finalCloseType, closedAtMs);
+  registerLossStop(recentLossStops, trade, finalCloseType, closedAtMs);
   await markRecentHit(hitKey);
   await removeTrade(matched.key);
 
@@ -1929,10 +1870,15 @@ async function handleTradingViewWebhook(req, res) {
       return;
     }
 
-    const lossGuard = getLossGuardBlock({
+    const lossGuard = getLossGuardBlock(recentLossStops, {
       symbol,
       side,
       now: receivedAtMs,
+      retentionMs: LOSS_GUARD_RETENTION_MS,
+      symbolCooldownMs: LOSS_GUARD_SYMBOL_COOLDOWN_MS,
+      marketWindowMs: LOSS_GUARD_MARKET_WINDOW_MS,
+      marketCooldownMs: LOSS_GUARD_MARKET_COOLDOWN_MS,
+      marketLimit: LOSS_GUARD_MARKET_LIMIT,
     });
 
     if (lossGuard.blocked) {
