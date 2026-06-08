@@ -1,47 +1,71 @@
 import express from "express";
-import dotenv from "dotenv";
 import fetch, { FormData, Blob } from "node-fetch";
 import path from "path";
-import { fileURLToPath } from "url";
 import { promises as fs } from "fs";
 import { chromium } from "playwright";
-import { getAllowedSymbolsFromEnv, getSymbolConfig, isAllowedTradingSymbol } from "./src/config/symbols.js";
+import {
+  ALERT_QUALITY_FILTER_ENABLED,
+  ALLOWED_SYMBOLS,
+  APP_BASE_URL,
+  APP_VERSION,
+  BOT_TOKEN,
+  CANDIDATE_QUALITY_FILTER_ENABLED,
+  CHAT_ID,
+  CHART_IMAGE_TEMPLATE,
+  DAILY_SL_CIRCUIT_BREAKER,
+  DAILY_SUMMARY_ENABLED,
+  DAILY_SUMMARY_UTC_HOUR,
+  DAILY_SUMMARY_UTC_MINUTE,
+  DATA_DIR,
+  FREE_CHAT_ID,
+  FREE_DAILY_LIMIT,
+  FREE_REF_TTL_MS,
+  HIT_DEDUP_TTL_MS,
+  LOSS_GUARD_MARKET_COOLDOWN_MS,
+  LOSS_GUARD_MARKET_LIMIT,
+  LOSS_GUARD_MARKET_WINDOW_MS,
+  LOSS_GUARD_RETENTION_MS,
+  LOSS_GUARD_SYMBOL_COOLDOWN_MS,
+  MAX_OPEN_TRADES_PER_SIDE,
+  MAX_OPEN_TRADES_PER_SYMBOL,
+  MAX_TRADE_AGE_MS,
+  MIN_RR_TO_SEND,
+  PAID_TELEGRAM_CHAT_ID,
+  PORT,
+  PUBLIC_SITE_URL,
+  REF_START_FLOOR,
+  ROOT_DIR,
+  STATE_FILE,
+  SUMMARY_ADMIN_TOKEN,
+  SUPABASE_ENABLED,
+  SUPABASE_SERVICE_ROLE_KEY,
+  SUPABASE_URL,
+} from "./src/config/env.js";
+import { getSymbolConfig, isAllowedTradingSymbol } from "./src/config/symbols.js";
 import { scoreAlertQuality } from "./src/services/alertScoring.js";
-
-dotenv.config();
+import { createSupabaseService } from "./src/services/supabaseService.js";
+import { eventTimeToMs, formatUtc, getUtcDateKey, sleep } from "./src/utils/date.js";
+import { fmtPct, fmtPrice, fmtRR, parseNum } from "./src/utils/numbers.js";
+import {
+  escapeAttr,
+  escapeHtml,
+  normalizeEmail,
+  normalizeEventType,
+  normalizeSetupType,
+  normalizeSide,
+  normalizeSymbol,
+  pick,
+  sanitizePayloadForStorage,
+  uniqueStrings,
+} from "./src/utils/payload.js";
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-
-// ===== VERSION =====
-const APP_VERSION = "v25.5.5-supabase-ref-allocator";
-
-// ===== CONFIG =====
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
-const FREE_CHAT_ID = process.env.FREE_TELEGRAM_CHAT_ID || "";
-const PAID_TELEGRAM_CHAT_ID = process.env.PAID_TELEGRAM_CHAT_ID || CHAT_ID;
-
-const PUBLIC_SITE_URL = (process.env.PUBLIC_SITE_URL || "https://dalrt.com").replace(/\/+$/, "");
-const APP_BASE_URL = (process.env.APP_BASE_URL || "").replace(/\/+$/, "");
-const CHART_IMAGE_TEMPLATE = process.env.CHART_IMAGE_TEMPLATE || "";
-const SUPABASE_ENABLED = String(process.env.SUPABASE_ENABLED || "false").toLowerCase() === "true";
-const SUPABASE_URL = (process.env.SUPABASE_URL || "").replace(/\/+$/, "");
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
-
-const SUMMARY_ADMIN_TOKEN = process.env.SUMMARY_ADMIN_TOKEN || "";
-
-const DAILY_SUMMARY_ENABLED =
-  String(process.env.DAILY_SUMMARY_ENABLED || "true").toLowerCase() !== "false";
-const DAILY_SUMMARY_UTC_HOUR = Number(process.env.DAILY_SUMMARY_UTC_HOUR || 23);
-const DAILY_SUMMARY_UTC_MINUTE = Number(process.env.DAILY_SUMMARY_UTC_MINUTE || 59);
-
-// ===== PATHS =====
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-const DATA_DIR = process.env.RENDER_DISK_PATH || process.env.DATA_DIR || "/var/data";
-const STATE_FILE = path.join(DATA_DIR, "state.json");
+const supabase = createSupabaseService({
+  enabled: SUPABASE_ENABLED,
+  url: SUPABASE_URL,
+  serviceRoleKey: SUPABASE_SERVICE_ROLE_KEY,
+  backendVersion: APP_VERSION,
+});
 
 // ===== STATE =====
 const activeTrades = new Map();
@@ -51,35 +75,6 @@ const freeSharedRefs = new Map();
 const dailyStats = new Map();
 const paidMembers = new Map();
 const freeMembers = new Map();
-
-const MAX_TRADE_AGE_MS = 24 * 60 * 60 * 1000;
-const HIT_DEDUP_TTL_MS = 36 * 60 * 60 * 1000;
-const LOSS_GUARD_SYMBOL_COOLDOWN_MS = Number(process.env.LOSS_GUARD_SYMBOL_COOLDOWN_MINUTES || 180) * 60 * 1000;
-const LOSS_GUARD_MARKET_WINDOW_MS = Number(process.env.LOSS_GUARD_MARKET_WINDOW_MINUTES || 120) * 60 * 1000;
-const LOSS_GUARD_MARKET_COOLDOWN_MS = Number(process.env.LOSS_GUARD_MARKET_COOLDOWN_MINUTES || 90) * 60 * 1000;
-const LOSS_GUARD_MARKET_LIMIT = Number(process.env.LOSS_GUARD_MARKET_LIMIT || 3);
-const LOSS_GUARD_RETENTION_MS = Math.max(
-  LOSS_GUARD_SYMBOL_COOLDOWN_MS,
-  LOSS_GUARD_MARKET_WINDOW_MS + LOSS_GUARD_MARKET_COOLDOWN_MS,
-  24 * 60 * 60 * 1000,
-);
-const FREE_REF_TTL_MS = 48 * 60 * 60 * 1000;
-const FREE_DAILY_LIMIT = 2;
-
-const MIN_RR_TO_SEND = Number(process.env.MIN_RR_TO_SEND || 0);
-const MAX_OPEN_TRADES_PER_SYMBOL = Number(process.env.MAX_OPEN_TRADES_PER_SYMBOL || 1);
-const MAX_OPEN_TRADES_PER_SIDE = Number(process.env.MAX_OPEN_TRADES_PER_SIDE || 1);
-const DAILY_SL_CIRCUIT_BREAKER = Number(process.env.DAILY_SL_CIRCUIT_BREAKER || 2);
-const ALERT_QUALITY_FILTER_ENABLED =
-  String(process.env.ALERT_QUALITY_FILTER_ENABLED || "false").toLowerCase() === "true";
-const CANDIDATE_QUALITY_FILTER_ENABLED =
-  String(process.env.CANDIDATE_QUALITY_FILTER_ENABLED || "true").toLowerCase() !== "false";
-const ALLOWED_SYMBOLS = getAllowedSymbolsFromEnv(process.env.ALLOWED_SYMBOLS || "");
-
-// Belangrijk: laatste live ref was al boven 100127.
-// Zet in Render eventueel NEXT_REF_START=100127 of hoger.
-// State.json wint altijd als daar een hogere nextRef in staat.
-const REF_START_FLOOR = Number(process.env.NEXT_REF_START || 100127);
 
 let nextRef = REF_START_FLOOR;
 let savePromise = Promise.resolve();
@@ -92,180 +87,20 @@ let lastSummarySentDate = "";
 // Daarom wordt /webhook/stripe hieronder eerst geregistreerd.
 
 // ===== BASIC HELPERS =====
-function pick(...values) {
-  for (const v of values) {
-    if (v !== undefined && v !== null && String(v).trim() !== "") return v;
-  }
-  return null;
-}
-
-function uniqueStrings(values) {
-  return [...new Set(values.filter(Boolean).map((v) => String(v).trim()).filter(Boolean))];
-}
-
 function supabaseReady() {
-  return Boolean(SUPABASE_ENABLED && SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
+  return supabase.ready();
 }
 
-async function supabaseRequest(table, { method = "POST", body, query = "", prefer = "return=minimal" } = {}) {
-  if (!supabaseReady()) return { skipped: true };
-
-  const url = `${SUPABASE_URL}/rest/v1/${table}${query}`;
-  const response = await fetch(url, {
-    method,
-    headers: {
-      apikey: SUPABASE_SERVICE_ROLE_KEY,
-      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-      "Content-Type": "application/json",
-      Prefer: prefer,
-    },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-
-  if (!response.ok) {
-    const text = await response.text().catch(() => "");
-    throw new Error(`Supabase ${table} ${method} failed ${response.status}: ${text}`);
-  }
-
-  return { ok: true };
+function persistAlertToSupabase(payload) {
+  supabase.persistAlert(payload);
 }
 
-async function supabaseRpc(functionName, body = {}) {
-  if (!supabaseReady()) return { skipped: true };
-
-  const url = `${SUPABASE_URL}/rest/v1/rpc/${functionName}`;
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      apikey: SUPABASE_SERVICE_ROLE_KEY,
-      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-  });
-
-  if (!response.ok) {
-    const text = await response.text().catch(() => "");
-    throw new Error(`Supabase RPC ${functionName} failed ${response.status}: ${text}`);
-  }
-
-  return response.json();
+function persistOutcomeToSupabase(payload) {
+  supabase.persistOutcome(payload);
 }
 
-function backgroundSupabase(label, task) {
-  if (!supabaseReady()) return;
-
-  Promise.resolve()
-    .then(task)
-    .catch((err) => {
-      console.error(`SUPABASE ${label} FAILED:`, err?.message || String(err));
-    });
-}
-
-function isoFromMs(ms) {
-  const n = Number(ms);
-  return Number.isFinite(n) ? new Date(n).toISOString() : new Date().toISOString();
-}
-
-function sanitizePayloadForStorage(payload) {
-  if (!payload || typeof payload !== "object") return null;
-
-  const copy = { ...payload };
-
-  for (const key of Object.keys(copy)) {
-    if (/secret|token|key|password/i.test(key)) {
-      copy[key] = "[redacted]";
-    }
-  }
-
-  return copy;
-}
-
-function persistAlertToSupabase({
-  alertId,
-  refId,
-  symbol,
-  side,
-  timeframe,
-  setupType,
-  entry,
-  tp,
-  sl,
-  rr,
-  riskScore,
-  qualityScore,
-  qualityGrade,
-  whyText,
-  signalTimeMs,
-  session,
-  marketRegime,
-  pineVersion,
-  isFreeShared,
-  rawPayload,
-}) {
-  backgroundSupabase("ALERT INSERT", () =>
-    supabaseRequest("alerts", {
-      body: {
-        alert_id: String(alertId),
-        ref_id: String(refId),
-        symbol,
-        direction: side,
-        timeframe,
-        setup_type: setupType,
-        entry_price: entry,
-        tp_price: tp,
-        sl_price: sl,
-        rr,
-        risk_score: riskScore ?? null,
-        quality_score: qualityScore ?? null,
-        quality_grade: qualityGrade || null,
-        why_text: whyText || null,
-        signal_time_utc: isoFromMs(signalTimeMs),
-        session_name: session || null,
-        market_regime: marketRegime || null,
-        pine_version: pineVersion || null,
-        backend_version: APP_VERSION,
-        is_free_shared: Boolean(isFreeShared),
-        raw_payload: rawPayload || null,
-      },
-    })
-  );
-}
-
-function persistOutcomeToSupabase({ trade, outcomeType, outcomeTimeMs, pnlPercent, durationMinutes, exitPrice, rawPayload }) {
-  const alertId = trade?.primaryAlertId || trade?.alertIds?.[0] || trade?.refId;
-  if (!alertId || !trade?.refId) return;
-
-  backgroundSupabase("OUTCOME INSERT", () =>
-    supabaseRequest("outcomes", {
-      body: {
-        alert_id: String(alertId),
-        ref_id: String(trade.refId),
-        outcome_type: outcomeType,
-        outcome_time_utc: isoFromMs(outcomeTimeMs),
-        pnl_percent: pnlPercent ?? null,
-        duration_minutes: durationMinutes ?? null,
-        exit_price: exitPrice ?? null,
-        raw_payload: rawPayload || null,
-      },
-    })
-  );
-}
-
-function persistRejectionToSupabase({ symbol, side, setupType, reason, qualityScore, qualityGrade, rawPayload }) {
-  backgroundSupabase("REJECTION INSERT", () =>
-    supabaseRequest("alert_rejections", {
-      body: {
-        symbol: symbol || null,
-        direction: side || null,
-        setup_type: setupType || "UNKNOWN",
-        reason: String(reason || "unknown").toLowerCase(),
-        quality_score: qualityScore ?? null,
-        quality_grade: qualityGrade || null,
-        raw_payload: rawPayload || null,
-      },
-    })
-  );
+function persistRejectionToSupabase(payload) {
+  supabase.persistRejection(payload);
 }
 
 function persistDailySummaryToSupabase(dateKey) {
@@ -280,175 +115,7 @@ function persistDailySummaryToSupabase(dateKey) {
   const winrate = closed > 0 ? (wins / closed) * 100 : null;
   const openCount = Array.from(activeTrades.values()).filter((t) => !t.hit).length;
 
-  backgroundSupabase("DAILY SUMMARY UPSERT", () =>
-    supabaseRequest("daily_summaries", {
-      query: "?on_conflict=date_key",
-      prefer: "resolution=merge-duplicates,return=minimal",
-      body: {
-        date_key: dateKey,
-        alerts_count: stat.alerts || 0,
-        tp_count: stat.tp || 0,
-        sl_count: stat.sl || 0,
-        expired_count: stat.expired || 0,
-        time_exit_profit_count: stat.timeExitProfit || 0,
-        time_exit_loss_count: stat.timeExitLoss || 0,
-        open_count: openCount,
-        rejected_count: stat.rejectedSignals || 0,
-        winrate,
-        updated_at: new Date().toISOString(),
-      },
-    })
-  );
-}
-
-function parseNum(v) {
-  if (v === null || v === undefined || v === "") return null;
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
-}
-
-function fmtPrice(v) {
-  if (v === null || v === undefined || v === "") return "N/A";
-
-  const n = Number(v);
-
-  if (!Number.isFinite(n)) return String(v);
-  if (n >= 1000) return n.toFixed(2);
-  if (n >= 1) return n.toFixed(4);
-  if (n >= 0.01) return n.toFixed(5);
-  if (n >= 0.0001) return n.toFixed(8);
-
-  return n.toFixed(10);
-}
-
-function fmtPct(v, { signed = false } = {}) {
-  const n = Number(v);
-
-  if (!Number.isFinite(n)) return "N/A";
-  if (signed && n > 0) return `+${n.toFixed(2)}%`;
-  if (signed && n < 0) return `${n.toFixed(2)}%`;
-
-  return `${n.toFixed(2)}%`;
-}
-
-function fmtRR(v) {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return "N/A";
-  return `${n.toFixed(2)}R`;
-}
-
-function normalizeEmail(email) {
-  return String(email || "").trim().toLowerCase();
-}
-
-function normalizeSymbol(v) {
-  return String(v || "")
-    .toUpperCase()
-    .replace(/\s+/g, "")
-    .replace(".P", "")
-    .replace("BINANCE:", "")
-    .replace("/", "");
-}
-
-function normalizeSide(v) {
-  const x = String(v || "").toUpperCase().trim();
-
-  if (x === "LONG" || x === "SHORT") return x;
-  if (x === "BUY") return "LONG";
-  if (x === "SELL") return "SHORT";
-
-  return "N/A";
-}
-
-function normalizeEventType(v) {
-  return String(v || "").toLowerCase().trim().replace(/\s+/g, "_");
-}
-
-function normalizeSetupType(v) {
-  const x = String(v || "").toLowerCase().trim();
-
-  if (!x) return "UNKNOWN";
-
-  if (x.includes("trend_pullback")) return "TREND_PULLBACK";
-  if (x.includes("compression_breakout")) return "COMPRESSION_BREAKOUT";
-  if (x.includes("liquidity_reclaim")) return "LIQUIDITY_RECLAIM";
-  if (x.includes("htf_continuation")) return "HTF_CONTINUATION";
-  if (x.includes("reversal_expansion")) return "REVERSAL_EXPANSION";
-
-  if (x.includes("pull")) return "TREND_PULLBACK";
-  if (x.includes("compress") || x.includes("squeeze") || x.includes("break")) return "COMPRESSION_BREAKOUT";
-  if (x.includes("reclaim")) return "LIQUIDITY_RECLAIM";
-  if (x.includes("trend")) return "HTF_CONTINUATION";
-  if (x.includes("reversal") || x.includes("reverse")) return "REVERSAL_EXPANSION";
-
-  return x.toUpperCase();
-}
-
-function formatUtc(ts) {
-  let d;
-
-  if (ts === null || ts === undefined || ts === "") {
-    d = new Date();
-  } else {
-    const raw = String(ts).trim();
-
-    if (/^\d+$/.test(raw)) {
-      const num = Number(raw);
-      d = raw.length <= 10 ? new Date(num * 1000) : new Date(num);
-    } else {
-      d = new Date(raw);
-    }
-  }
-
-  if (Number.isNaN(d.getTime())) return "N/A";
-
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const day = String(d.getUTCDate()).padStart(2, "0");
-  const hh = String(d.getUTCHours()).padStart(2, "0");
-  const mm = String(d.getUTCMinutes()).padStart(2, "0");
-
-  return `${y}-${m}-${day} ${hh}:${mm} UTC`;
-}
-
-function getUtcDateKey(ts = Date.now()) {
-  const d = new Date(ts);
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const day = String(d.getUTCDate()).padStart(2, "0");
-
-  return `${y}-${m}-${day}`;
-}
-
-function eventTimeToMs(ts) {
-  if (ts === null || ts === undefined || ts === "") return Date.now();
-
-  const raw = String(ts).trim();
-
-  if (/^\d+$/.test(raw)) {
-    const num = Number(raw);
-    return raw.length <= 10 ? num * 1000 : num;
-  }
-
-  const d = new Date(raw);
-  return Number.isNaN(d.getTime()) ? Date.now() : d.getTime();
-}
-
-function escapeHtml(value) {
-  return String(value ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
-function escapeAttr(value) {
-  return String(value ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/"/g, "&quot;");
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  supabase.persistDailySummary({ dateKey, stat, openCount, winrate });
 }
 
 function isMajorSymbol(symbol) {
@@ -786,7 +453,7 @@ function allocNextRef() {
 async function allocSignalRef() {
   if (supabaseReady()) {
     try {
-      const allocated = await supabaseRpc("next_alert_ref", {
+      const allocated = await supabase.rpc("next_alert_ref", {
         floor_value: Math.max(REF_START_FLOOR, Number(nextRef) || REF_START_FLOOR),
       });
       const numericRef = Number(allocated);
@@ -2741,7 +2408,7 @@ app.use(express.json({ limit: "2mb" }));
 // ===== ROUTES =====
 app.get("/chart-template", async (req, res) => {
   try {
-    const templatePath = path.join(__dirname, "chart-template.html");
+    const templatePath = path.join(ROOT_DIR, "chart-template.html");
     const html = await fs.readFile(templatePath, "utf8");
 
     res.setHeader("Content-Type", "text/html; charset=utf-8");
