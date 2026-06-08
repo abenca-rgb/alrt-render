@@ -48,6 +48,7 @@ import {
   buildAlertText,
   buildHitText,
 } from "./src/services/messageTemplates.js";
+import { createInviteService } from "./src/services/inviteService.js";
 import { buildDailySummaryText as buildDailySummaryMessage } from "./src/services/summaryService.js";
 import { createSupabaseService } from "./src/services/supabaseService.js";
 import { createTelegramService } from "./src/services/telegramService.js";
@@ -75,6 +76,11 @@ const supabase = createSupabaseService({
 const chartService = createChartService({
   appBaseUrl: APP_BASE_URL,
   chartImageTemplate: CHART_IMAGE_TEMPLATE,
+});
+const inviteService = createInviteService({
+  botToken: BOT_TOKEN,
+  paidChatId: PAID_TELEGRAM_CHAT_ID,
+  freeChatId: FREE_CHAT_ID,
 });
 let telegram = null;
 
@@ -1671,49 +1677,11 @@ async function closeTrade({
 }
 // ===== STRIPE / MEMBER HELPERS =====
 async function createTelegramInviteLink({ expireHours = 48 } = {}) {
-  const expireDate = Math.floor(Date.now() / 1000 + expireHours * 60 * 60);
-
-  const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/createChatInviteLink`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: PAID_TELEGRAM_CHAT_ID,
-      member_limit: 1,
-      expire_date: expireDate,
-    }),
-  });
-
-  const data = await response.json();
-
-  if (!response.ok || !data.ok) {
-    throw new Error(`Telegram invite failed: ${JSON.stringify(data)}`);
-  }
-
-  return data.result.invite_link;
+  return inviteService.createPaidInviteLink({ expireHours });
 }
 
 async function createFreeTelegramInviteLink({ expireHours = 48 } = {}) {
-  if (!FREE_CHAT_ID) throw new Error("FREE_CHAT_ID missing");
-
-  const expireDate = Math.floor(Date.now() / 1000 + expireHours * 60 * 60);
-
-  const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/createChatInviteLink`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: FREE_CHAT_ID,
-      member_limit: 1,
-      expire_date: expireDate,
-    }),
-  });
-
-  const data = await response.json();
-
-  if (!response.ok || !data.ok) {
-    throw new Error(`Free Telegram invite failed: ${JSON.stringify(data)}`);
-  }
-
-  return data.result.invite_link;
+  return inviteService.createFreeInviteLink({ expireHours });
 }
 
 function findPaidMemberByStripe({ stripeCustomerId = null, stripeSubscriptionId = null }) {
