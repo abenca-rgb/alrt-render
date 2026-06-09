@@ -48,6 +48,7 @@ import {
 } from "./src/services/messageTemplates.js";
 import { createInviteService } from "./src/services/inviteService.js";
 import { createDailyStatsService } from "./src/services/dailyStatsService.js";
+import { createFreeChannelService } from "./src/services/freeChannelService.js";
 import { buildDailySummaryText as buildDailySummaryMessage } from "./src/services/summaryService.js";
 import {
   getLossGuardBlock,
@@ -340,41 +341,34 @@ const {
   recordRejectStat,
 } = dailyStatsService;
 
+const freeChannelService = createFreeChannelService({
+  freeSharedRefs,
+  freeChatId: FREE_CHAT_ID,
+  freeDailyLimit: FREE_DAILY_LIMIT,
+  getFreePostDate: () => freePostDate,
+  getFreePostsToday: () => freePostsToday,
+  setFreeCounter: ({ freePostDate: nextFreePostDate, freePostsToday: nextFreePostsToday }) => {
+    freePostDate = nextFreePostDate;
+    freePostsToday = nextFreePostsToday;
+  },
+  persistState,
+});
+
 // ===== FREE CHANNEL =====
 function resetFreeCounterIfNeeded(nowMs = Date.now()) {
-  const today = getUtcDateKey(nowMs);
-
-  if (freePostDate !== today) {
-    freePostDate = today;
-    freePostsToday = 0;
-  }
+  freeChannelService.resetCounterIfNeeded(nowMs);
 }
 
 function canSendFreeSignal(nowMs = Date.now()) {
-  resetFreeCounterIfNeeded(nowMs);
-  return Boolean(FREE_CHAT_ID) && freePostsToday < FREE_DAILY_LIMIT;
+  return freeChannelService.canSendSignal(nowMs);
 }
 
 async function markFreeSignalShared({ refId, symbol, side, sharedAtMs = Date.now() }) {
-  if (!refId) return;
-
-  resetFreeCounterIfNeeded(sharedAtMs);
-  freePostsToday += 1;
-
-  freeSharedRefs.set(String(refId), {
-    refId: String(refId),
-    symbol,
-    side,
-    sharedAtMs,
-    sharedAtUtc: formatUtc(sharedAtMs),
-  });
-
-  await persistState();
+  await freeChannelService.markSignalShared({ refId, symbol, side, sharedAtMs });
 }
 
 function wasSharedToFree(refId) {
-  if (!refId) return false;
-  return freeSharedRefs.has(String(refId));
+  return freeChannelService.wasShared(refId);
 }
 
 function wasRecentHitSent(hitKey) {
