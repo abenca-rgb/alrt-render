@@ -51,6 +51,7 @@ import { createDailyStatsService } from "./src/services/dailyStatsService.js";
 import { createFreeChannelService } from "./src/services/freeChannelService.js";
 import { createRecentHitService } from "./src/services/recentHitService.js";
 import { buildDailySummaryText as buildDailySummaryMessage } from "./src/services/summaryService.js";
+import { createSupabasePersistenceService } from "./src/services/supabasePersistenceService.js";
 import {
   getLossGuardBlock,
   registerLossStop,
@@ -151,38 +152,6 @@ let lastSummarySentDate = "";
 // ===== BODY PARSING NOTE =====
 // Stripe raw webhook moet vóór express.json staan.
 // Daarom wordt /webhook/stripe hieronder eerst geregistreerd.
-
-// ===== BASIC HELPERS =====
-function supabaseReady() {
-  return supabase.ready();
-}
-
-function persistAlertToSupabase(payload) {
-  supabase.persistAlert(payload);
-}
-
-function persistOutcomeToSupabase(payload) {
-  supabase.persistOutcome(payload);
-}
-
-function persistRejectionToSupabase(payload) {
-  supabase.persistRejection(payload);
-}
-
-function persistDailySummaryToSupabase(dateKey) {
-  const stat = getDailyStat(dateKey);
-  const closed =
-    stat.tp +
-    stat.sl +
-    (stat.timeExitProfit || 0) +
-    (stat.timeExitLoss || 0) +
-    (stat.expired || 0);
-  const wins = stat.tp + (stat.timeExitProfit || 0);
-  const winrate = closed > 0 ? (wins / closed) * 100 : null;
-  const openCount = Array.from(activeTrades.values()).filter((t) => !t.hit).length;
-
-  supabase.persistDailySummary({ dateKey, stat, openCount, winrate });
-}
 
 function isMajorSymbol(symbol) {
   return Boolean(getSymbolConfig(symbol).major);
@@ -341,6 +310,32 @@ const {
   recordCloseStat,
   recordRejectStat,
 } = dailyStatsService;
+
+const supabasePersistence = createSupabasePersistenceService({
+  supabase,
+  getDailyStat,
+  activeTrades,
+});
+
+function supabaseReady() {
+  return supabasePersistence.ready();
+}
+
+function persistAlertToSupabase(payload) {
+  supabasePersistence.persistAlert(payload);
+}
+
+function persistOutcomeToSupabase(payload) {
+  supabasePersistence.persistOutcome(payload);
+}
+
+function persistRejectionToSupabase(payload) {
+  supabasePersistence.persistRejection(payload);
+}
+
+function persistDailySummaryToSupabase(dateKey) {
+  supabasePersistence.persistDailySummary(dateKey);
+}
 
 const freeChannelService = createFreeChannelService({
   freeSharedRefs,
