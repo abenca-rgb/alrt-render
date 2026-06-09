@@ -49,6 +49,7 @@ import {
 import { createInviteService } from "./src/services/inviteService.js";
 import { createDailyStatsService } from "./src/services/dailyStatsService.js";
 import { createFreeChannelService } from "./src/services/freeChannelService.js";
+import { createRecentHitService } from "./src/services/recentHitService.js";
 import { buildDailySummaryText as buildDailySummaryMessage } from "./src/services/summaryService.js";
 import {
   getLossGuardBlock,
@@ -354,6 +355,11 @@ const freeChannelService = createFreeChannelService({
   persistState,
 });
 
+const recentHitService = createRecentHitService({
+  recentHitKeys,
+  persistState,
+});
+
 // ===== FREE CHANNEL =====
 function resetFreeCounterIfNeeded(nowMs = Date.now()) {
   freeChannelService.resetCounterIfNeeded(nowMs);
@@ -372,12 +378,11 @@ function wasSharedToFree(refId) {
 }
 
 function wasRecentHitSent(hitKey) {
-  return recentHitKeys.has(hitKey);
+  return recentHitService.wasSent(hitKey);
 }
 
 async function markRecentHit(hitKey) {
-  recentHitKeys.set(hitKey, Date.now());
-  await persistState();
+  await recentHitService.markSent(hitKey);
 }
 
 telegram = createTelegramService({
