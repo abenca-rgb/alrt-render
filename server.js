@@ -63,6 +63,12 @@ import {
   getOpenTradesForSymbol,
   hasOpenTradeForSymbol,
 } from "./src/services/tradeLookupService.js";
+import {
+  buildRecentHitKey,
+  buildTradeKey,
+  collectAllCandidateIds,
+  parseIncomingRef,
+} from "./src/services/tradeIdentityService.js";
 import { registerChartRoutes } from "./src/routes/chartRoutes.js";
 import { registerMemberRoutes } from "./src/routes/memberRoutes.js";
 import { registerStripeRoutes } from "./src/routes/stripeRoutes.js";
@@ -322,18 +328,6 @@ async function allocSignalRef() {
   return allocNextRef();
 }
 
-function parseIncomingRef(body) {
-  const raw = pick(body.ref_id, body.ref, body.reference, body.alert_ref);
-
-  if (!raw) return null;
-
-  const digits = String(raw).replace(/\D/g, "");
-
-  if (digits.length === 6) return digits;
-
-  return null;
-}
-
 const dailyStatsService = createDailyStatsService({
   dailyStats,
   persistState,
@@ -381,40 +375,6 @@ async function markFreeSignalShared({ refId, symbol, side, sharedAtMs = Date.now
 function wasSharedToFree(refId) {
   if (!refId) return false;
   return freeSharedRefs.has(String(refId));
-}
-
-// ===== HIT / MATCH HELPERS =====
-function buildTradeKey(symbol, side, refId) {
-  return `${symbol}|${side}|${refId}`;
-}
-
-function collectRawCandidateIds(body) {
-  return uniqueStrings([
-    pick(body.alert_id),
-    pick(body.signal_alert_id),
-    pick(body.parent_alert_id),
-    pick(body.source_alert_id),
-    pick(body.strategy_order_id),
-    pick(body.order_id),
-    pick(body.id),
-    pick(body.ref_id),
-  ]);
-}
-
-function collectAllCandidateIds({ body, symbol, side, eventTimeMs, refId }) {
-  const ms = Number.isFinite(eventTimeMs) ? String(eventTimeMs) : "";
-  const sec = Number.isFinite(eventTimeMs) ? String(Math.floor(eventTimeMs / 1000)) : "";
-
-  return uniqueStrings([
-    ...collectRawCandidateIds(body),
-    refId ? String(refId) : null,
-    symbol && side && ms ? `${symbol}-${side}-${ms}` : null,
-    symbol && side && sec ? `${symbol}-${side}-${sec}` : null,
-  ]);
-}
-
-function buildRecentHitKey({ symbol, closeType, refId, eventTime }) {
-  return `${symbol}|${closeType}|${refId}|${String(eventTime || "")}`;
 }
 
 function wasRecentHitSent(hitKey) {
