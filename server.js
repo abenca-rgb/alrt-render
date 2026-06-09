@@ -56,6 +56,7 @@ import { createInviteService } from "./src/services/inviteService.js";
 import { createDailyStatsService } from "./src/services/dailyStatsService.js";
 import { createFreeChannelService } from "./src/services/freeChannelService.js";
 import { createRecentHitService } from "./src/services/recentHitService.js";
+import { createRefAllocatorService } from "./src/services/refAllocatorService.js";
 import { buildDailySummaryText as buildDailySummaryMessage } from "./src/services/summaryService.js";
 import { createSupabasePersistenceService } from "./src/services/supabasePersistenceService.js";
 import {
@@ -158,35 +159,22 @@ let lastSummarySentDate = "";
 // Stripe raw webhook moet vóór express.json staan.
 // Daarom wordt /webhook/stripe hieronder eerst geregistreerd.
 
+const refAllocator = createRefAllocatorService({
+  supabase,
+  refStartFloor: REF_START_FLOOR,
+  getNextRef: () => nextRef,
+  setNextRef: (value) => {
+    nextRef = value;
+  },
+});
+
 // ===== REF HELPERS =====
 function allocNextRef() {
-  nextRef += 1;
-
-  if (!Number.isFinite(nextRef) || nextRef < REF_START_FLOOR) {
-    nextRef = REF_START_FLOOR;
-  }
-
-  return String(nextRef).padStart(6, "0");
+  return refAllocator.allocStateRef();
 }
 
 async function allocSignalRef() {
-  if (supabaseReady()) {
-    try {
-      const allocated = await supabase.rpc("next_alert_ref", {
-        floor_value: Math.max(REF_START_FLOOR, Number(nextRef) || REF_START_FLOOR),
-      });
-      const numericRef = Number(allocated);
-
-      if (Number.isFinite(numericRef) && numericRef >= REF_START_FLOOR) {
-        nextRef = Math.max(nextRef, numericRef);
-        return String(numericRef).padStart(6, "0");
-      }
-    } catch (err) {
-      console.error("SUPABASE REF ALLOCATOR FAILED - FALLING BACK TO STATE REF:", err?.message || String(err));
-    }
-  }
-
-  return allocNextRef();
+  return refAllocator.allocSignalRef();
 }
 
 const dailyStatsService = createDailyStatsService({
