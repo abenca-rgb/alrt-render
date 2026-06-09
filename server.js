@@ -69,6 +69,10 @@ import { registerStripeRoutes } from "./src/routes/stripeRoutes.js";
 import { registerSystemRoutes } from "./src/routes/systemRoutes.js";
 import { registerTradingViewRoutes } from "./src/routes/tradingViewRoutes.js";
 import { createStateFileStore } from "./src/state/stateFileStore.js";
+import {
+  createEmptyRuntimeState,
+  hydrateStateFromPayload,
+} from "./src/state/stateHydrationService.js";
 import { eventTimeToMs, formatUtc, getUtcDateKey } from "./src/utils/date.js";
 import { fmtPct, fmtPrice, fmtRR, parseNum } from "./src/utils/numbers.js";
 import {
@@ -515,105 +519,29 @@ async function loadState() {
     await stateFileStore.ensureDataDir();
 
     const parsed = await stateFileStore.readStatePayload();
-
-    const active = Array.isArray(parsed?.activeTrades) ? parsed.activeTrades : [];
-    const hits = Array.isArray(parsed?.recentHitKeys) ? parsed.recentHitKeys : [];
-    const lossStops = Array.isArray(parsed?.recentLossStops) ? parsed.recentLossStops : [];
-    const freeRefs = Array.isArray(parsed?.freeSharedRefs) ? parsed.freeSharedRefs : [];
-    const stats = Array.isArray(parsed?.dailyStats) ? parsed.dailyStats : [];
-
     const now = Date.now();
+    const hydrated = hydrateStateFromPayload({
+      parsed,
+      now,
+      refStartFloor: REF_START_FLOOR,
+      hitDedupTtlMs: HIT_DEDUP_TTL_MS,
+      lossGuardRetentionMs: LOSS_GUARD_RETENTION_MS,
+      freeRefTtlMs: FREE_REF_TTL_MS,
+      maps: {
+        activeTrades,
+        recentHitKeys,
+        recentLossStops,
+        freeSharedRefs,
+        dailyStats,
+        paidMembers,
+        freeMembers,
+      },
+    });
 
-    if (Number.isFinite(Number(parsed?.nextRef))) {
-      nextRef = Math.max(REF_START_FLOOR, Number(parsed.nextRef));
-    } else {
-      nextRef = REF_START_FLOOR;
-    }
-
-    freePostDate = typeof parsed?.freePostDate === "string" ? parsed.freePostDate : getUtcDateKey(now);
-    freePostsToday = Number.isFinite(Number(parsed?.freePostsToday)) ? Math.max(0, Number(parsed.freePostsToday)) : 0;
-    lastSummarySentDate = typeof parsed?.lastSummarySentDate === "string" ? parsed.lastSummarySentDate : "";
-
-    resetFreeCounterIfNeeded(now);
-
-    for (const item of active) {
-      if (!Array.isArray(item) || item.length !== 2) continue;
-
-      const [key, trade] = item;
-
-      if (!trade || typeof trade !== "object") continue;
-      if (!trade.createdAtMs) continue;
-      if (trade.hit) continue;
-
-      activeTrades.set(key, trade);
-    }
-
-    for (const item of hits) {
-      if (!Array.isArray(item) || item.length !== 2) continue;
-
-      const [key, ts] = item;
-
-      if (!ts || now - ts > HIT_DEDUP_TTL_MS) continue;
-
-      recentHitKeys.set(key, ts);
-    }
-
-    for (const item of lossStops) {
-      if (!Array.isArray(item) || item.length !== 2) continue;
-
-      const [key, info] = item;
-      const atMs = Number(info?.atMs);
-
-      if (!key || !Number.isFinite(atMs)) continue;
-      if (now - atMs > LOSS_GUARD_RETENTION_MS) continue;
-
-      recentLossStops.set(String(key), info);
-    }
-
-    for (const item of freeRefs) {
-      if (!Array.isArray(item) || item.length !== 2) continue;
-
-      const [refId, info] = item;
-
-      if (!refId || !info?.sharedAtMs) continue;
-      if (now - info.sharedAtMs > FREE_REF_TTL_MS) continue;
-
-      freeSharedRefs.set(String(refId), info);
-    }
-
-    if (Array.isArray(parsed?.paidMembers)) {
-      for (const item of parsed.paidMembers) {
-        if (!Array.isArray(item) || item.length !== 2) continue;
-        const [email, info] = item;
-        paidMembers.set(email, info);
-      }
-    }
-
-    if (Array.isArray(parsed?.members)) {
-      for (const item of parsed.members) {
-        if (!Array.isArray(item) || item.length !== 2) continue;
-        const [email, info] = item;
-        paidMembers.set(email, info);
-      }
-    }
-
-    if (Array.isArray(parsed?.freeMembers)) {
-      for (const item of parsed.freeMembers) {
-        if (!Array.isArray(item) || item.length !== 2) continue;
-        const [email, info] = item;
-        freeMembers.set(email, info);
-      }
-    }
-
-    for (const item of stats) {
-      if (!Array.isArray(item) || item.length !== 2) continue;
-
-      const [dateKey, stat] = item;
-
-      if (!dateKey || !stat || typeof stat !== "object") continue;
-
-      dailyStats.set(String(dateKey), stat);
-    }
+    nextRef = hydrated.nextRef;
+    freePostDate = hydrated.freePostDate;
+    freePostsToday = hydrated.freePostsToday;
+    lastSummarySentDate = hydrated.lastSummarySentDate;
 
     getDailyStat(getUtcDateKey(now));
 
@@ -629,10 +557,15 @@ async function loadState() {
     if (err.code === "ENOENT") {
       console.log("No state.json found yet, starting clean");
 
-      freePostDate = getUtcDateKey(Date.now());
-      freePostsToday = 0;
-      lastSummarySentDate = "";
-      nextRef = REF_START_FLOOR;
+      const emptyState = createEmptyRuntimeState({
+        refStartFloor: REF_START_FLOOR,
+        now: Date.now(),
+      });
+
+      nextRef = emptyState.nextRef;
+      freePostDate = emptyState.freePostDate;
+      freePostsToday = emptyState.freePostsToday;
+      lastSummarySentDate = emptyState.lastSummarySentDate;
 
       getDailyStat(freePostDate);
       return;
