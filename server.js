@@ -73,6 +73,7 @@ import {
   createEmptyRuntimeState,
   hydrateStateFromPayload,
 } from "./src/state/stateHydrationService.js";
+import { cleanupRuntimeState } from "./src/state/stateCleanupService.js";
 import { eventTimeToMs, formatUtc, getUtcDateKey } from "./src/utils/date.js";
 import { fmtPct, fmtPrice, fmtRR, parseNum } from "./src/utils/numbers.js";
 import {
@@ -588,39 +589,18 @@ async function upsertTrade(tradeKey, trade) {
 
 function cleanupState() {
   const now = Date.now();
-  let changed = false;
-
-  for (const [key, ts] of recentHitKeys.entries()) {
-    if (!ts || now - ts > HIT_DEDUP_TTL_MS) {
-      recentHitKeys.delete(key);
-      changed = true;
-    }
-  }
-
-  for (const [key, info] of recentLossStops.entries()) {
-    if (!info?.atMs || now - Number(info.atMs) > LOSS_GUARD_RETENTION_MS) {
-      recentLossStops.delete(key);
-      changed = true;
-    }
-  }
-
-  for (const [refId, info] of freeSharedRefs.entries()) {
-    if (!info?.sharedAtMs || now - info.sharedAtMs > FREE_REF_TTL_MS) {
-      freeSharedRefs.delete(refId);
-      changed = true;
-    }
-  }
-
-  const keepAfterMs = now - 10 * 24 * 60 * 60 * 1000;
-
-  for (const [dateKey] of dailyStats.entries()) {
-    const statDateMs = Date.parse(`${dateKey}T00:00:00Z`);
-
-    if (Number.isFinite(statDateMs) && statDateMs < keepAfterMs) {
-      dailyStats.delete(dateKey);
-      changed = true;
-    }
-  }
+  const { changed } = cleanupRuntimeState({
+    maps: {
+      recentHitKeys,
+      recentLossStops,
+      freeSharedRefs,
+      dailyStats,
+    },
+    now,
+    hitDedupTtlMs: HIT_DEDUP_TTL_MS,
+    lossGuardRetentionMs: LOSS_GUARD_RETENTION_MS,
+    freeRefTtlMs: FREE_REF_TTL_MS,
+  });
 
   resetFreeCounterIfNeeded(now);
 
