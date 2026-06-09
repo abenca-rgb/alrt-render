@@ -1,6 +1,5 @@
 import express from "express";
 import fetch from "node-fetch";
-import { promises as fs } from "fs";
 import {
   ALERT_QUALITY_FILTER_ENABLED,
   ALLOWED_SYMBOLS,
@@ -69,6 +68,7 @@ import { registerMemberRoutes } from "./src/routes/memberRoutes.js";
 import { registerStripeRoutes } from "./src/routes/stripeRoutes.js";
 import { registerSystemRoutes } from "./src/routes/systemRoutes.js";
 import { registerTradingViewRoutes } from "./src/routes/tradingViewRoutes.js";
+import { createStateFileStore } from "./src/state/stateFileStore.js";
 import { eventTimeToMs, formatUtc, getUtcDateKey } from "./src/utils/date.js";
 import { fmtPct, fmtPrice, fmtRR, parseNum } from "./src/utils/numbers.js";
 import {
@@ -108,6 +108,10 @@ const supabase = createSupabaseService({
 const chartService = createChartService({
   appBaseUrl: APP_BASE_URL,
   chartImageTemplate: CHART_IMAGE_TEMPLATE,
+});
+const stateFileStore = createStateFileStore({
+  dataDir: DATA_DIR,
+  stateFile: STATE_FILE,
 });
 const inviteService = createInviteService({
   botToken: BOT_TOKEN,
@@ -477,15 +481,9 @@ async function maybeSendDailySummary() {
 }
 
 // ===== PERSISTENCE =====
-async function ensureDataDir() {
-  await fs.mkdir(DATA_DIR, { recursive: true });
-}
-
 async function persistState() {
   savePromise = savePromise
     .then(async () => {
-      await ensureDataDir();
-
       const payload = {
         updatedAt: new Date().toISOString(),
         version: APP_VERSION,
@@ -503,21 +501,7 @@ async function persistState() {
         freeMembers: Array.from(freeMembers.entries()).map(([email, info]) => [email, info]),
       };
 
-      const serialized = JSON.stringify(payload, null, 2);
-      const tmpFile = `${STATE_FILE}.tmp`;
-      const backupFile = `${STATE_FILE}.bak`;
-
-      await fs.writeFile(tmpFile, serialized, "utf8");
-
-      try {
-        await fs.copyFile(STATE_FILE, backupFile);
-      } catch (err) {
-        if (err.code !== "ENOENT") {
-          console.error("PERSIST BACKUP ERROR:", err);
-        }
-      }
-
-      await fs.rename(tmpFile, STATE_FILE);
+      await stateFileStore.writeStatePayload(payload);
     })
     .catch((err) => {
       console.error("PERSIST SAVE ERROR:", err);
@@ -526,25 +510,11 @@ async function persistState() {
   return savePromise;
 }
 
-async function readStatePayload() {
-  try {
-    const raw = await fs.readFile(STATE_FILE, "utf8");
-    return JSON.parse(raw);
-  } catch (err) {
-    if (err.code === "ENOENT") throw err;
-
-    console.error("PRIMARY STATE READ FAILED, TRYING BACKUP:", err?.message || String(err));
-
-    const rawBackup = await fs.readFile(`${STATE_FILE}.bak`, "utf8");
-    return JSON.parse(rawBackup);
-  }
-}
-
 async function loadState() {
   try {
-    await ensureDataDir();
+    await stateFileStore.ensureDataDir();
 
-    const parsed = await readStatePayload();
+    const parsed = await stateFileStore.readStatePayload();
 
     const active = Array.isArray(parsed?.activeTrades) ? parsed.activeTrades : [];
     const hits = Array.isArray(parsed?.recentHitKeys) ? parsed.recentHitKeys : [];
