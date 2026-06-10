@@ -52,7 +52,7 @@ import { createSignalDeliveryService } from "./src/services/signalDeliveryServic
 import { createSupabasePersistenceService } from "./src/services/supabasePersistenceService.js";
 import { evaluateSignalAcceptance } from "./src/services/signalFilterService.js";
 import { createSupabaseService } from "./src/services/supabaseService.js";
-import { createTelegramService } from "./src/services/telegramService.js";
+import { createTelegramDispatchService } from "./src/services/telegramDispatchService.js";
 import { buildTradingViewContext } from "./src/services/tradingViewContextService.js";
 import {
   findOpenTradeByCandidateIds,
@@ -106,7 +106,16 @@ const inviteService = createInviteService({
   paidChatId: PAID_TELEGRAM_CHAT_ID,
   freeChatId: FREE_CHAT_ID,
 });
-let telegram = null;
+const telegramDispatch = createTelegramDispatchService({
+  botToken: BOT_TOKEN,
+  defaultChatId: CHAT_ID,
+  appendChartLinkIfMissing,
+});
+const {
+  sendTelegramMessage,
+  sendTelegramPhoto,
+  sendTelegramAlert,
+} = telegramDispatch;
 
 // ===== STATE =====
 const activeTrades = new Map();
@@ -225,12 +234,6 @@ function wasRecentHitSent(hitKey) {
 async function markRecentHit(hitKey) {
   await recentHitService.markSent(hitKey);
 }
-
-telegram = createTelegramService({
-  botToken: BOT_TOKEN,
-  defaultChatId: CHAT_ID,
-  appendChartLinkIfMissing,
-});
 
 // ===== DAILY SUMMARY =====
 const dailySummaryRunner = createDailySummaryRunnerService({
@@ -375,39 +378,6 @@ function cleanupState() {
   if (changed) {
     void persistState();
   }
-}
-
-// ===== TELEGRAM =====
-async function sendTelegramMessage(text, chatId = CHAT_ID) {
-  return telegram.sendMessage(text, chatId);
-}
-
-async function sendTelegramPhoto({
-  photoUrl = null,
-  photoBuffer = null,
-  filename = "chart.png",
-  caption = "",
-  chatId = CHAT_ID,
-}) {
-  return telegram.sendPhoto({ photoUrl, photoBuffer, filename, caption, chatId });
-}
-
-async function sendTelegramAlert({
-  text,
-  imageUrl = null,
-  imageBuffer = null,
-  imageFilename = "chart.png",
-  fallbackChartLink = "N/A",
-  chatId = CHAT_ID,
-}) {
-  return telegram.sendAlert({
-    text,
-    imageUrl,
-    imageBuffer,
-    imageFilename,
-    fallbackChartLink,
-    chatId,
-  });
 }
 
 const hitNotificationService = createHitNotificationService({
