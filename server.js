@@ -43,12 +43,12 @@ import { createCloseCompletionService } from "./src/services/closeCompletionServ
 import { appendChartLinkIfMissing } from "./src/services/messageTemplates.js";
 import { createInviteService } from "./src/services/inviteService.js";
 import { createDailyStatsService } from "./src/services/dailyStatsService.js";
+import { createDailySummaryRunnerService } from "./src/services/dailySummaryRunnerService.js";
 import { createFreeChannelService } from "./src/services/freeChannelService.js";
 import { createHitNotificationService } from "./src/services/hitNotificationService.js";
 import { createRecentHitService } from "./src/services/recentHitService.js";
 import { createRefAllocatorService } from "./src/services/refAllocatorService.js";
 import { createSignalDeliveryService } from "./src/services/signalDeliveryService.js";
-import { buildDailySummaryText as buildDailySummaryMessage } from "./src/services/summaryService.js";
 import { createSupabasePersistenceService } from "./src/services/supabasePersistenceService.js";
 import { evaluateSignalAcceptance } from "./src/services/signalFilterService.js";
 import { createSupabaseService } from "./src/services/supabaseService.js";
@@ -233,57 +233,25 @@ telegram = createTelegramService({
 });
 
 // ===== DAILY SUMMARY =====
-function buildDailySummaryText(dateKey) {
-  const stat = getDailyStat(dateKey);
+const dailySummaryRunner = createDailySummaryRunnerService({
+  enabled: DAILY_SUMMARY_ENABLED,
+  utcHour: DAILY_SUMMARY_UTC_HOUR,
+  utcMinute: DAILY_SUMMARY_UTC_MINUTE,
+  getDailyStat,
+  getActiveTrades: () => Array.from(activeTrades.values()),
+  getLastSummarySentDate: () => lastSummarySentDate,
+  setLastSummarySentDate: (dateKey) => {
+    lastSummarySentDate = dateKey;
+  },
+  sendTelegramMessage,
+  paidChatId: CHAT_ID,
+  freeChatId: FREE_CHAT_ID,
+  persistDailySummaryToSupabase,
+  persistState,
+});
 
-  return buildDailySummaryMessage({
-    dateKey,
-    stat,
-    activeTrades: Array.from(activeTrades.values()),
-  });
-}
-
-async function sendDailySummary(dateKey, force = false) {
-  if (!DAILY_SUMMARY_ENABLED && !force) return false;
-  if (!force && lastSummarySentDate === dateKey) return false;
-
-  const text = buildDailySummaryText(dateKey);
-
-  await sendTelegramMessage(text, CHAT_ID);
-
-  if (FREE_CHAT_ID) {
-    await sendTelegramMessage(text, FREE_CHAT_ID);
-  }
-
-  persistDailySummaryToSupabase(dateKey);
-
-  lastSummarySentDate = dateKey;
-  await persistState();
-
-  console.log("DAILY SUMMARY SENT:", {
-    dateKey,
-    force,
-    lastSummarySentDate,
-  });
-
-  return true;
-}
-
-async function maybeSendDailySummary() {
-  if (!DAILY_SUMMARY_ENABLED) return;
-
-  const now = new Date();
-  const hour = now.getUTCHours();
-  const minute = now.getUTCMinutes();
-
-  if (hour !== DAILY_SUMMARY_UTC_HOUR || minute !== DAILY_SUMMARY_UTC_MINUTE) return;
-
-  const dateKey = getUtcDateKey(Date.now());
-
-  if (lastSummarySentDate === dateKey) return;
-
-  await sendDailySummary(dateKey, false);
-}
+const sendDailySummary = dailySummaryRunner.sendDailySummary;
+const maybeSendDailySummary = dailySummaryRunner.maybeSendDailySummary;
 
 // ===== PERSISTENCE =====
 async function persistState() {
