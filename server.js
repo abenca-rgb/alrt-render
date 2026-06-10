@@ -38,8 +38,6 @@ import {
   SUPABASE_SERVICE_ROLE_KEY,
   SUPABASE_URL,
 } from "./src/config/env.js";
-import { getSymbolConfig, isAllowedTradingSymbol } from "./src/config/symbols.js";
-import { scoreAlertQuality } from "./src/services/alertScoring.js";
 import { buildWhyLine } from "./src/services/alertEnrichmentService.js";
 import { createChartService } from "./src/services/chartService.js";
 import { createCloseCompletionService } from "./src/services/closeCompletionService.js";
@@ -55,17 +53,14 @@ import { createRecentHitService } from "./src/services/recentHitService.js";
 import { createRefAllocatorService } from "./src/services/refAllocatorService.js";
 import { buildDailySummaryText as buildDailySummaryMessage } from "./src/services/summaryService.js";
 import { createSupabasePersistenceService } from "./src/services/supabasePersistenceService.js";
-import { getLossGuardBlock } from "./src/services/lossGuardService.js";
+import { evaluateSignalAcceptance } from "./src/services/signalFilterService.js";
 import { createSupabaseService } from "./src/services/supabaseService.js";
 import { createTelegramService } from "./src/services/telegramService.js";
 import { buildTradingViewContext } from "./src/services/tradingViewContextService.js";
 import {
-  countOpenTradesForSide,
-  countOpenTradesForSymbol,
   findOpenTradeByCandidateIds,
   findTradeByRefId,
   getOpenTradesForSymbol,
-  hasOpenTradeForSymbol,
 } from "./src/services/tradeLookupService.js";
 import {
   buildRecentHitKey,
@@ -96,9 +91,6 @@ import {
   isLikelySignalEvent,
   shouldInferHit,
 } from "./src/utils/outcomes.js";
-import {
-  validateTradeSanity,
-} from "./src/utils/tradeMath.js";
 
 const app = express();
 const supabase = createSupabaseService({
@@ -980,208 +972,90 @@ async function handleTradingViewWebhook(req, res) {
       return;
     }
 
-    if (!isAllowedTradingSymbol(symbol, ALLOWED_SYMBOLS)) {
-      console.log("SIGNAL SKIPPED BY SYMBOL FILTER:", {
-        symbol,
-        allowedSymbols: ALLOWED_SYMBOLS,
-      });
-      await recordRejectStat({
-        symbol,
-        side,
-        setupType,
-        reason: "symbol_filter",
-        ts: receivedAtMs,
-      });
-      return;
-    }
-
-    const symbolConfig = getSymbolConfig(symbol);
-
-    const sanity = validateTradeSanity({
-      symbol,
-      side,
-      entry: entryParsed,
-      tp: tpParsed,
-      sl: slParsed,
-      rr,
-    });
-
-    if (!sanity.ok) {
-      console.log("SIGNAL SKIPPED BY SANITY FILTER:", {
-        reason: sanity.reason,
-        symbol,
-        side,
-        entry: fmtPrice(entryParsed),
-        tp: fmtPrice(tpParsed),
-        sl: fmtPrice(slParsed),
-        rr: fmtRR(rr),
-        tpPct: sanity.tpPct,
-        slPct: sanity.slPct,
-        minTpPct: sanity.minTpPct,
-        minSlPct: sanity.minSlPct,
-        maxTpPct: sanity.maxTpPct,
-        maxSlPct: sanity.maxSlPct,
-      });
-      await recordRejectStat({
+    const signalGate = evaluateSignalAcceptance({
+      activeTrades,
+      recentLossStops,
+      getDailyStat,
+      allowedSymbols: ALLOWED_SYMBOLS,
+      maxOpenTradesPerSymbol: MAX_OPEN_TRADES_PER_SYMBOL,
+      maxOpenTradesPerSide: MAX_OPEN_TRADES_PER_SIDE,
+      dailySlCircuitBreaker: DAILY_SL_CIRCUIT_BREAKER,
+      minRrToSend: MIN_RR_TO_SEND,
+      alertQualityFilterEnabled: ALERT_QUALITY_FILTER_ENABLED,
+      candidateQualityFilterEnabled: CANDIDATE_QUALITY_FILTER_ENABLED,
+      lossGuardRetentionMs: LOSS_GUARD_RETENTION_MS,
+      lossGuardSymbolCooldownMs: LOSS_GUARD_SYMBOL_COOLDOWN_MS,
+      lossGuardMarketWindowMs: LOSS_GUARD_MARKET_WINDOW_MS,
+      lossGuardMarketCooldownMs: LOSS_GUARD_MARKET_COOLDOWN_MS,
+      lossGuardMarketLimit: LOSS_GUARD_MARKET_LIMIT,
+      context: {
         symbol,
         side,
         setupType,
-        reason: sanity.reason || "sanity_filter",
-        ts: receivedAtMs,
-      });
-      return;
-    }
-
-    if (hasOpenTradeForSymbol(activeTrades, symbol, MAX_OPEN_TRADES_PER_SYMBOL)) {
-      console.log("SIGNAL SKIPPED BY OPEN TRADE FILTER:", {
-        symbol,
-        openTradesForSymbol: countOpenTradesForSymbol(activeTrades, symbol),
-        maxOpenTradesPerSymbol: MAX_OPEN_TRADES_PER_SYMBOL,
-      });
-      await recordRejectStat({
-        symbol,
-        side,
-        setupType,
-        reason: "open_trade_filter",
-        ts: receivedAtMs,
-      });
-      return;
-    }
-
-    const todayStat = getDailyStat(getUtcDateKey(receivedAtMs));
-
-    if (DAILY_SL_CIRCUIT_BREAKER > 0 && (todayStat.sl || 0) >= DAILY_SL_CIRCUIT_BREAKER) {
-      console.log("SIGNAL SKIPPED BY DAILY SL CIRCUIT BREAKER:", {
-        symbol,
-        side,
-        setupType,
-        slToday: todayStat.sl || 0,
-        dailySlCircuitBreaker: DAILY_SL_CIRCUIT_BREAKER,
-      });
-      await recordRejectStat({
-        symbol,
-        side,
-        setupType,
-        reason: "daily_sl_circuit_breaker",
-        ts: receivedAtMs,
-      });
-      return;
-    }
-
-    const openTradesForSide = countOpenTradesForSide(activeTrades, side);
-
-    if (openTradesForSide >= MAX_OPEN_TRADES_PER_SIDE) {
-      console.log("SIGNAL SKIPPED BY SIDE EXPOSURE FILTER:", {
-        symbol,
-        side,
-        openTradesForSide,
-        maxOpenTradesPerSide: MAX_OPEN_TRADES_PER_SIDE,
-      });
-      await recordRejectStat({
-        symbol,
-        side,
-        setupType,
-        reason: "side_exposure_filter",
-        ts: receivedAtMs,
-      });
-      return;
-    }
-
-    const lossGuard = getLossGuardBlock(recentLossStops, {
-      symbol,
-      side,
-      now: receivedAtMs,
-      retentionMs: LOSS_GUARD_RETENTION_MS,
-      symbolCooldownMs: LOSS_GUARD_SYMBOL_COOLDOWN_MS,
-      marketWindowMs: LOSS_GUARD_MARKET_WINDOW_MS,
-      marketCooldownMs: LOSS_GUARD_MARKET_COOLDOWN_MS,
-      marketLimit: LOSS_GUARD_MARKET_LIMIT,
-    });
-
-    if (lossGuard.blocked) {
-      console.log("SIGNAL SKIPPED BY LOSS GUARD:", {
-        reason: lossGuard.reason,
-        symbol,
-        side,
-        setupType,
-        latestRef: lossGuard.latestRef,
-        latestAtUtc: lossGuard.latestAtUtc,
-        stopCount: lossGuard.stopCount,
-        cooldownMinutes: lossGuard.cooldownMinutes,
-      });
-      await recordRejectStat({
-        symbol,
-        side,
-        setupType,
-        reason: lossGuard.reason,
-        ts: receivedAtMs,
-      });
-      return;
-    }
-
-    const effectiveMinRr =
-      Number.isFinite(MIN_RR_TO_SEND) && MIN_RR_TO_SEND > 0
-        ? MIN_RR_TO_SEND
-        : symbolConfig.minRr;
-
-    if (Number.isFinite(effectiveMinRr) && effectiveMinRr > 0 && (!Number.isFinite(rr) || rr < effectiveMinRr)) {
-      console.log("SIGNAL SKIPPED BY MIN RR FILTER:", {
-        minRequired: effectiveMinRr,
-        symbol,
-        rr: fmtRR(rr),
-      });
-      await recordRejectStat({
-        symbol,
-        side,
-        setupType,
-        reason: "min_rr_filter",
-        ts: receivedAtMs,
-      });
-      return;
-    }
-
-    const quality = scoreAlertQuality({
-      symbolConfig,
-      side,
-      setupType,
-      rr,
-      tpPct,
-      slPct: sanity.slPct,
-      strength,
-      setupScore,
-      trendStrength,
-      volatilityState,
-      marketRegime,
-      session,
-      rsi,
-      atrPct,
-    });
-
-    const enforceQualityFilter =
-      ALERT_QUALITY_FILTER_ENABLED ||
-      (CANDIDATE_QUALITY_FILTER_ENABLED && isCandidateEvent);
-
-    if (enforceQualityFilter && !quality.passed) {
-      console.log("SIGNAL SKIPPED BY QUALITY FILTER:", {
-        symbol,
-        side,
+        entryParsed,
+        tpParsed,
+        slParsed,
+        rr,
+        tpPct,
+        strength,
+        setupScore,
+        trendStrength,
+        volatilityState,
+        marketRegime,
+        session,
+        rsi,
+        atrPct,
         isCandidateEvent,
-        qualityScore: quality.score,
-        qualityGrade: quality.grade,
-        minScore: quality.minScore,
-        minGrade: quality.minGrade,
-        reasons: quality.reasons,
-        penalties: quality.penalties,
-      });
+      },
+      receivedAtMs,
+    });
+
+    if (!signalGate.accepted) {
+      const details = signalGate.details || {};
+
+      if (signalGate.reason === "symbol_filter") {
+        console.log("SIGNAL SKIPPED BY SYMBOL FILTER:", details);
+      } else if (String(signalGate.reason || "").includes("sanity") || signalGate.sanity) {
+        console.log("SIGNAL SKIPPED BY SANITY FILTER:", {
+          ...details,
+          entry: fmtPrice(details.entry),
+          tp: fmtPrice(details.tp),
+          sl: fmtPrice(details.sl),
+          rr: fmtRR(details.rr),
+        });
+      } else if (signalGate.reason === "open_trade_filter") {
+        console.log("SIGNAL SKIPPED BY OPEN TRADE FILTER:", details);
+      } else if (signalGate.reason === "daily_sl_circuit_breaker") {
+        console.log("SIGNAL SKIPPED BY DAILY SL CIRCUIT BREAKER:", details);
+      } else if (signalGate.reason === "side_exposure_filter") {
+        console.log("SIGNAL SKIPPED BY SIDE EXPOSURE FILTER:", details);
+      } else if (signalGate.lossGuard) {
+        console.log("SIGNAL SKIPPED BY LOSS GUARD:", details);
+      } else if (signalGate.reason === "min_rr_filter") {
+        console.log("SIGNAL SKIPPED BY MIN RR FILTER:", {
+          ...details,
+          rr: fmtRR(details.rr),
+        });
+      } else if (signalGate.reason === "quality_filter") {
+        console.log("SIGNAL SKIPPED BY QUALITY FILTER:", details);
+      } else {
+        console.log("SIGNAL SKIPPED:", {
+          reason: signalGate.reason,
+          ...details,
+        });
+      }
+
       await recordRejectStat({
         symbol,
         side,
         setupType,
-        reason: "quality_filter",
+        reason: signalGate.reason || "signal_filter",
         ts: receivedAtMs,
       });
       return;
     }
+
+    const { quality } = signalGate;
 
     const refId = incomingRef || await allocSignalRef();
 
