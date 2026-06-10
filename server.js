@@ -68,10 +68,7 @@ import { registerStripeRoutes } from "./src/routes/stripeRoutes.js";
 import { registerSystemRoutes } from "./src/routes/systemRoutes.js";
 import { registerTradingViewRoutes } from "./src/routes/tradingViewRoutes.js";
 import { createStateFileStore } from "./src/state/stateFileStore.js";
-import {
-  createEmptyRuntimeState,
-  hydrateStateFromPayload,
-} from "./src/state/stateHydrationService.js";
+import { createRuntimeStateService } from "./src/state/runtimeStateService.js";
 import { cleanupRuntimeState } from "./src/state/stateCleanupService.js";
 import { eventTimeToMs, formatUtc, getUtcDateKey } from "./src/utils/date.js";
 import { fmtPct, fmtPrice, fmtRR, parseNum } from "./src/utils/numbers.js";
@@ -127,10 +124,39 @@ const paidMembers = new Map();
 const freeMembers = new Map();
 
 let nextRef = REF_START_FLOOR;
-let savePromise = Promise.resolve();
 let freePostDate = "";
 let freePostsToday = 0;
 let lastSummarySentDate = "";
+
+const runtimeState = createRuntimeStateService({
+  stateFileStore,
+  appVersion: APP_VERSION,
+  refStartFloor: REF_START_FLOOR,
+  hitDedupTtlMs: HIT_DEDUP_TTL_MS,
+  lossGuardRetentionMs: LOSS_GUARD_RETENTION_MS,
+  freeRefTtlMs: FREE_REF_TTL_MS,
+  maps: {
+    activeTrades,
+    recentHitKeys,
+    recentLossStops,
+    freeSharedRefs,
+    dailyStats,
+    paidMembers,
+    freeMembers,
+  },
+  getNextRef: () => nextRef,
+  getFreeCounter: () => ({ freePostDate, freePostsToday }),
+  getLastSummarySentDate: () => lastSummarySentDate,
+  setHydratedState: (hydrated) => {
+    nextRef = hydrated.nextRef;
+    freePostDate = hydrated.freePostDate;
+    freePostsToday = hydrated.freePostsToday;
+    lastSummarySentDate = hydrated.lastSummarySentDate;
+  },
+  ensureDailyStat: (now) => getDailyStat(getUtcDateKey(now)),
+});
+const persistState = runtimeState.persistState;
+const loadState = runtimeState.loadState;
 
 // ===== BODY PARSING NOTE =====
 // Stripe raw webhook moet vóór express.json staan.
@@ -255,97 +281,6 @@ const dailySummaryRunner = createDailySummaryRunnerService({
 
 const sendDailySummary = dailySummaryRunner.sendDailySummary;
 const maybeSendDailySummary = dailySummaryRunner.maybeSendDailySummary;
-
-// ===== PERSISTENCE =====
-async function persistState() {
-  savePromise = savePromise
-    .then(async () => {
-      const payload = {
-        updatedAt: new Date().toISOString(),
-        version: APP_VERSION,
-        nextRef,
-        refStartFloor: REF_START_FLOOR,
-        activeTrades: Array.from(activeTrades.entries()).map(([key, trade]) => [key, trade]),
-        recentHitKeys: Array.from(recentHitKeys.entries()).map(([key, ts]) => [key, ts]),
-        recentLossStops: Array.from(recentLossStops.entries()).map(([key, info]) => [key, info]),
-        freePostDate,
-        freePostsToday,
-        freeSharedRefs: Array.from(freeSharedRefs.entries()).map(([refId, info]) => [refId, info]),
-        dailyStats: Array.from(dailyStats.entries()).map(([dateKey, stat]) => [dateKey, stat]),
-        lastSummarySentDate,
-        paidMembers: Array.from(paidMembers.entries()).map(([email, info]) => [email, info]),
-        freeMembers: Array.from(freeMembers.entries()).map(([email, info]) => [email, info]),
-      };
-
-      await stateFileStore.writeStatePayload(payload);
-    })
-    .catch((err) => {
-      console.error("PERSIST SAVE ERROR:", err);
-    });
-
-  return savePromise;
-}
-
-async function loadState() {
-  try {
-    await stateFileStore.ensureDataDir();
-
-    const parsed = await stateFileStore.readStatePayload();
-    const now = Date.now();
-    const hydrated = hydrateStateFromPayload({
-      parsed,
-      now,
-      refStartFloor: REF_START_FLOOR,
-      hitDedupTtlMs: HIT_DEDUP_TTL_MS,
-      lossGuardRetentionMs: LOSS_GUARD_RETENTION_MS,
-      freeRefTtlMs: FREE_REF_TTL_MS,
-      maps: {
-        activeTrades,
-        recentHitKeys,
-        recentLossStops,
-        freeSharedRefs,
-        dailyStats,
-        paidMembers,
-        freeMembers,
-      },
-    });
-
-    nextRef = hydrated.nextRef;
-    freePostDate = hydrated.freePostDate;
-    freePostsToday = hydrated.freePostsToday;
-    lastSummarySentDate = hydrated.lastSummarySentDate;
-
-    getDailyStat(getUtcDateKey(now));
-
-    console.log(`Loaded ${activeTrades.size} active trades from disk`);
-    console.log(`Loaded ${recentHitKeys.size} recent hit keys from disk`);
-    console.log(`Loaded ${recentLossStops.size} recent loss stops from disk`);
-    console.log(`Loaded ${freeSharedRefs.size} free shared refs from disk`);
-    console.log(`Loaded ${dailyStats.size} daily stat days from disk`);
-    console.log(`Loaded ${paidMembers.size} paid members from disk`);
-    console.log(`Loaded ${freeMembers.size} free members from disk`);
-    console.log(`Loaded nextRef ${nextRef}`);
-  } catch (err) {
-    if (err.code === "ENOENT") {
-      console.log("No state.json found yet, starting clean");
-
-      const emptyState = createEmptyRuntimeState({
-        refStartFloor: REF_START_FLOOR,
-        now: Date.now(),
-      });
-
-      nextRef = emptyState.nextRef;
-      freePostDate = emptyState.freePostDate;
-      freePostsToday = emptyState.freePostsToday;
-      lastSummarySentDate = emptyState.lastSummarySentDate;
-
-      getDailyStat(freePostDate);
-      return;
-    }
-
-    console.error("PERSIST LOAD ERROR:", err);
-  }
-}
 
 async function removeTrade(tradeKey) {
   if (activeTrades.delete(tradeKey)) {
