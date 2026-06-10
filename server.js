@@ -47,6 +47,7 @@ import {
   resolveLeverage,
 } from "./src/services/alertEnrichmentService.js";
 import { createChartService } from "./src/services/chartService.js";
+import { createCloseCompletionService } from "./src/services/closeCompletionService.js";
 import {
   appendChartLinkIfMissing,
   buildAlertText,
@@ -59,10 +60,7 @@ import { createRecentHitService } from "./src/services/recentHitService.js";
 import { createRefAllocatorService } from "./src/services/refAllocatorService.js";
 import { buildDailySummaryText as buildDailySummaryMessage } from "./src/services/summaryService.js";
 import { createSupabasePersistenceService } from "./src/services/supabasePersistenceService.js";
-import {
-  getLossGuardBlock,
-  registerLossStop,
-} from "./src/services/lossGuardService.js";
+import { getLossGuardBlock } from "./src/services/lossGuardService.js";
 import { createSupabaseService } from "./src/services/supabaseService.js";
 import { createTelegramService } from "./src/services/telegramService.js";
 import {
@@ -479,6 +477,14 @@ const hitNotificationService = createHitNotificationService({
   defaultChatId: CHAT_ID,
 });
 
+const closeCompletionService = createCloseCompletionService({
+  recentLossStops,
+  recordCloseStat,
+  persistOutcomeToSupabase,
+  markRecentHit,
+  removeTrade,
+});
+
 async function sendHitAlert({
   trade,
   closeType,
@@ -562,34 +568,15 @@ async function closeTrade({
     }
   }
 
-  await recordCloseStat({
-    refId: trade.refId,
-    symbol: trade.symbol,
-    setupType: trade.setupType || "UNKNOWN",
-    result: finalCloseType,
-    exitPrice: sent.exitPrice,
-    movePct: sent.movePct,
-    ts: closedAtMs,
-  });
-
-  persistOutcomeToSupabase({
+  await closeCompletionService.completeClosedTrade({
+    matched,
     trade,
-    outcomeType: finalCloseType,
-    outcomeTimeMs: closedAtMs,
-    pnlPercent: sent.movePct,
-    durationMinutes: Number.isFinite(closedAtMs) && Number.isFinite(trade.createdAtMs)
-      ? Math.max(0, Math.round((closedAtMs - trade.createdAtMs) / 60000))
-      : null,
-    exitPrice: sent.exitPrice,
-    rawPayload: {
-      source,
-      matchType: matched.matchType,
-    },
+    finalCloseType,
+    closedAtMs,
+    sent,
+    hitKey,
+    source,
   });
-
-  registerLossStop(recentLossStops, trade, finalCloseType, closedAtMs);
-  await markRecentHit(hitKey);
-  await removeTrade(matched.key);
 
   console.log("TRADE CLOSED:", {
     symbol: trade.symbol,
