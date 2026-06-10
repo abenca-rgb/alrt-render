@@ -38,19 +38,16 @@ import {
   SUPABASE_SERVICE_ROLE_KEY,
   SUPABASE_URL,
 } from "./src/config/env.js";
-import { buildWhyLine } from "./src/services/alertEnrichmentService.js";
 import { createChartService } from "./src/services/chartService.js";
 import { createCloseCompletionService } from "./src/services/closeCompletionService.js";
-import {
-  appendChartLinkIfMissing,
-  buildAlertText,
-} from "./src/services/messageTemplates.js";
+import { appendChartLinkIfMissing } from "./src/services/messageTemplates.js";
 import { createInviteService } from "./src/services/inviteService.js";
 import { createDailyStatsService } from "./src/services/dailyStatsService.js";
 import { createFreeChannelService } from "./src/services/freeChannelService.js";
 import { createHitNotificationService } from "./src/services/hitNotificationService.js";
 import { createRecentHitService } from "./src/services/recentHitService.js";
 import { createRefAllocatorService } from "./src/services/refAllocatorService.js";
+import { createSignalDeliveryService } from "./src/services/signalDeliveryService.js";
 import { buildDailySummaryText as buildDailySummaryMessage } from "./src/services/summaryService.js";
 import { createSupabasePersistenceService } from "./src/services/supabasePersistenceService.js";
 import { evaluateSignalAcceptance } from "./src/services/signalFilterService.js";
@@ -64,7 +61,6 @@ import {
 } from "./src/services/tradeLookupService.js";
 import {
   buildRecentHitKey,
-  buildTradeKey,
 } from "./src/services/tradeIdentityService.js";
 import { registerChartRoutes } from "./src/routes/chartRoutes.js";
 import { registerMemberRoutes } from "./src/routes/memberRoutes.js";
@@ -83,8 +79,6 @@ import {
   escapeHtml,
   normalizeEmail,
   pick,
-  sanitizePayloadForStorage,
-  uniqueStrings,
 } from "./src/utils/payload.js";
 import {
   getTimeExitResult,
@@ -460,6 +454,20 @@ const closeCompletionService = createCloseCompletionService({
   persistOutcomeToSupabase,
   markRecentHit,
   removeTrade,
+});
+
+const signalDeliveryService = createSignalDeliveryService({
+  allocSignalRef,
+  chartService,
+  sendTelegramAlert,
+  canSendFreeSignal,
+  markFreeSignalShared,
+  upsertTrade,
+  recordSignalStat,
+  persistAlertToSupabase,
+  maxTradeAgeMs: MAX_TRADE_AGE_MS,
+  paidChatId: CHAT_ID,
+  freeChatId: FREE_CHAT_ID,
 });
 
 async function sendHitAlert({
@@ -1057,192 +1065,51 @@ async function handleTradingViewWebhook(req, res) {
 
     const { quality } = signalGate;
 
-    const refId = incomingRef || await allocSignalRef();
-
-    const candidateIds = uniqueStrings([
-      ...candidateIdsBase,
-      refId,
-    ]);
-
-    const primaryAlertId = candidateIds[0] || refId;
-
-    const chartAssets = await chartService.buildChartDeliveryAssets({
-      symbol,
-      side,
-      refId,
-      inlineBody: body,
-    });
-
-    const whyLine = buildWhyLine({
+    const delivery = await signalDeliveryService.deliverSignal({
       body,
-      symbol,
-      side,
-      setupType,
-      strength,
-      rr,
-      session,
-      marketRegime,
-    });
-
-    const showChartLink = !chartAssets.imageUrl && !chartAssets.imageBuffer;
-
-    const text = buildAlertText({
-      symbol,
-      side,
-      entry: entryParsed,
-      tp: tpParsed,
-      sl: slParsed,
-      rr,
-      leverage,
-      strength,
+      context: {
+        symbol,
+        side,
+        entryParsed,
+        tpParsed,
+        slParsed,
+        rr,
+        tpPct,
+        leverage,
+        strength,
+        setupType,
+        setupScore,
+        trendStrength,
+        volatilityState,
+        marketRegime,
+        session,
+        confidenceLevel,
+        estimatedHoldDuration,
+        timeframe,
+        pineVersion,
+        risk,
+      },
+      quality,
+      incomingRef,
+      candidateIdsBase,
       prettyTime,
-      whyLine,
       chartLink,
-      showChartLink,
-      refId,
-      tpPct,
-      setupType,
-      setupScore,
-      qualityScore: quality.score,
-      qualityGrade: quality.grade,
-      session,
-      marketRegime,
-      confidenceLevel,
-    });
-
-    const sendResult = await sendTelegramAlert({
-      text,
-      imageUrl: chartAssets.imageUrl,
-      imageBuffer: chartAssets.imageBuffer,
-      imageFilename: chartAssets.imageFilename,
-      fallbackChartLink: chartLink,
-      chatId: CHAT_ID,
-    });
-
-    let sharedToFree = false;
-
-    if (canSendFreeSignal(receivedAtMs)) {
-      try {
-        await sendTelegramAlert({
-          text,
-          imageUrl: chartAssets.imageUrl,
-          imageBuffer: chartAssets.imageBuffer,
-          imageFilename: chartAssets.imageFilename,
-          fallbackChartLink: chartLink,
-          chatId: FREE_CHAT_ID,
-        });
-
-        await markFreeSignalShared({
-          refId,
-          symbol,
-          side,
-          sharedAtMs: receivedAtMs,
-        });
-
-        sharedToFree = true;
-      } catch (err) {
-        console.error("FREE SIGNAL SEND FAILED:", {
-          refId,
-          error: err?.message || String(err),
-        });
-      }
-    }
-
-    const tradeKey = buildTradeKey(symbol, side, refId);
-
-    await upsertTrade(tradeKey, {
-      tradeKey,
-      refId,
-      symbol,
-      side,
-      entry: entryParsed,
-      tp: tpParsed,
-      sl: slParsed,
-      leverage,
-      createdAtMs: receivedAtMs,
-      createdAtUtc: prettyTime,
-      maxAgeMs: MAX_TRADE_AGE_MS,
-      hit: false,
-      hitType: null,
-      hitAtMs: null,
-      primaryAlertId,
-      alertIds: candidateIds,
-      setupType,
-      setupScore,
-      qualityScore: quality.score,
-      qualityGrade: quality.grade,
-      trendStrength,
-      volatilityState,
-      marketRegime,
-      session,
-      confidenceLevel,
-      estimatedHoldDuration,
-      strength,
-      rr,
-      chartLink,
-      chartImageUrl: chartAssets.imageUrl,
-      postedUtc: prettyTime,
-    });
-
-    await recordSignalStat({
-      refId,
-      symbol,
-      side,
-      strength,
-      setupType,
-      setupScore,
-      qualityScore: quality.score,
-      qualityGrade: quality.grade,
-      trendStrength,
-      volatilityState,
-      marketRegime,
-      session,
-      confidenceLevel,
-      estimatedHoldDuration,
-      entry: entryParsed,
-      tp: tpParsed,
-      sl: slParsed,
-      rr,
-      sharedToFree,
-      ts: receivedAtMs,
-    });
-
-    persistAlertToSupabase({
-      alertId: primaryAlertId,
-      refId,
-      symbol,
-      side,
-      timeframe,
-      setupType,
-      entry: entryParsed,
-      tp: tpParsed,
-      sl: slParsed,
-      rr,
-      riskScore: parseNum(risk),
-      qualityScore: quality.score,
-      qualityGrade: quality.grade,
-      whyText: whyLine,
-      signalTimeMs: receivedAtMs,
-      session,
-      marketRegime,
-      pineVersion,
-      isFreeShared: sharedToFree,
-      rawPayload: sanitizePayloadForStorage(body),
+      receivedAtMs,
     });
 
     console.log("ALERT SENT:", {
       version: APP_VERSION,
       symbol,
       side,
-      refId,
-      setupType,
-      setupScore,
-      qualityScore: quality.score,
-      qualityGrade: quality.grade,
-      rr: fmtRR(rr),
-      tpPct: fmtPct(tpPct),
-      imageUsed: sendResult.usedPhoto,
-      sharedToFree,
+      refId: delivery.refId,
+      setupType: delivery.setupType,
+      setupScore: delivery.setupScore,
+      qualityScore: delivery.qualityScore,
+      qualityGrade: delivery.qualityGrade,
+      rr: fmtRR(delivery.rr),
+      tpPct: fmtPct(delivery.tpPct),
+      imageUsed: delivery.imageUsed,
+      sharedToFree: delivery.sharedToFree,
       nextRef,
     });
   } catch (err) {
