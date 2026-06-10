@@ -55,12 +55,8 @@ import { createSupabasePersistenceService } from "./src/services/supabasePersist
 import { evaluateSignalAcceptance } from "./src/services/signalFilterService.js";
 import { createSupabaseService } from "./src/services/supabaseService.js";
 import { createTelegramDispatchService } from "./src/services/telegramDispatchService.js";
+import { createTradingViewCloseService } from "./src/services/tradingViewCloseService.js";
 import { buildTradingViewContext } from "./src/services/tradingViewContextService.js";
-import {
-  findOpenTradeByCandidateIds,
-  findTradeByRefId,
-  getOpenTradesForSymbol,
-} from "./src/services/tradeLookupService.js";
 import { registerChartRoutes } from "./src/routes/chartRoutes.js";
 import { registerMemberRoutes } from "./src/routes/memberRoutes.js";
 import { registerStripeRoutes } from "./src/routes/stripeRoutes.js";
@@ -72,9 +68,7 @@ import { cleanupRuntimeState } from "./src/state/stateCleanupService.js";
 import { formatUtc, getUtcDateKey } from "./src/utils/date.js";
 import { fmtPct, fmtPrice, fmtRR, parseNum } from "./src/utils/numbers.js";
 import {
-  getTimeExitResult,
   isLikelySignalEvent,
-  shouldInferHit,
 } from "./src/utils/outcomes.js";
 
 const app = express();
@@ -347,6 +341,14 @@ const signalDeliveryService = createSignalDeliveryService({
 });
 
 const closeTrade = closeFlowService.closeTrade;
+
+const tradingViewCloseService = createTradingViewCloseService({
+  activeTrades,
+  maxTradeAgeMs: MAX_TRADE_AGE_MS,
+  closeTrade,
+  recordRejectStat,
+  wasRecentHitSent,
+});
 // ===== STRIPE / MEMBER HELPERS =====
 async function createTelegramInviteLink({ expireHours = 48 } = {}) {
   return inviteService.createPaidInviteLink({ expireHours });
@@ -509,105 +511,20 @@ async function handleTradingViewWebhook(req, res) {
       nextRef,
     });
 
-    // ===== SERVER TIME EXIT CHECK =====
-    // Alleen als er voor dit symbool een nieuwe webhook binnenkomt.
-    // Pine time-exits blijven leidend.
-    if (symbol) {
-      for (const [key, trade] of Array.from(activeTrades.entries())) {
-        if (trade.symbol !== symbol) continue;
-        if (trade.hit) continue;
+    const closeLifecycleHandled = await tradingViewCloseService.handleCloseLifecycle({
+      symbol,
+      side,
+      setupType,
+      explicitCloseType,
+      incomingRef,
+      candidateIdsBase,
+      eventTime,
+      currentPrice,
+      receivedAtMs,
+    });
 
-        const ageMs = receivedAtMs - (trade.createdAtMs || receivedAtMs);
-
-        if (ageMs >= MAX_TRADE_AGE_MS) {
-          const finalPrice = Number.isFinite(currentPrice) ? currentPrice : trade.entry;
-          const result = getTimeExitResult(trade, finalPrice);
-
-          await closeTrade({
-            matched: {
-              key,
-              trade,
-              matchType: "server_time_exit",
-            },
-            closeType: result,
-            eventTime,
-            currentPrice: finalPrice,
-            source: "server_time_exit",
-          });
-        }
-      }
-    }
-
-    // ===== EXPLICIT PINE CLOSES =====
-    // Belangrijk: GEEN latest-symbol fallback meer.
-    // Alleen ref/candidate ID matching.
-    if (explicitCloseType && symbol) {
-      const matched =
-        findOpenTradeByCandidateIds(activeTrades, candidateIdsBase) ||
-        findTradeByRefId(activeTrades, incomingRef);
-
-      if (matched) {
-        await closeTrade({
-          matched,
-          closeType: explicitCloseType,
-          eventTime,
-          currentPrice,
-          source: "explicit_pine_close",
-        });
-
-        return;
-      }
-
-      console.log("EXPLICIT CLOSE RECEIVED BUT NO MATCHED TRADE FOUND - IGNORING OLD/UNMATCHED CLOSE:", {
-        symbol,
-        explicitCloseType,
-        incomingRef,
-        candidateIdsBase,
-        openTradesForSymbol: getOpenTradesForSymbol(activeTrades, symbol),
-      });
-
-      await recordRejectStat({
-        symbol,
-        side,
-        setupType,
-        reason: `unmatched_${String(explicitCloseType).toLowerCase()}`,
-        ts: receivedAtMs,
-      });
-
+    if (closeLifecycleHandled) {
       return;
-    }
-
-    // ===== INFER HITS FROM PRICE =====
-    // Alleen voor eigen open trades en alleen als prijs level raakt.
-    if (symbol && Number.isFinite(currentPrice)) {
-      const hitKeysToRemove = [];
-
-      for (const [key, trade] of activeTrades.entries()) {
-        if (trade.symbol !== symbol) continue;
-        if (trade.hit) continue;
-
-        const inferredHit = shouldInferHit(trade, currentPrice);
-        if (!inferredHit) continue;
-
-        const inferredHitKey = `${symbol}|${trade.refId}|${inferredHit}|${Math.floor(receivedAtMs / 60000)}`;
-        if (wasRecentHitSent(inferredHitKey)) continue;
-
-        const closed = await closeTrade({
-          matched: {
-            key,
-            trade,
-            matchType: "price_inference",
-          },
-          closeType: inferredHit,
-          eventTime: receivedAtMs,
-          currentPrice,
-          source: "price_inference",
-        });
-
-        if (closed) {
-          hitKeysToRemove.push(key);
-        }
-      }
     }
 
     // ===== NORMAL SIGNAL =====
