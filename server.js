@@ -46,6 +46,7 @@ import { createInviteService } from "./src/services/inviteService.js";
 import { createDailyStatsService } from "./src/services/dailyStatsService.js";
 import { createDailySummaryRunnerService } from "./src/services/dailySummaryRunnerService.js";
 import { createFreeChannelService } from "./src/services/freeChannelService.js";
+import { createHealthStateService } from "./src/services/healthStateService.js";
 import { createHitNotificationService } from "./src/services/hitNotificationService.js";
 import { createRecentHitService } from "./src/services/recentHitService.js";
 import { createRefAllocatorService } from "./src/services/refAllocatorService.js";
@@ -380,24 +381,21 @@ registerChartRoutes(app, {
   chartService,
 });
 
-function getHealthState() {
-  resetFreeCounterIfNeeded(Date.now());
-
-  return {
-    supabaseReady: supabaseReady(),
-    activeTrades: activeTrades.size,
-    recentHitKeys: recentHitKeys.size,
-    recentLossStops: recentLossStops.size,
-    nextRef,
-    freePostDate,
-    freePostsToday,
-    freeSharedRefs: freeSharedRefs.size,
-    dailyStatsDays: dailyStats.size,
-    lastSummarySentDate,
-    paidMembers: paidMembers.size,
-    freeMembers: freeMembers.size,
-  };
-}
+const healthStateService = createHealthStateService({
+  supabaseReady,
+  activeTrades,
+  recentHitKeys,
+  recentLossStops,
+  getNextRef: () => nextRef,
+  getFreePostDate: () => freePostDate,
+  getFreePostsToday: () => freePostsToday,
+  freeSharedRefs,
+  dailyStats,
+  getLastSummarySentDate: () => lastSummarySentDate,
+  paidMembers,
+  freeMembers,
+  resetFreeCounterIfNeeded,
+});
 
 registerSystemRoutes(app, {
   config: {
@@ -425,7 +423,7 @@ registerSystemRoutes(app, {
     dailySummaryUtcMinute: DAILY_SUMMARY_UTC_MINUTE,
     summaryAdminToken: SUMMARY_ADMIN_TOKEN,
   },
-  getHealthState,
+  getHealthState: healthStateService.getHealthState,
   sendDailySummary,
   getUtcDateKey,
 });
