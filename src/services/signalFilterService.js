@@ -9,6 +9,39 @@ import {
 import { getUtcDateKey } from "../utils/date.js";
 import { validateTradeSanity } from "../utils/tradeMath.js";
 
+const HISTORICAL_DUPLICATE_COOLDOWN_MS = 90 * 60 * 1000;
+const HISTORICAL_DUPLICATE_ENTRY_TOLERANCE_PCT = 0.25;
+
+function findRecentSimilarSignal(stat, {
+  symbol,
+  side,
+  entry,
+  receivedAtMs,
+}) {
+  if (!stat?.byRef || !symbol || !side || !Number.isFinite(entry)) return null;
+
+  for (const item of Object.values(stat.byRef)) {
+    if (!item || item.symbol !== symbol || item.side !== side) continue;
+    if (!Number.isFinite(item.entry) || !Number.isFinite(item.openedAtMs)) continue;
+
+    const ageMs = receivedAtMs - item.openedAtMs;
+    if (ageMs < 0 || ageMs > HISTORICAL_DUPLICATE_COOLDOWN_MS) continue;
+
+    const entryDistancePct = Math.abs((entry - item.entry) / entry) * 100;
+    if (entryDistancePct <= HISTORICAL_DUPLICATE_ENTRY_TOLERANCE_PCT) {
+      return {
+        refId: item.refId,
+        openedAtUtc: item.openedAtUtc,
+        entry: item.entry,
+        entryDistancePct,
+        cooldownMinutes: Math.round(HISTORICAL_DUPLICATE_COOLDOWN_MS / 60000),
+      };
+    }
+  }
+
+  return null;
+}
+
 export function evaluateSignalAcceptance({
   activeTrades,
   recentLossStops,
@@ -46,6 +79,7 @@ export function evaluateSignalAcceptance({
     rsi,
     atrPct,
     isCandidateEvent,
+    eventTimeMs,
   } = context;
 
   if (!isAllowedTradingSymbol(symbol, allowedSymbols)) {
@@ -111,6 +145,33 @@ export function evaluateSignalAcceptance({
   }
 
   const todayStat = getDailyStat(getUtcDateKey(receivedAtMs));
+  const duplicateSignal = findRecentSimilarSignal(todayStat, {
+    symbol,
+    side,
+    entry: entryParsed,
+    receivedAtMs,
+  });
+
+  if (duplicateSignal) {
+    return {
+      accepted: false,
+      reason: "duplicate_cooldown_filter",
+      symbolConfig,
+      sanity,
+      details: {
+        symbol,
+        side,
+        setupType,
+        entry: entryParsed,
+        previousRef: duplicateSignal.refId,
+        previousOpenedAtUtc: duplicateSignal.openedAtUtc,
+        previousEntry: duplicateSignal.entry,
+        entryDistancePct: duplicateSignal.entryDistancePct,
+        cooldownMinutes: duplicateSignal.cooldownMinutes,
+      },
+    };
+  }
+
   const slToday = todayStat.sl || 0;
 
   if (dailySlCircuitBreaker > 0 && slToday >= dailySlCircuitBreaker) {
@@ -199,6 +260,7 @@ export function evaluateSignalAcceptance({
 
   const quality = scoreAlertQuality({
     symbolConfig,
+    symbol,
     side,
     setupType,
     rr,
@@ -212,6 +274,7 @@ export function evaluateSignalAcceptance({
     session,
     rsi,
     atrPct,
+    eventTimeMs,
   });
 
   const enforceQualityFilter =

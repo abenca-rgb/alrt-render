@@ -468,6 +468,7 @@ async function handleTradingViewWebhook(req, res) {
       explicitCloseType,
       candidateIdsBase,
       eventTime,
+      eventTimeMs,
       rsi,
       atrPct,
       risk,
@@ -571,6 +572,7 @@ async function handleTradingViewWebhook(req, res) {
         rsi,
         atrPct,
         isCandidateEvent,
+        eventTimeMs,
       },
       receivedAtMs,
     });
@@ -590,6 +592,12 @@ async function handleTradingViewWebhook(req, res) {
         });
       } else if (signalGate.reason === "open_trade_filter") {
         console.log("SIGNAL SKIPPED BY OPEN TRADE FILTER:", details);
+      } else if (signalGate.reason === "duplicate_cooldown_filter") {
+        console.log("SIGNAL SKIPPED BY DUPLICATE COOLDOWN FILTER:", {
+          ...details,
+          entry: fmtPrice(details.entry),
+          previousEntry: fmtPrice(details.previousEntry),
+        });
       } else if (signalGate.reason === "daily_sl_circuit_breaker") {
         console.log("SIGNAL SKIPPED BY DAILY SL CIRCUIT BREAKER:", details);
       } else if (signalGate.reason === "side_exposure_filter") {
