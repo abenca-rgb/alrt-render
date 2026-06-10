@@ -50,6 +50,7 @@ import { createHitNotificationService } from "./src/services/hitNotificationServ
 import { createRecentHitService } from "./src/services/recentHitService.js";
 import { createRefAllocatorService } from "./src/services/refAllocatorService.js";
 import { createSignalDeliveryService } from "./src/services/signalDeliveryService.js";
+import { createStripeMemberService } from "./src/services/stripeMemberService.js";
 import { createSupabasePersistenceService } from "./src/services/supabasePersistenceService.js";
 import { evaluateSignalAcceptance } from "./src/services/signalFilterService.js";
 import { createSupabaseService } from "./src/services/supabaseService.js";
@@ -70,11 +71,6 @@ import { createRuntimeStateService } from "./src/state/runtimeStateService.js";
 import { cleanupRuntimeState } from "./src/state/stateCleanupService.js";
 import { formatUtc, getUtcDateKey } from "./src/utils/date.js";
 import { fmtPct, fmtPrice, fmtRR, parseNum } from "./src/utils/numbers.js";
-import {
-  escapeHtml,
-  normalizeEmail,
-  pick,
-} from "./src/utils/payload.js";
 import {
   getTimeExitResult,
   isLikelySignalEvent,
@@ -360,143 +356,14 @@ async function createFreeTelegramInviteLink({ expireHours = 48 } = {}) {
   return inviteService.createFreeInviteLink({ expireHours });
 }
 
-function findPaidMemberByStripe({ stripeCustomerId = null, stripeSubscriptionId = null }) {
-  for (const [email, member] of paidMembers.entries()) {
-    if (
-      (stripeCustomerId && member.stripeCustomerId === stripeCustomerId) ||
-      (stripeSubscriptionId && member.stripeSubscriptionId === stripeSubscriptionId)
-    ) {
-      return { email, member };
-    }
-  }
+const stripeMemberService = createStripeMemberService({
+  paidMembers,
+  createPaidInviteLink: createTelegramInviteLink,
+  persistState,
+  sendTelegramMessage,
+});
 
-  return null;
-}
-
-async function handleStripeEvent(event) {
-  console.log("STRIPE EVENT:", event?.type);
-
-  if (event?.type === "checkout.session.completed") {
-    const session = event.data.object;
-
-    const email = normalizeEmail(
-      pick(session.customer_details?.email, session.customer_email)
-    );
-
-    if (!email) return;
-
-    const inviteLink = await createTelegramInviteLink({ expireHours: 48 });
-    const existing = paidMembers.get(email) || {};
-
-    paidMembers.set(email, {
-      ...existing,
-      email,
-      status: "active",
-      active: true,
-      inviteLink,
-      inviteCreatedAt: new Date().toISOString(),
-      inviteExpireHours: 48,
-      stripeCustomerId: session.customer || existing.stripeCustomerId || null,
-      stripeSubscriptionId: session.subscription || existing.stripeSubscriptionId || null,
-      stripeSessionId: session.id || existing.stripeSessionId || null,
-      telegramUserId: existing.telegramUserId || null,
-      createdAt: existing.createdAt || new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      lastStripeEvent: event.type,
-    });
-
-    await persistState();
-
-    await sendTelegramMessage(
-`🔥 <b>NEW PAID MEMBER</b>
-
-<b>Email</b> ${escapeHtml(email)}
-<b>Status</b> active
-<b>Customer</b> ${escapeHtml(session.customer || "N/A")}
-<b>Subscription</b> ${escapeHtml(session.subscription || "N/A")}
-
-<b>Invite Link</b>
-${inviteLink}`
-    );
-
-    return;
-  }
-
-  if (
-    event?.type === "customer.subscription.deleted" ||
-    event?.type === "customer.subscription.updated" ||
-    event?.type === "invoice.payment_failed" ||
-    event?.type === "invoice.payment_succeeded"
-  ) {
-    const obj = event.data.object;
-
-    const stripeCustomerId = obj.customer || null;
-    const stripeSubscriptionId = obj.subscription || obj.id || null;
-
-    const found = findPaidMemberByStripe({
-      stripeCustomerId,
-      stripeSubscriptionId,
-    });
-
-    if (!found) {
-      console.log("STRIPE ACCESS EVENT BUT MEMBER NOT FOUND:", {
-        type: event.type,
-        stripeCustomerId,
-        stripeSubscriptionId,
-      });
-      return;
-    }
-
-    const { email, member } = found;
-
-    let newStatus = member.status || "active";
-
-    if (event.type === "invoice.payment_succeeded") {
-      newStatus = "active";
-    }
-
-    if (event.type === "invoice.payment_failed") {
-      newStatus = "past_due";
-    }
-
-    if (event.type === "customer.subscription.deleted") {
-      newStatus = "cancelled";
-    }
-
-    if (event.type === "customer.subscription.updated") {
-      const stripeStatus = String(obj.status || "").toLowerCase();
-
-      if (stripeStatus === "active" || stripeStatus === "trialing") {
-        newStatus = "active";
-      } else if (stripeStatus === "past_due") {
-        newStatus = "past_due";
-      } else if (
-        stripeStatus === "canceled" ||
-        stripeStatus === "cancelled" ||
-        stripeStatus === "unpaid" ||
-        stripeStatus === "incomplete_expired"
-      ) {
-        newStatus = stripeStatus;
-      }
-    }
-
-    member.status = newStatus;
-    member.active = newStatus === "active";
-    member.updatedAt = new Date().toISOString();
-    member.lastStripeEvent = event.type;
-
-    paidMembers.set(email, member);
-    await persistState();
-
-    await sendTelegramMessage(
-`⚠️ <b>PAID MEMBER ACCESS UPDATE</b>
-
-<b>Email</b> ${escapeHtml(email)}
-<b>Status</b> ${escapeHtml(newStatus)}
-<b>Stripe Event</b> ${escapeHtml(event.type)}`
-    );
-  }
-}
+const handleStripeEvent = stripeMemberService.handleStripeEvent;
 
 // Stripe raw body route MUST be before express.json()
 registerStripeRoutes(app, {
