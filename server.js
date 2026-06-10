@@ -50,11 +50,11 @@ import { createChartService } from "./src/services/chartService.js";
 import {
   appendChartLinkIfMissing,
   buildAlertText,
-  buildHitText,
 } from "./src/services/messageTemplates.js";
 import { createInviteService } from "./src/services/inviteService.js";
 import { createDailyStatsService } from "./src/services/dailyStatsService.js";
 import { createFreeChannelService } from "./src/services/freeChannelService.js";
+import { createHitNotificationService } from "./src/services/hitNotificationService.js";
 import { createRecentHitService } from "./src/services/recentHitService.js";
 import { createRefAllocatorService } from "./src/services/refAllocatorService.js";
 import { buildDailySummaryText as buildDailySummaryMessage } from "./src/services/summaryService.js";
@@ -111,7 +111,6 @@ import {
 import {
   applyFallbackLevels,
   hasValidTradeLevels,
-  pctMove,
   rrFromLevels,
   slPctFromLevels,
   tpPctFromLevels,
@@ -474,57 +473,24 @@ async function sendTelegramAlert({
   });
 }
 
+const hitNotificationService = createHitNotificationService({
+  chartService,
+  sendTelegramAlert,
+  defaultChatId: CHAT_ID,
+});
+
 async function sendHitAlert({
   trade,
   closeType,
   hitPrice = null,
   chatId = CHAT_ID,
 }) {
-  const exitPrice =
-    closeType === "TP"
-      ? trade.tp
-      : closeType === "SL"
-      ? trade.sl
-      : Number.isFinite(parseNum(hitPrice))
-      ? parseNum(hitPrice)
-      : trade.entry;
-
-  const movePct = pctMove(trade.side, trade.entry, exitPrice);
-  const chartLink = trade.chartLink || chartService.resolveChartLink(trade.symbol);
-
-  const chartAssets = await chartService.buildChartDeliveryAssets({
-    symbol: trade.symbol,
-    side: trade.side,
-    refId: trade.refId,
-    inlineBody: {
-      chart_image_url: trade.chartImageUrl,
-    },
-  });
-
-  const showChartLink = !chartAssets.imageUrl && !chartAssets.imageBuffer;
-
-  const hitText = buildHitText({
+  return hitNotificationService.sendHitAlert({
     trade,
     closeType,
-    exitPrice,
-    movePct,
-    chartLink,
-    showChartLink,
-  });
-
-  await sendTelegramAlert({
-    text: hitText,
-    imageUrl: chartAssets.imageUrl,
-    imageBuffer: chartAssets.imageBuffer,
-    imageFilename: chartAssets.imageFilename,
-    fallbackChartLink: chartLink,
+    hitPrice,
     chatId,
   });
-
-  return {
-    exitPrice,
-    movePct,
-  };
 }
 
 // ===== CENTRAL CLOSE FLOW =====
