@@ -40,6 +40,7 @@ import {
 } from "./src/config/env.js";
 import { createChartService } from "./src/services/chartService.js";
 import { createCloseCompletionService } from "./src/services/closeCompletionService.js";
+import { createCloseFlowService } from "./src/services/closeFlowService.js";
 import { appendChartLinkIfMissing } from "./src/services/messageTemplates.js";
 import { createInviteService } from "./src/services/inviteService.js";
 import { createDailyStatsService } from "./src/services/dailyStatsService.js";
@@ -59,9 +60,6 @@ import {
   findTradeByRefId,
   getOpenTradesForSymbol,
 } from "./src/services/tradeLookupService.js";
-import {
-  buildRecentHitKey,
-} from "./src/services/tradeIdentityService.js";
 import { registerChartRoutes } from "./src/routes/chartRoutes.js";
 import { registerMemberRoutes } from "./src/routes/memberRoutes.js";
 import { registerStripeRoutes } from "./src/routes/stripeRoutes.js";
@@ -70,7 +68,7 @@ import { registerTradingViewRoutes } from "./src/routes/tradingViewRoutes.js";
 import { createStateFileStore } from "./src/state/stateFileStore.js";
 import { createRuntimeStateService } from "./src/state/runtimeStateService.js";
 import { cleanupRuntimeState } from "./src/state/stateCleanupService.js";
-import { eventTimeToMs, formatUtc, getUtcDateKey } from "./src/utils/date.js";
+import { formatUtc, getUtcDateKey } from "./src/utils/date.js";
 import { fmtPct, fmtPrice, fmtRR, parseNum } from "./src/utils/numbers.js";
 import {
   escapeHtml,
@@ -329,6 +327,15 @@ const closeCompletionService = createCloseCompletionService({
   removeTrade,
 });
 
+const closeFlowService = createCloseFlowService({
+  closeCompletionService,
+  hitNotificationService,
+  wasRecentHitSent,
+  wasSharedToFree,
+  paidChatId: CHAT_ID,
+  freeChatId: FREE_CHAT_ID,
+});
+
 const signalDeliveryService = createSignalDeliveryService({
   allocSignalRef,
   chartService,
@@ -343,112 +350,7 @@ const signalDeliveryService = createSignalDeliveryService({
   freeChatId: FREE_CHAT_ID,
 });
 
-async function sendHitAlert({
-  trade,
-  closeType,
-  hitPrice = null,
-  chatId = CHAT_ID,
-}) {
-  return hitNotificationService.sendHitAlert({
-    trade,
-    closeType,
-    hitPrice,
-    chatId,
-  });
-}
-
-// ===== CENTRAL CLOSE FLOW =====
-async function closeTrade({
-  matched,
-  closeType,
-  eventTime,
-  currentPrice,
-  source = "unknown",
-}) {
-  if (!matched?.trade || !matched?.key) {
-    return false;
-  }
-
-  const trade = matched.trade;
-  const closedAtMs = eventTimeToMs(eventTime);
-  const hitEventBucket = Number.isFinite(closedAtMs) ? Math.floor(closedAtMs / 60000) : eventTime;
-
-  const hitKey = buildRecentHitKey({
-    symbol: trade.symbol,
-    closeType,
-    refId: trade.refId,
-    eventTime: hitEventBucket,
-  });
-
-  if (wasRecentHitSent(hitKey)) {
-    console.log("DUPLICATE CLOSE IGNORED:", {
-      symbol: trade.symbol,
-      closeType,
-      refId: trade.refId,
-      eventTime,
-      source,
-    });
-    return false;
-  }
-
-  let finalCloseType = closeType;
-  let exitPrice = currentPrice;
-
-  if (closeType === "EXPIRED") {
-    exitPrice = Number.isFinite(parseNum(currentPrice)) ? parseNum(currentPrice) : trade.entry;
-    finalCloseType = getTimeExitResult(trade, exitPrice);
-  }
-
-  trade.hit = true;
-  trade.hitType = finalCloseType;
-  trade.hitAtMs = closedAtMs;
-
-  const sent = await sendHitAlert({
-    trade,
-    closeType: finalCloseType,
-    hitPrice: exitPrice,
-    chatId: CHAT_ID,
-  });
-
-  if (wasSharedToFree(trade.refId)) {
-    try {
-      await sendHitAlert({
-        trade,
-        closeType: finalCloseType,
-        hitPrice: exitPrice,
-        chatId: FREE_CHAT_ID,
-      });
-    } catch (err) {
-      console.error("FREE CLOSE SEND FAILED:", {
-        refId: trade.refId,
-        error: err?.message || String(err),
-      });
-    }
-  }
-
-  await closeCompletionService.completeClosedTrade({
-    matched,
-    trade,
-    finalCloseType,
-    closedAtMs,
-    sent,
-    hitKey,
-    source,
-  });
-
-  console.log("TRADE CLOSED:", {
-    symbol: trade.symbol,
-    side: trade.side,
-    refId: trade.refId,
-    closeType: finalCloseType,
-    source,
-    matchType: matched.matchType,
-    exitPrice: fmtPrice(sent.exitPrice),
-    movePct: fmtPct(sent.movePct, { signed: true }),
-  });
-
-  return true;
-}
+const closeTrade = closeFlowService.closeTrade;
 // ===== STRIPE / MEMBER HELPERS =====
 async function createTelegramInviteLink({ expireHours = 48 } = {}) {
   return inviteService.createPaidInviteLink({ expireHours });
