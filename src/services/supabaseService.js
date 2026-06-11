@@ -55,7 +55,7 @@ export function createSupabaseService({ enabled, url, serviceRoleKey, backendVer
     Promise.resolve()
       .then(task)
       .catch((err) => {
-        console.error(`SUPABASE ${label} FAILED:`, err?.message || String(err));
+        console.warn(`SUPABASE ${label} WARNING:`, err?.message || String(err));
       });
   }
 
@@ -110,6 +110,105 @@ export function createSupabaseService({ enabled, url, serviceRoleKey, backendVer
     );
   }
 
+  function persistCandidate({
+    candidateKey,
+    alertId,
+    refId,
+    symbol,
+    side,
+    timeframe,
+    entry,
+    tp1,
+    tp2,
+    tp3,
+    sl,
+    rr,
+    rsi,
+    trendStrength,
+    atrPct,
+    volatilityPct,
+    session,
+    marketRegime,
+    setupType,
+    setupScore,
+    strength,
+    pineVersion,
+    renderVersion,
+    eventType,
+    eventTimeMs,
+    rawPayload,
+  }) {
+    if (!candidateKey) return;
+
+    background("CANDIDATE UPSERT", () =>
+      request("alert_candidates", {
+        query: "?on_conflict=candidate_key",
+        prefer: "resolution=merge-duplicates,return=minimal",
+        body: {
+          candidate_key: String(candidateKey),
+          alert_id: alertId ? String(alertId) : null,
+          ref_id: refId ? String(refId) : null,
+          symbol: symbol || null,
+          direction: side || null,
+          timeframe: timeframe || null,
+          entry_price: entry ?? null,
+          tp1_price: tp1 ?? null,
+          tp2_price: tp2 ?? null,
+          tp3_price: tp3 ?? null,
+          sl_price: sl ?? null,
+          rr: rr ?? null,
+          rsi: rsi ?? null,
+          trend_strength: trendStrength ?? null,
+          atr_pct: atrPct ?? null,
+          volatility_pct: volatilityPct ?? null,
+          session_name: session || null,
+          market_regime: marketRegime || null,
+          setup_type: setupType || null,
+          setup_score: setupScore ?? null,
+          strength: strength || null,
+          pine_version: pineVersion || null,
+          render_version: renderVersion || backendVersion,
+          event_type: eventType || null,
+          event_time_utc: isoFromMs(eventTimeMs),
+          raw_payload: rawPayload || null,
+          updated_at: new Date().toISOString(),
+        },
+      }),
+    );
+  }
+
+  function updateCandidateDecision({
+    candidateKey,
+    decision,
+    reason,
+    qualityScore,
+    qualityGrade,
+    refId,
+    alertId,
+    postedToPaid,
+    postedToFree,
+  }) {
+    if (!candidateKey) return;
+
+    background("CANDIDATE DECISION UPDATE", () =>
+      request("alert_candidates", {
+        method: "PATCH",
+        query: `?candidate_key=eq.${encodeURIComponent(String(candidateKey))}`,
+        body: {
+          decision: decision || "PENDING",
+          decision_reason: reason || null,
+          quality_score: qualityScore ?? null,
+          quality_grade: qualityGrade || null,
+          ref_id: refId ? String(refId) : null,
+          alert_id: alertId ? String(alertId) : null,
+          posted_to_paid: Boolean(postedToPaid),
+          posted_to_free: Boolean(postedToFree),
+          updated_at: new Date().toISOString(),
+        },
+      }),
+    );
+  }
+
   function persistOutcome({ trade, outcomeType, outcomeTimeMs, pnlPercent, durationMinutes, exitPrice, rawPayload }) {
     const alertId = trade?.primaryAlertId || trade?.alertIds?.[0] || trade?.refId;
     if (!alertId || !trade?.refId) return;
@@ -119,11 +218,18 @@ export function createSupabaseService({ enabled, url, serviceRoleKey, backendVer
         body: {
           alert_id: String(alertId),
           ref_id: String(trade.refId),
+          candidate_key: trade.candidateKey || trade.primaryAlertId || null,
+          symbol: trade.symbol || null,
+          direction: trade.side || null,
           outcome_type: outcomeType,
           outcome_time_utc: isoFromMs(outcomeTimeMs),
+          closed_at_utc: isoFromMs(outcomeTimeMs),
           pnl_percent: pnlPercent ?? null,
+          move_pct: pnlPercent ?? null,
+          r_multiple: rawPayload?.rMultiple ?? null,
           duration_minutes: durationMinutes ?? null,
           exit_price: exitPrice ?? null,
+          matched_by: rawPayload?.matchType || null,
           raw_payload: rawPayload || null,
         },
       }),
@@ -173,6 +279,8 @@ export function createSupabaseService({ enabled, url, serviceRoleKey, backendVer
     request,
     rpc,
     persistAlert,
+    persistCandidate,
+    updateCandidateDecision,
     persistOutcome,
     persistRejection,
     persistDailySummary,

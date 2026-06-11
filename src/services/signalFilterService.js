@@ -53,6 +53,8 @@ export function evaluateSignalAcceptance({
   minRrToSend,
   alertQualityFilterEnabled,
   candidateQualityFilterEnabled,
+  historicalQualityAdjustmentsEnabled,
+  duplicateSuppressionEnabled,
   lossGuardRetentionMs,
   lossGuardSymbolCooldownMs,
   lossGuardMarketWindowMs,
@@ -145,12 +147,14 @@ export function evaluateSignalAcceptance({
   }
 
   const todayStat = getDailyStat(getUtcDateKey(receivedAtMs));
-  const duplicateSignal = findRecentSimilarSignal(todayStat, {
-    symbol,
-    side,
-    entry: entryParsed,
-    receivedAtMs,
-  });
+  const duplicateSignal = duplicateSuppressionEnabled
+    ? findRecentSimilarSignal(todayStat, {
+        symbol,
+        side,
+        entry: entryParsed,
+        receivedAtMs,
+      })
+    : null;
 
   if (duplicateSignal) {
     return {
@@ -275,6 +279,7 @@ export function evaluateSignalAcceptance({
     rsi,
     atrPct,
     eventTimeMs,
+    historicalQualityAdjustmentsEnabled,
   });
 
   const enforceQualityFilter =

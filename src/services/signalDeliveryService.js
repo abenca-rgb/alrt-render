@@ -43,6 +43,7 @@ export function createSignalDeliveryService({
       volatilityState,
       marketRegime,
       session,
+      candidateKey,
       confidenceLevel,
       estimatedHoldDuration,
       timeframe,
@@ -159,6 +160,7 @@ export function createSignalDeliveryService({
       hitType: null,
       hitAtMs: null,
       primaryAlertId,
+      candidateKey,
       alertIds: candidateIds,
       setupType,
       setupScore,
@@ -225,6 +227,8 @@ export function createSignalDeliveryService({
 
     return {
       refId,
+      primaryAlertId,
+      candidateKey,
       setupType,
       setupScore,
       qualityScore: quality.score,

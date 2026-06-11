@@ -1,5 +1,23 @@
 import { registerLossStop } from "./lossGuardService.js";
 
+function estimateRMultiple({ trade, finalCloseType, movePct }) {
+  if (finalCloseType === "SL") return -1;
+  if (finalCloseType === "TP") return Number.isFinite(Number(trade?.rr)) ? Number(trade.rr) : null;
+
+  const entry = Number(trade?.entry);
+  const sl = Number(trade?.sl);
+  const move = Number(movePct);
+
+  if (!Number.isFinite(entry) || !Number.isFinite(sl) || !Number.isFinite(move) || entry === 0) {
+    return null;
+  }
+
+  const riskPct = Math.abs((entry - sl) / entry) * 100;
+  if (!riskPct) return null;
+
+  return move / riskPct;
+}
+
 export function createCloseCompletionService({
   recentLossStops,
   recordCloseStat,
@@ -39,6 +57,12 @@ export function createCloseCompletionService({
       rawPayload: {
         source,
         matchType: matched.matchType,
+        candidateKey: trade.candidateKey || null,
+        rMultiple: estimateRMultiple({
+          trade,
+          finalCloseType,
+          movePct: sent.movePct,
+        }),
       },
     });
 

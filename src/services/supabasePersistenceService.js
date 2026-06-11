@@ -7,6 +7,14 @@ export function createSupabasePersistenceService({ supabase, getDailyStat, activ
     supabase.persistAlert(payload);
   }
 
+  function persistCandidate(payload) {
+    supabase.persistCandidate(payload);
+  }
+
+  function updateCandidateDecision(payload) {
+    supabase.updateCandidateDecision(payload);
+  }
+
   function persistOutcome(payload) {
     supabase.persistOutcome(payload);
   }
@@ -33,6 +41,8 @@ export function createSupabasePersistenceService({ supabase, getDailyStat, activ
   return {
     ready,
     persistAlert,
+    persistCandidate,
+    updateCandidateDecision,
     persistOutcome,
     persistRejection,
     persistDailySummary,

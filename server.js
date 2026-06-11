@@ -6,6 +6,7 @@ import {
   APP_BASE_URL,
   APP_VERSION,
   BOT_TOKEN,
+  CANDIDATE_LOGGING_ENABLED,
   CANDIDATE_QUALITY_FILTER_ENABLED,
   CHAT_ID,
   CHART_IMAGE_TEMPLATE,
@@ -18,6 +19,9 @@ import {
   FREE_DAILY_LIMIT,
   FREE_REF_TTL_MS,
   HIT_DEDUP_TTL_MS,
+  HISTORICAL_QUALITY_ADJUSTMENTS_ENABLED,
+  DUPLICATE_SUPPRESSION_ENABLED,
+  LEARNING_LOGGING_ENABLED,
   LOSS_GUARD_MARKET_COOLDOWN_MS,
   LOSS_GUARD_MARKET_LIMIT,
   LOSS_GUARD_MARKET_WINDOW_MS,
@@ -39,6 +43,7 @@ import {
   SUPABASE_URL,
 } from "./src/config/env.js";
 import { createChartService } from "./src/services/chartService.js";
+import { createCandidateLoggingService } from "./src/services/candidateLoggingService.js";
 import { createCloseCompletionService } from "./src/services/closeCompletionService.js";
 import { createCloseFlowService } from "./src/services/closeFlowService.js";
 import { appendChartLinkIfMissing } from "./src/services/messageTemplates.js";
@@ -195,6 +200,14 @@ function persistAlertToSupabase(payload) {
   supabasePersistence.persistAlert(payload);
 }
 
+function persistCandidateToSupabase(payload) {
+  supabasePersistence.persistCandidate(payload);
+}
+
+function updateCandidateDecisionInSupabase(payload) {
+  supabasePersistence.updateCandidateDecision(payload);
+}
+
 function persistOutcomeToSupabase(payload) {
   supabasePersistence.persistOutcome(payload);
 }
@@ -223,6 +236,12 @@ const freeChannelService = createFreeChannelService({
 const recentHitService = createRecentHitService({
   recentHitKeys,
   persistState,
+});
+
+const candidateLoggingService = createCandidateLoggingService({
+  enabled: LEARNING_LOGGING_ENABLED && CANDIDATE_LOGGING_ENABLED,
+  persistCandidateToSupabase,
+  updateCandidateDecisionInSupabase,
 });
 
 // ===== FREE CHANNEL =====
@@ -415,6 +434,10 @@ registerSystemRoutes(app, {
     dailySlCircuitBreaker: DAILY_SL_CIRCUIT_BREAKER,
     alertQualityFilterEnabled: ALERT_QUALITY_FILTER_ENABLED,
     candidateQualityFilterEnabled: CANDIDATE_QUALITY_FILTER_ENABLED,
+    learningLoggingEnabled: LEARNING_LOGGING_ENABLED,
+    candidateLoggingEnabled: CANDIDATE_LOGGING_ENABLED,
+    historicalQualityAdjustmentsEnabled: HISTORICAL_QUALITY_ADJUSTMENTS_ENABLED,
+    duplicateSuppressionEnabled: DUPLICATE_SUPPRESSION_ENABLED,
     allowedSymbols: ALLOWED_SYMBOLS,
     freeChatId: FREE_CHAT_ID,
     freeDailyLimit: FREE_DAILY_LIMIT,
@@ -461,6 +484,8 @@ async function handleTradingViewWebhook(req, res) {
       leverage,
       entryParsed,
       tpParsed,
+      tp2Parsed,
+      tp3Parsed,
       slParsed,
       rr,
       tpPct,
@@ -471,6 +496,7 @@ async function handleTradingViewWebhook(req, res) {
       eventTimeMs,
       rsi,
       atrPct,
+      volatilityPct,
       risk,
       setupScore,
       trendStrength,
@@ -481,6 +507,7 @@ async function handleTradingViewWebhook(req, res) {
       estimatedHoldDuration,
       timeframe,
       pineVersion,
+      candidateKey,
     } = buildTradingViewContext({
       body,
       receivedAtMs,
@@ -538,6 +565,50 @@ async function handleTradingViewWebhook(req, res) {
       return;
     }
 
+    const signalContext = {
+      symbol,
+      side,
+      eventType,
+      isCandidateEvent,
+      currentPrice,
+      setupType,
+      strength,
+      leverage,
+      entryParsed,
+      tpParsed,
+      tp2Parsed,
+      tp3Parsed,
+      slParsed,
+      rr,
+      tpPct,
+      incomingRef,
+      explicitCloseType,
+      candidateIdsBase,
+      eventTime,
+      eventTimeMs,
+      rsi,
+      atrPct,
+      volatilityPct,
+      risk,
+      setupScore,
+      trendStrength,
+      volatilityState,
+      marketRegime,
+      session,
+      confidenceLevel,
+      estimatedHoldDuration,
+      timeframe,
+      pineVersion,
+      candidateKey,
+    };
+
+    const loggedCandidate = candidateLoggingService.logCandidate({
+      body,
+      context: signalContext,
+      receivedAtMs,
+      renderVersion: APP_VERSION,
+    });
+
     const signalGate = evaluateSignalAcceptance({
       activeTrades,
       recentLossStops,
@@ -549,6 +620,8 @@ async function handleTradingViewWebhook(req, res) {
       minRrToSend: MIN_RR_TO_SEND,
       alertQualityFilterEnabled: ALERT_QUALITY_FILTER_ENABLED,
       candidateQualityFilterEnabled: CANDIDATE_QUALITY_FILTER_ENABLED,
+      historicalQualityAdjustmentsEnabled: HISTORICAL_QUALITY_ADJUSTMENTS_ENABLED,
+      duplicateSuppressionEnabled: DUPLICATE_SUPPRESSION_ENABLED,
       lossGuardRetentionMs: LOSS_GUARD_RETENTION_MS,
       lossGuardSymbolCooldownMs: LOSS_GUARD_SYMBOL_COOLDOWN_MS,
       lossGuardMarketWindowMs: LOSS_GUARD_MARKET_WINDOW_MS,
@@ -623,7 +696,15 @@ async function handleTradingViewWebhook(req, res) {
         side,
         setupType,
         reason: signalGate.reason || "signal_filter",
+        qualityScore: signalGate.quality?.score ?? null,
+        qualityGrade: signalGate.quality?.grade ?? null,
         ts: receivedAtMs,
+      });
+      candidateLoggingService.updateDecision({
+        candidateKey: loggedCandidate?.candidateKey,
+        decision: "REJECTED",
+        reason: signalGate.reason || "signal_filter",
+        quality: signalGate.quality,
       });
       return;
     }
@@ -648,6 +729,7 @@ async function handleTradingViewWebhook(req, res) {
         volatilityState,
         marketRegime,
         session,
+        candidateKey,
         confidenceLevel,
         estimatedHoldDuration,
         timeframe,
@@ -676,6 +758,17 @@ async function handleTradingViewWebhook(req, res) {
       imageUsed: delivery.imageUsed,
       sharedToFree: delivery.sharedToFree,
       nextRef,
+    });
+
+    candidateLoggingService.updateDecision({
+      candidateKey: loggedCandidate?.candidateKey,
+      decision: "ACCEPTED",
+      reason: "published_paid",
+      quality,
+      refId: delivery.refId,
+      alertId: delivery.primaryAlertId,
+      postedToPaid: true,
+      postedToFree: delivery.sharedToFree,
     });
   } catch (err) {
     console.error("ERROR:", err);

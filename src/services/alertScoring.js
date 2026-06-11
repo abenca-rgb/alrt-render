@@ -18,10 +18,10 @@ function normalizeGrade(value) {
 }
 
 function gradeFromScore(score) {
-  if (score >= 85) return "A+";
-  if (score >= 70) return "A";
-  if (score >= 55) return "B";
-  return "REJECT";
+  if (score >= 92) return "A+";
+  if (score >= 84) return "A";
+  if (score >= 72) return "B";
+  return "C";
 }
 
 function meetsMinGrade(grade, minGrade) {
@@ -48,6 +48,7 @@ export function scoreAlertQuality({
   rsi,
   atrPct,
   eventTimeMs,
+  historicalQualityAdjustmentsEnabled = false,
 }) {
   let score = 50;
   const reasons = [];
@@ -61,49 +62,51 @@ export function scoreAlertQuality({
   const numericRr = parseNum(rr);
   const numericTpPct = parseNum(tpPct);
   const numericSlPct = parseNum(slPct);
-  const symbolKey = String(symbol || "").toUpperCase();
+  if (historicalQualityAdjustmentsEnabled) {
+    const symbolKey = String(symbol || "").toUpperCase();
 
-  const historicalCoinAdjustment = {
-    ETHUSDT: 4,
-    LINKUSDT: 4,
-    AVAXUSDT: 3,
-    BNBUSDT: 1,
-    XRPUSDT: 0,
-    SOLUSDT: -2,
-    BTCUSDT: -5,
-    ADAUSDT: -6,
-    LTCUSDT: -8,
-    DOGEUSDT: -10,
-  }[symbolKey] || 0;
+    const historicalCoinAdjustment = {
+      ETHUSDT: 4,
+      LINKUSDT: 4,
+      AVAXUSDT: 3,
+      BNBUSDT: 1,
+      XRPUSDT: 0,
+      SOLUSDT: -2,
+      BTCUSDT: -5,
+      ADAUSDT: -6,
+      LTCUSDT: -8,
+      DOGEUSDT: -10,
+    }[symbolKey] || 0;
 
-  if (historicalCoinAdjustment > 0) {
-    score += historicalCoinAdjustment;
-    reasons.push("historical coin performance supports this symbol");
-  } else if (historicalCoinAdjustment < 0) {
-    score += historicalCoinAdjustment;
-    penalties.push("historical coin performance requires stricter confirmation");
-  }
+    if (historicalCoinAdjustment > 0) {
+      score += historicalCoinAdjustment;
+      reasons.push("historical coin performance supports this symbol");
+    } else if (historicalCoinAdjustment < 0) {
+      score += historicalCoinAdjustment;
+      penalties.push("historical coin performance requires stricter confirmation");
+    }
 
-  const time = Number.isFinite(eventTimeMs) ? new Date(eventTimeMs) : null;
-  const utcHour = time ? time.getUTCHours() : null;
-  const utcDay = time ? time.getUTCDay() : null;
+    const time = Number.isFinite(eventTimeMs) ? new Date(eventTimeMs) : null;
+    const utcHour = time ? time.getUTCHours() : null;
+    const utcDay = time ? time.getUTCDay() : null;
 
-  if ([4, 6, 10, 17, 23].includes(utcHour)) {
-    score += 8;
-    reasons.push("historically strong UTC hour");
-  }
+    if ([4, 6, 10, 17, 23].includes(utcHour)) {
+      score += 8;
+      reasons.push("historically strong UTC hour");
+    }
 
-  if ([14, 15, 18].includes(utcHour)) {
-    score -= 14;
-    penalties.push("historically weak UTC hour");
-  }
+    if ([14, 15, 18].includes(utcHour)) {
+      score -= 14;
+      penalties.push("historically weak UTC hour");
+    }
 
-  if (utcDay === 0) {
-    score += 4;
-    reasons.push("historically stronger weekday");
-  } else if (utcDay === 1 || utcDay === 2) {
-    score -= 4;
-    penalties.push("historically weaker weekday");
+    if (utcDay === 0) {
+      score += 4;
+      reasons.push("historically stronger weekday");
+    } else if (utcDay === 1 || utcDay === 2) {
+      score -= 4;
+      penalties.push("historically weaker weekday");
+    }
   }
 
   if (incomingGrade === "A+") score += 4;
@@ -190,11 +193,11 @@ export function scoreAlertQuality({
     score += 8;
     reasons.push("market regime is supportive");
   }
-  if (/expansion/.test(regimeText)) {
+  if (historicalQualityAdjustmentsEnabled && /expansion/.test(regimeText)) {
     score += 6;
     reasons.push("historically supportive expansion regime");
   }
-  if (/compression/.test(regimeText)) {
+  if (historicalQualityAdjustmentsEnabled && /compression/.test(regimeText)) {
     score -= 10;
     penalties.push("compression regime needs stronger confirmation");
   }
@@ -209,17 +212,10 @@ export function scoreAlertQuality({
 
   const sessionText = String(session || "").toLowerCase();
   if (/(overlap)/.test(sessionText)) score += 4;
-  else if (/(asia)/.test(sessionText)) {
-    score += 6;
-    reasons.push("historically stronger session");
-  } else if (/(new_york|ny|us)/.test(sessionText)) {
-    score += 1;
-  } else if (/(london|eu)/.test(sessionText)) {
-    score += 0;
-  }
+  else if (/(london|new_york|ny|us|eu)/.test(sessionText)) score += 2;
   else {
-    score -= 4;
-    penalties.push("session quality is unproven");
+    score -= 12;
+    penalties.push("session quality is neutral");
   }
   if (symbolConfig.avoidSessions.some((bad) => sessionText.includes(bad))) {
     score -= 10;
@@ -231,7 +227,7 @@ export function scoreAlertQuality({
     score -= 8;
     penalties.push("continuation setup needs extra confirmation");
   }
-  if (/break/.test(setupText) && /expansion/.test(regimeText)) {
+  if (historicalQualityAdjustmentsEnabled && /break/.test(setupText) && /expansion/.test(regimeText)) {
     score -= 4;
     penalties.push("breakout during expansion needs chase protection");
   }

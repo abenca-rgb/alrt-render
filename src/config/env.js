@@ -10,7 +10,7 @@ const thisDir = path.dirname(thisFile);
 
 export const ROOT_DIR = path.resolve(thisDir, "../..");
 export const PORT = process.env.PORT || 3000;
-export const APP_VERSION = "v25.5.42-historical-quality-filters";
+export const APP_VERSION = "v25.5.43-learning-foundation";
 
 export const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 export const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
@@ -24,6 +24,14 @@ export const CHART_IMAGE_TEMPLATE = process.env.CHART_IMAGE_TEMPLATE || "";
 export const SUPABASE_ENABLED = String(process.env.SUPABASE_ENABLED || "false").toLowerCase() === "true";
 export const SUPABASE_URL = (process.env.SUPABASE_URL || "").replace(/\/+$/, "");
 export const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+export const LEARNING_LOGGING_ENABLED =
+  String(process.env.LEARNING_LOGGING_ENABLED || "true").toLowerCase() !== "false";
+export const CANDIDATE_LOGGING_ENABLED =
+  String(process.env.CANDIDATE_LOGGING_ENABLED || "true").toLowerCase() !== "false";
+export const SHADOW_SCORING_ENABLED =
+  String(process.env.SHADOW_SCORING_ENABLED || "false").toLowerCase() === "true";
+export const OPTIMIZER_REPORTS_ENABLED =
+  String(process.env.OPTIMIZER_REPORTS_ENABLED || "false").toLowerCase() === "true";
 
 export const SUMMARY_ADMIN_TOKEN = process.env.SUMMARY_ADMIN_TOKEN || "";
 
@@ -62,6 +70,10 @@ export const ALERT_QUALITY_FILTER_ENABLED =
   String(process.env.ALERT_QUALITY_FILTER_ENABLED || "false").toLowerCase() === "true";
 export const CANDIDATE_QUALITY_FILTER_ENABLED =
   String(process.env.CANDIDATE_QUALITY_FILTER_ENABLED || "true").toLowerCase() !== "false";
+export const HISTORICAL_QUALITY_ADJUSTMENTS_ENABLED =
+  String(process.env.HISTORICAL_QUALITY_ADJUSTMENTS_ENABLED || "false").toLowerCase() === "true";
+export const DUPLICATE_SUPPRESSION_ENABLED =
+  String(process.env.DUPLICATE_SUPPRESSION_ENABLED || "false").toLowerCase() === "true";
 export const ALLOWED_SYMBOLS = getAllowedSymbolsFromEnv(process.env.ALLOWED_SYMBOLS || "");
 
 // State.json wint altijd als daar een hogere nextRef in staat.

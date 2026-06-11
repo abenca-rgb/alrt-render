@@ -52,6 +52,8 @@ export function buildTradingViewContext({ body, receivedAtMs }) {
     body.TP,
     body.tpPrice
   );
+  const tp2Raw = pick(body.tp2, body.take_profit_2, body.tp2_price, body.target2, body.target_2);
+  const tp3Raw = pick(body.tp3, body.take_profit_3, body.tp3_price, body.target3, body.target_3);
 
   const slRaw = pick(
     body.sl,
@@ -66,6 +68,7 @@ export function buildTradingViewContext({ body, receivedAtMs }) {
 
   const rsi = pick(body.rsi, body.rsi_value);
   const atrPct = pick(body.atr_pct, body.atrPercent, body.atr_percent);
+  const volatilityPct = pick(body.volatility_pct, body.volatilityPercent, body.volatility_percent);
   const score = pick(body.setup_score, body.score, body.strength_score);
   const risk = pick(body.risk, body.risk_score);
   const incomingStrength = pick(body.strength, body.grade, body.quality);
@@ -129,6 +132,8 @@ export function buildTradingViewContext({ body, receivedAtMs }) {
 
   const entryParsed = parseNum(entryRaw);
   let tpParsed = parseNum(tpRaw);
+  const tp2Parsed = parseNum(tp2Raw);
+  const tp3Parsed = parseNum(tp3Raw);
   let slParsed = parseNum(slRaw);
 
   const validIncomingLevels = hasValidTradeLevels(side, entryParsed, tpParsed, slParsed);
@@ -152,6 +157,7 @@ export function buildTradingViewContext({ body, receivedAtMs }) {
     eventTimeMs,
     refId: incomingRef || "",
   });
+  const candidateKey = candidateIdsBase[0] || incomingRef || `${symbol}-${side}-${eventTimeMs}`;
 
   return {
     symbol,
@@ -164,6 +170,8 @@ export function buildTradingViewContext({ body, receivedAtMs }) {
     leverage,
     entryParsed,
     tpParsed,
+    tp2Parsed,
+    tp3Parsed,
     slParsed,
     rr,
     tpPct,
@@ -174,6 +182,7 @@ export function buildTradingViewContext({ body, receivedAtMs }) {
     eventTimeMs,
     rsi,
     atrPct,
+    volatilityPct,
     risk,
     setupScore,
     trendStrength,
@@ -184,5 +193,6 @@ export function buildTradingViewContext({ body, receivedAtMs }) {
     estimatedHoldDuration,
     timeframe,
     pineVersion,
+    candidateKey,
   };
 }
