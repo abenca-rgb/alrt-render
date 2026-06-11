@@ -1,54 +1,48 @@
 import { getUtcDateKey } from "../utils/date.js";
-import { buildDailySummaryText } from "./summaryService.js";
 
 export function createDailySummaryRunnerService({
   enabled,
   utcHour,
   utcMinute,
-  getDailyStat,
-  getActiveTrades,
   getLastSummarySentDate,
   setLastSummarySentDate,
-  sendTelegramMessage,
-  paidChatId,
-  freeChatId,
-  persistDailySummaryToSupabase,
+  summaryService,
   persistState,
 }) {
-  function buildSummaryText(dateKey) {
-    const stat = getDailyStat(dateKey);
-
-    return buildDailySummaryText({
-      dateKey,
-      stat,
-      activeTrades: getActiveTrades(),
+  async function buildSummaryText(dateKey) {
+    const summary = await summaryService.preview({
+      periodType: "daily",
+      periodKey: dateKey,
     });
+    return summary.text;
   }
 
   async function sendDailySummary(dateKey, force = false) {
     if (!enabled && !force) return false;
-    if (!force && getLastSummarySentDate() === dateKey) return false;
-
-    const text = buildSummaryText(dateKey);
-
-    await sendTelegramMessage(text, paidChatId);
-
-    if (freeChatId) {
-      await sendTelegramMessage(text, freeChatId);
+    if (!force && getLastSummarySentDate() === dateKey) {
+      return false;
     }
 
-    persistDailySummaryToSupabase(dateKey);
+    const result = await summaryService.send({
+      periodType: "daily",
+      periodKey: dateKey,
+      force,
+    });
 
-    setLastSummarySentDate(dateKey);
-    await persistState();
+    if (result.sent || result.alreadySent) {
+      setLastSummarySentDate(dateKey);
+      await persistState();
+    }
 
     console.log("DAILY SUMMARY SENT:", {
       dateKey,
       force,
+      sent: result.sent,
+      alreadySent: result.alreadySent,
       lastSummarySentDate: getLastSummarySentDate(),
     });
 
-    return true;
+    return result.sent;
   }
 
   async function maybeSendDailySummary(nowMs = Date.now()) {

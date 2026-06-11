@@ -2,9 +2,28 @@ export function registerSystemRoutes(app, {
   config,
   getHealthState,
   sendDailySummary,
+  summaryService,
   runOptimizerReport,
   getUtcDateKey,
 } = {}) {
+  function authorizeSummary(req, res) {
+    const token = String(req.query.token || req.headers["x-summary-token"] || "");
+
+    if (!config.summaryAdminToken || token !== config.summaryAdminToken) {
+      res.status(403).json({
+        ok: false,
+        error: "manual summary disabled",
+      });
+      return false;
+    }
+
+    return true;
+  }
+
+  function forceRequested(req) {
+    return String(req.query.force || req.body?.force || "false").toLowerCase() === "true";
+  }
+
   app.get("/", (req, res) => {
     res.status(200).json({
       ok: true,
@@ -66,25 +85,137 @@ export function registerSystemRoutes(app, {
   });
 
   app.post("/summary/send-now", async (req, res) => {
-    const token = String(req.query.token || req.headers["x-summary-token"] || "");
-
-    if (!config.summaryAdminToken || token !== config.summaryAdminToken) {
-      return res.status(403).json({
-        ok: false,
-        error: "manual summary disabled",
-      });
-    }
-
-    res.status(200).json({
-      ok: true,
-      message: "summary send requested",
-    });
+    if (!authorizeSummary(req, res)) return;
 
     try {
       const dateKey = getUtcDateKey(Date.now());
-      await sendDailySummary(dateKey, true);
+      const sent = await sendDailySummary(dateKey, forceRequested(req));
+      res.status(200).json({
+        ok: true,
+        periodType: "daily",
+        periodKey: dateKey,
+        sent,
+      });
     } catch (err) {
       console.error("MANUAL SUMMARY ERROR:", err);
+      res.status(500).json({
+        ok: false,
+        error: err?.message || String(err),
+      });
+    }
+  });
+
+  app.get("/summary/daily/preview", async (req, res) => {
+    if (!authorizeSummary(req, res)) return;
+
+    try {
+      const dateKey = String(req.query.date || getUtcDateKey(Date.now()));
+      const summary = await summaryService.preview({
+        periodType: "daily",
+        periodKey: dateKey,
+      });
+
+      res.status(200).json({
+        ok: true,
+        periodType: "daily",
+        periodKey: dateKey,
+        source: summary.source,
+        stats: {
+          alerts: summary.stat.alerts,
+          tp: summary.stat.tp,
+          sl: summary.stat.sl,
+          timeExitProfit: summary.stat.timeExitProfit,
+          timeExitLoss: summary.stat.timeExitLoss,
+          expired: summary.stat.expired,
+          rejectedSignals: summary.stat.rejectedSignals,
+          openTotal: summary.openTotal,
+        },
+        text: summary.text,
+      });
+    } catch (err) {
+      console.error("DAILY SUMMARY PREVIEW ERROR:", err);
+      res.status(500).json({
+        ok: false,
+        error: err?.message || String(err),
+      });
+    }
+  });
+
+  app.post("/summary/daily/send-now", async (req, res) => {
+    if (!authorizeSummary(req, res)) return;
+
+    try {
+      const dateKey = String(req.query.date || getUtcDateKey(Date.now()));
+      const result = await summaryService.send({
+        periodType: "daily",
+        periodKey: dateKey,
+        force: forceRequested(req),
+      });
+
+      res.status(200).json(result);
+    } catch (err) {
+      console.error("DAILY SUMMARY SEND ERROR:", err);
+      res.status(500).json({
+        ok: false,
+        error: err?.message || String(err),
+      });
+    }
+  });
+
+  app.get("/summary/weekly/preview", async (req, res) => {
+    if (!authorizeSummary(req, res)) return;
+
+    try {
+      const weekKey = String(req.query.week || summaryService.getUtcWeekKey(Date.now()));
+      const summary = await summaryService.preview({
+        periodType: "weekly",
+        periodKey: weekKey,
+      });
+
+      res.status(200).json({
+        ok: true,
+        periodType: "weekly",
+        periodKey: weekKey,
+        source: summary.source,
+        stats: {
+          alerts: summary.stat.alerts,
+          tp: summary.stat.tp,
+          sl: summary.stat.sl,
+          timeExitProfit: summary.stat.timeExitProfit,
+          timeExitLoss: summary.stat.timeExitLoss,
+          expired: summary.stat.expired,
+          rejectedSignals: summary.stat.rejectedSignals,
+          openTotal: summary.openTotal,
+        },
+        text: summary.text,
+      });
+    } catch (err) {
+      console.error("WEEKLY SUMMARY PREVIEW ERROR:", err);
+      res.status(500).json({
+        ok: false,
+        error: err?.message || String(err),
+      });
+    }
+  });
+
+  app.post("/summary/weekly/send-now", async (req, res) => {
+    if (!authorizeSummary(req, res)) return;
+
+    try {
+      const weekKey = String(req.query.week || summaryService.getUtcWeekKey(Date.now()));
+      const result = await summaryService.send({
+        periodType: "weekly",
+        periodKey: weekKey,
+        force: forceRequested(req),
+      });
+
+      res.status(200).json(result);
+    } catch (err) {
+      console.error("WEEKLY SUMMARY SEND ERROR:", err);
+      res.status(500).json({
+        ok: false,
+        error: err?.message || String(err),
+      });
     }
   });
 

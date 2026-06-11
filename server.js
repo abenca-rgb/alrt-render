@@ -53,6 +53,7 @@ import { createInviteService } from "./src/services/inviteService.js";
 import { createDailyStatsService } from "./src/services/dailyStatsService.js";
 import { createDailySummaryRunnerService } from "./src/services/dailySummaryRunnerService.js";
 import { createOptimizerReportingService } from "./src/services/optimizerReportingService.js";
+import { createPersistentSummaryService } from "./src/services/persistentSummaryService.js";
 import { createFreeChannelService } from "./src/services/freeChannelService.js";
 import { createHealthStateService } from "./src/services/healthStateService.js";
 import { createHitNotificationService } from "./src/services/hitNotificationService.js";
@@ -232,10 +233,6 @@ function persistRejectionToSupabase(payload) {
   supabasePersistence.persistRejection(payload);
 }
 
-function persistDailySummaryToSupabase(dateKey) {
-  supabasePersistence.persistDailySummary(dateKey);
-}
-
 function runOptimizerReport({ periodType, detail }) {
   return optimizerReportingService.runReport({ periodType, detail });
 }
@@ -297,20 +294,24 @@ async function markRecentHit(hitKey) {
 }
 
 // ===== DAILY SUMMARY =====
+const persistentSummaryService = createPersistentSummaryService({
+  supabase,
+  getDailyStat,
+  getActiveTrades: () => Array.from(activeTrades.values()),
+  sendTelegramMessage,
+  paidChatId: CHAT_ID,
+  freeChatId: FREE_CHAT_ID,
+});
+
 const dailySummaryRunner = createDailySummaryRunnerService({
   enabled: DAILY_SUMMARY_ENABLED,
   utcHour: DAILY_SUMMARY_UTC_HOUR,
   utcMinute: DAILY_SUMMARY_UTC_MINUTE,
-  getDailyStat,
-  getActiveTrades: () => Array.from(activeTrades.values()),
   getLastSummarySentDate: () => lastSummarySentDate,
   setLastSummarySentDate: (dateKey) => {
     lastSummarySentDate = dateKey;
   },
-  sendTelegramMessage,
-  paidChatId: CHAT_ID,
-  freeChatId: FREE_CHAT_ID,
-  persistDailySummaryToSupabase,
+  summaryService: persistentSummaryService,
   persistState,
 });
 
@@ -478,6 +479,7 @@ registerSystemRoutes(app, {
   },
   getHealthState: healthStateService.getHealthState,
   sendDailySummary,
+  summaryService: persistentSummaryService,
   runOptimizerReport,
   getUtcDateKey,
 });

@@ -10,7 +10,7 @@ const thisDir = path.dirname(thisFile);
 
 export const ROOT_DIR = path.resolve(thisDir, "../..");
 export const PORT = process.env.PORT || 3000;
-export const APP_VERSION = "v25.5.47-optimizer-monitoring-gates";
+export const APP_VERSION = "v25.5.48-deploy-safe-summaries";
 
 export const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 export const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
