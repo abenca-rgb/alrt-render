@@ -42,6 +42,7 @@ export function registerSystemRoutes(app, {
       candidateQualityFilterEnabled: config.candidateQualityFilterEnabled,
       learningLoggingEnabled: config.learningLoggingEnabled,
       candidateLoggingEnabled: config.candidateLoggingEnabled,
+      shadowValidationEnabled: config.shadowValidationEnabled,
       historicalQualityAdjustmentsEnabled: config.historicalQualityAdjustmentsEnabled,
       duplicateSuppressionEnabled: config.duplicateSuppressionEnabled,
       allowedSymbols: config.allowedSymbols,

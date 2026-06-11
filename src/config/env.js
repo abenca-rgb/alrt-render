@@ -10,7 +10,7 @@ const thisDir = path.dirname(thisFile);
 
 export const ROOT_DIR = path.resolve(thisDir, "../..");
 export const PORT = process.env.PORT || 3000;
-export const APP_VERSION = "v25.5.43-learning-foundation";
+export const APP_VERSION = "v25.5.44-shadow-validation";
 
 export const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 export const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
@@ -32,6 +32,8 @@ export const SHADOW_SCORING_ENABLED =
   String(process.env.SHADOW_SCORING_ENABLED || "false").toLowerCase() === "true";
 export const OPTIMIZER_REPORTS_ENABLED =
   String(process.env.OPTIMIZER_REPORTS_ENABLED || "false").toLowerCase() === "true";
+export const SHADOW_VALIDATION_ENABLED =
+  String(process.env.SHADOW_VALIDATION_ENABLED || "true").toLowerCase() !== "false";
 
 export const SUMMARY_ADMIN_TOKEN = process.env.SUMMARY_ADMIN_TOKEN || "";
 

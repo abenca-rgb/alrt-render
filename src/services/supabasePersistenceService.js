@@ -19,6 +19,14 @@ export function createSupabasePersistenceService({ supabase, getDailyStat, activ
     supabase.persistOutcome(payload);
   }
 
+  function persistShadowEvaluation(payload) {
+    supabase.persistShadowEvaluation(payload);
+  }
+
+  function updateShadowOutcome(payload) {
+    supabase.updateShadowOutcome(payload);
+  }
+
   function persistRejection(payload) {
     supabase.persistRejection(payload);
   }
@@ -44,6 +52,8 @@ export function createSupabasePersistenceService({ supabase, getDailyStat, activ
     persistCandidate,
     updateCandidateDecision,
     persistOutcome,
+    persistShadowEvaluation,
+    updateShadowOutcome,
     persistRejection,
     persistDailySummary,
   };

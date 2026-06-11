@@ -22,6 +22,7 @@ export function createCloseCompletionService({
   recentLossStops,
   recordCloseStat,
   persistOutcomeToSupabase,
+  updateShadowOutcome,
   markRecentHit,
   removeTrade,
 }) {
@@ -44,6 +45,12 @@ export function createCloseCompletionService({
       ts: closedAtMs,
     });
 
+    const rMultiple = estimateRMultiple({
+      trade,
+      finalCloseType,
+      movePct: sent.movePct,
+    });
+
     persistOutcomeToSupabase({
       trade,
       outcomeType: finalCloseType,
@@ -58,12 +65,16 @@ export function createCloseCompletionService({
         source,
         matchType: matched.matchType,
         candidateKey: trade.candidateKey || null,
-        rMultiple: estimateRMultiple({
-          trade,
-          finalCloseType,
-          movePct: sent.movePct,
-        }),
+        rMultiple,
       },
+    });
+
+    updateShadowOutcome?.({
+      trade,
+      outcomeType: finalCloseType,
+      outcomeTimeMs: closedAtMs,
+      movePct: sent.movePct,
+      rMultiple,
     });
 
     registerLossStop(recentLossStops, trade, finalCloseType, closedAtMs);

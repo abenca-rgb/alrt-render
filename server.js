@@ -38,6 +38,7 @@ import {
   ROOT_DIR,
   STATE_FILE,
   SUMMARY_ADMIN_TOKEN,
+  SHADOW_VALIDATION_ENABLED,
   SUPABASE_ENABLED,
   SUPABASE_SERVICE_ROLE_KEY,
   SUPABASE_URL,
@@ -55,6 +56,7 @@ import { createHealthStateService } from "./src/services/healthStateService.js";
 import { createHitNotificationService } from "./src/services/hitNotificationService.js";
 import { createRecentHitService } from "./src/services/recentHitService.js";
 import { createRefAllocatorService } from "./src/services/refAllocatorService.js";
+import { createShadowValidationService } from "./src/services/shadowValidationService.js";
 import { createSignalDeliveryService } from "./src/services/signalDeliveryService.js";
 import { createStripeMemberService } from "./src/services/stripeMemberService.js";
 import { createSupabasePersistenceService } from "./src/services/supabasePersistenceService.js";
@@ -212,6 +214,14 @@ function persistOutcomeToSupabase(payload) {
   supabasePersistence.persistOutcome(payload);
 }
 
+function persistShadowEvaluationToSupabase(payload) {
+  supabasePersistence.persistShadowEvaluation(payload);
+}
+
+function updateShadowOutcomeInSupabase(payload) {
+  supabasePersistence.updateShadowOutcome(payload);
+}
+
 function persistRejectionToSupabase(payload) {
   supabasePersistence.persistRejection(payload);
 }
@@ -242,6 +252,13 @@ const candidateLoggingService = createCandidateLoggingService({
   enabled: LEARNING_LOGGING_ENABLED && CANDIDATE_LOGGING_ENABLED,
   persistCandidateToSupabase,
   updateCandidateDecisionInSupabase,
+});
+
+const shadowValidationService = createShadowValidationService({
+  enabled: LEARNING_LOGGING_ENABLED && SHADOW_VALIDATION_ENABLED,
+  activeTrades,
+  persistShadowEvaluationToSupabase,
+  updateShadowOutcomeInSupabase,
 });
 
 // ===== FREE CHANNEL =====
@@ -333,6 +350,7 @@ const closeCompletionService = createCloseCompletionService({
   recentLossStops,
   recordCloseStat,
   persistOutcomeToSupabase,
+  updateShadowOutcome: shadowValidationService.updateOutcome,
   markRecentHit,
   removeTrade,
 });
@@ -436,6 +454,7 @@ registerSystemRoutes(app, {
     candidateQualityFilterEnabled: CANDIDATE_QUALITY_FILTER_ENABLED,
     learningLoggingEnabled: LEARNING_LOGGING_ENABLED,
     candidateLoggingEnabled: CANDIDATE_LOGGING_ENABLED,
+    shadowValidationEnabled: SHADOW_VALIDATION_ENABLED,
     historicalQualityAdjustmentsEnabled: HISTORICAL_QUALITY_ADJUSTMENTS_ENABLED,
     duplicateSuppressionEnabled: DUPLICATE_SUPPRESSION_ENABLED,
     allowedSymbols: ALLOWED_SYMBOLS,
@@ -769,6 +788,14 @@ async function handleTradingViewWebhook(req, res) {
       alertId: delivery.primaryAlertId,
       postedToPaid: true,
       postedToFree: delivery.sharedToFree,
+    });
+
+    shadowValidationService.evaluateAcceptedSignal({
+      body,
+      context: signalContext,
+      delivery,
+      receivedAtMs,
+      liveDecision: "ACCEPTED",
     });
   } catch (err) {
     console.error("ERROR:", err);

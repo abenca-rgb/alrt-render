@@ -236,6 +236,180 @@ export function createSupabaseService({ enabled, url, serviceRoleKey, backendVer
     );
   }
 
+  function persistShadowEvaluation({
+    candidateKey,
+    alertId,
+    refId,
+    symbol,
+    side,
+    timeframe,
+    setupType,
+    liveDecision,
+    shadowVersion,
+    eventTimeMs,
+    rawContext,
+    ruleResults = [],
+    comboResults = [],
+  }) {
+    if (!candidateKey || !shadowVersion) return;
+
+    background("SHADOW EVALUATION UPSERT", async () => {
+      const evaluatedAtUtc = new Date().toISOString();
+
+      await request("shadow_evaluations", {
+        query: "?on_conflict=candidate_key,shadow_version",
+        prefer: "resolution=merge-duplicates,return=minimal",
+        body: {
+          candidate_key: String(candidateKey),
+          alert_id: alertId ? String(alertId) : null,
+          ref_id: refId ? String(refId) : null,
+          symbol: symbol || null,
+          direction: side || null,
+          timeframe: timeframe || null,
+          setup_type: setupType || null,
+          live_decision: liveDecision || "ACCEPTED",
+          shadow_version: shadowVersion,
+          event_time_utc: isoFromMs(eventTimeMs),
+          evaluated_at_utc: evaluatedAtUtc,
+          raw_context: rawContext || null,
+        },
+      });
+
+      if (ruleResults.length) {
+        await request("shadow_rule_results", {
+          query: "?on_conflict=candidate_key,shadow_version,rule_name",
+          prefer: "resolution=merge-duplicates,return=minimal",
+          body: ruleResults.map((rule) => ({
+            candidate_key: String(candidateKey),
+            alert_id: alertId ? String(alertId) : null,
+            ref_id: refId ? String(refId) : null,
+            rule_name: rule.ruleName,
+            rule_status: rule.status,
+            score_adjustment: rule.scoreAdjustment ?? 0,
+            would_reject: Boolean(rule.wouldReject),
+            reason: rule.reason || null,
+            details: rule.details || null,
+            shadow_version: shadowVersion,
+            evaluated_at_utc: evaluatedAtUtc,
+          })),
+        });
+      }
+
+      if (comboResults.length) {
+        await request("shadow_combo_results", {
+          query: "?on_conflict=candidate_key,shadow_version,combo_name",
+          prefer: "resolution=merge-duplicates,return=minimal",
+          body: comboResults.map((combo) => ({
+            candidate_key: String(candidateKey),
+            alert_id: alertId ? String(alertId) : null,
+            ref_id: refId ? String(refId) : null,
+            combo_name: combo.comboName,
+            rule_names: combo.ruleNames,
+            combo_status: combo.status,
+            total_score_adjustment: combo.totalScoreAdjustment ?? 0,
+            would_reject: Boolean(combo.wouldReject),
+            reasons: combo.reasons || [],
+            details: combo.details || null,
+            shadow_version: shadowVersion,
+            evaluated_at_utc: evaluatedAtUtc,
+          })),
+        });
+      }
+    });
+  }
+
+  function updateShadowOutcome({
+    candidateKey,
+    alertId,
+    refId,
+    outcomeType,
+    outcomeTimeMs,
+    movePct,
+    rMultiple,
+    outcomeEffect,
+  }) {
+    if (!candidateKey) return;
+
+    const outcomeTimeUtc = isoFromMs(outcomeTimeMs);
+
+    background("SHADOW OUTCOME UPDATE", async () => {
+      await request("shadow_evaluations", {
+        method: "PATCH",
+        query: `?candidate_key=eq.${encodeURIComponent(String(candidateKey))}`,
+        body: {
+          alert_id: alertId ? String(alertId) : null,
+          ref_id: refId ? String(refId) : null,
+          outcome_type: outcomeType || null,
+          outcome_time_utc: outcomeTimeUtc,
+          move_pct: movePct ?? null,
+          r_multiple: rMultiple ?? null,
+        },
+      });
+
+      const ruleResponse = await fetch(
+        `${url}/rest/v1/shadow_rule_results?candidate_key=eq.${encodeURIComponent(String(candidateKey))}&select=id,would_reject`,
+        {
+          method: "GET",
+          headers: {
+            apikey: serviceRoleKey,
+            Authorization: `Bearer ${serviceRoleKey}`,
+            "Content-Type": "application/json",
+          },
+        },
+      );
+      const ruleRows = ruleResponse.ok ? await ruleResponse.json() : [];
+
+      for (const row of ruleRows) {
+        const effect = outcomeEffect(outcomeType, Boolean(row.would_reject));
+        await request("shadow_rule_results", {
+          method: "PATCH",
+          query: `?id=eq.${encodeURIComponent(String(row.id))}`,
+          body: {
+            alert_id: alertId ? String(alertId) : null,
+            ref_id: refId ? String(refId) : null,
+            outcome_type: outcomeType || null,
+            outcome_time_utc: outcomeTimeUtc,
+            move_pct: movePct ?? null,
+            r_multiple: rMultiple ?? null,
+            rejection_would_help: effect.rejectionWouldHelp,
+            rejection_would_hurt: effect.rejectionWouldHurt,
+          },
+        });
+      }
+
+      const comboResponse = await fetch(
+        `${url}/rest/v1/shadow_combo_results?candidate_key=eq.${encodeURIComponent(String(candidateKey))}&select=id,would_reject`,
+        {
+          method: "GET",
+          headers: {
+            apikey: serviceRoleKey,
+            Authorization: `Bearer ${serviceRoleKey}`,
+            "Content-Type": "application/json",
+          },
+        },
+      );
+      const comboRows = comboResponse.ok ? await comboResponse.json() : [];
+
+      for (const row of comboRows) {
+        const effect = outcomeEffect(outcomeType, Boolean(row.would_reject));
+        await request("shadow_combo_results", {
+          method: "PATCH",
+          query: `?id=eq.${encodeURIComponent(String(row.id))}`,
+          body: {
+            alert_id: alertId ? String(alertId) : null,
+            ref_id: refId ? String(refId) : null,
+            outcome_type: outcomeType || null,
+            outcome_time_utc: outcomeTimeUtc,
+            move_pct: movePct ?? null,
+            r_multiple: rMultiple ?? null,
+            rejection_would_help: effect.rejectionWouldHelp,
+            rejection_would_hurt: effect.rejectionWouldHurt,
+          },
+        });
+      }
+    });
+  }
+
   function persistRejection({ symbol, side, setupType, reason, qualityScore, qualityGrade, rawPayload }) {
     background("REJECTION INSERT", () =>
       request("alert_rejections", {
@@ -282,6 +456,8 @@ export function createSupabaseService({ enabled, url, serviceRoleKey, backendVer
     persistCandidate,
     updateCandidateDecision,
     persistOutcome,
+    persistShadowEvaluation,
+    updateShadowOutcome,
     persistRejection,
     persistDailySummary,
   };
