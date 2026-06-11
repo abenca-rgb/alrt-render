@@ -2,6 +2,7 @@ export function registerSystemRoutes(app, {
   config,
   getHealthState,
   sendDailySummary,
+  runOptimizerReport,
   getUtcDateKey,
 } = {}) {
   app.get("/", (req, res) => {
@@ -43,6 +44,7 @@ export function registerSystemRoutes(app, {
       learningLoggingEnabled: config.learningLoggingEnabled,
       candidateLoggingEnabled: config.candidateLoggingEnabled,
       shadowValidationEnabled: config.shadowValidationEnabled,
+      optimizerReportsEnabled: config.optimizerReportsEnabled,
       historicalQualityAdjustmentsEnabled: config.historicalQualityAdjustmentsEnabled,
       duplicateSuppressionEnabled: config.duplicateSuppressionEnabled,
       allowedSymbols: config.allowedSymbols,
@@ -57,6 +59,7 @@ export function registerSystemRoutes(app, {
       dailySummaryUtcHour: config.dailySummaryUtcHour,
       dailySummaryUtcMinute: config.dailySummaryUtcMinute,
       manualSummaryEnabled: Boolean(config.summaryAdminToken),
+      manualOptimizerEnabled: Boolean(config.summaryAdminToken && config.optimizerReportsEnabled),
       paidMembers: state.paidMembers,
       freeMembers: state.freeMembers,
     });
@@ -82,6 +85,36 @@ export function registerSystemRoutes(app, {
       await sendDailySummary(dateKey, true);
     } catch (err) {
       console.error("MANUAL SUMMARY ERROR:", err);
+    }
+  });
+
+  app.post("/optimizer/run-now", async (req, res) => {
+    const token = String(req.query.token || req.headers["x-summary-token"] || "");
+    const periodType = String(req.query.period || req.body?.period || "all");
+
+    if (!config.summaryAdminToken || token !== config.summaryAdminToken) {
+      return res.status(403).json({
+        ok: false,
+        error: "manual optimizer disabled",
+      });
+    }
+
+    if (!config.optimizerReportsEnabled || !runOptimizerReport) {
+      return res.status(503).json({
+        ok: false,
+        error: "optimizer reports disabled",
+      });
+    }
+
+    try {
+      const report = await runOptimizerReport({ periodType });
+      res.status(200).json(report);
+    } catch (err) {
+      console.error("MANUAL OPTIMIZER ERROR:", err);
+      res.status(500).json({
+        ok: false,
+        error: err?.message || String(err),
+      });
     }
   });
 }

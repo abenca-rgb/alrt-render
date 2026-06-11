@@ -46,6 +46,10 @@ export function createSupabasePersistenceService({ supabase, getDailyStat, activ
     supabase.persistDailySummary({ dateKey, stat, openCount, winrate });
   }
 
+  function persistOptimizerReport(payload) {
+    return supabase.persistOptimizerReport(payload);
+  }
+
   return {
     ready,
     persistAlert,
@@ -56,5 +60,6 @@ export function createSupabasePersistenceService({ supabase, getDailyStat, activ
     updateShadowOutcome,
     persistRejection,
     persistDailySummary,
+    persistOptimizerReport,
   };
 }

@@ -49,6 +49,26 @@ export function createSupabaseService({ enabled, url, serviceRoleKey, backendVer
     return response.json();
   }
 
+  async function selectRows(table, query = "") {
+    if (!ready()) return [];
+
+    const response = await fetch(`${url}/rest/v1/${table}${query}`, {
+      method: "GET",
+      headers: {
+        apikey: serviceRoleKey,
+        Authorization: `Bearer ${serviceRoleKey}`,
+        "Content-Type": "application/json",
+      },
+    });
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      throw new Error(`Supabase ${table} SELECT failed ${response.status}: ${text}`);
+    }
+
+    return response.json();
+  }
+
   function background(label, task) {
     if (!ready()) return;
 
@@ -448,10 +468,63 @@ export function createSupabaseService({ enabled, url, serviceRoleKey, backendVer
     );
   }
 
+  async function persistOptimizerReport({
+    period,
+    generatedAtUtc,
+    ruleSnapshots = [],
+    comboSnapshots = [],
+    recommendations = [],
+    summary = {},
+  }) {
+    if (!ready()) return { skipped: true };
+
+    if (ruleSnapshots.length) {
+      await request("optimizer_rule_snapshots", {
+        query: "?on_conflict=snapshot_key",
+        prefer: "resolution=merge-duplicates,return=minimal",
+        body: ruleSnapshots,
+      });
+    }
+
+    if (comboSnapshots.length) {
+      await request("optimizer_combo_snapshots", {
+        query: "?on_conflict=snapshot_key",
+        prefer: "resolution=merge-duplicates,return=minimal",
+        body: comboSnapshots,
+      });
+    }
+
+    if (recommendations.length) {
+      await request("optimizer_recommendations", {
+        query: "?on_conflict=recommendation_key",
+        prefer: "resolution=merge-duplicates,return=minimal",
+        body: recommendations,
+      });
+    }
+
+    await request("shadow_optimizer_reports", {
+      query: "?on_conflict=report_key",
+      prefer: "resolution=merge-duplicates,return=minimal",
+      body: {
+        report_key: `phase4a:${period.periodType}:${period.start ? period.start.toISOString() : "all"}`,
+        report_type: `phase4a_${period.periodType}`,
+        shadow_version: summary.shadowVersion || "mixed",
+        period_start_utc: period.start ? period.start.toISOString() : null,
+        period_end_utc: period.end ? period.end.toISOString() : null,
+        generated_at_utc: generatedAtUtc,
+        summary,
+        recommendations,
+      },
+    });
+
+    return { ok: true };
+  }
+
   return {
     ready,
     request,
     rpc,
+    selectRows,
     persistAlert,
     persistCandidate,
     updateCandidateDecision,
@@ -460,5 +533,6 @@ export function createSupabaseService({ enabled, url, serviceRoleKey, backendVer
     updateShadowOutcome,
     persistRejection,
     persistDailySummary,
+    persistOptimizerReport,
   };
 }

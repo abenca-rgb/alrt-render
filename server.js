@@ -39,6 +39,7 @@ import {
   STATE_FILE,
   SUMMARY_ADMIN_TOKEN,
   SHADOW_VALIDATION_ENABLED,
+  OPTIMIZER_REPORTS_ENABLED,
   SUPABASE_ENABLED,
   SUPABASE_SERVICE_ROLE_KEY,
   SUPABASE_URL,
@@ -51,6 +52,7 @@ import { appendChartLinkIfMissing } from "./src/services/messageTemplates.js";
 import { createInviteService } from "./src/services/inviteService.js";
 import { createDailyStatsService } from "./src/services/dailyStatsService.js";
 import { createDailySummaryRunnerService } from "./src/services/dailySummaryRunnerService.js";
+import { createOptimizerReportingService } from "./src/services/optimizerReportingService.js";
 import { createFreeChannelService } from "./src/services/freeChannelService.js";
 import { createHealthStateService } from "./src/services/healthStateService.js";
 import { createHitNotificationService } from "./src/services/hitNotificationService.js";
@@ -194,6 +196,10 @@ const supabasePersistence = createSupabasePersistenceService({
   activeTrades,
 });
 
+const optimizerReportingService = createOptimizerReportingService({
+  supabase,
+});
+
 function supabaseReady() {
   return supabasePersistence.ready();
 }
@@ -228,6 +234,10 @@ function persistRejectionToSupabase(payload) {
 
 function persistDailySummaryToSupabase(dateKey) {
   supabasePersistence.persistDailySummary(dateKey);
+}
+
+function runOptimizerReport({ periodType }) {
+  return optimizerReportingService.runReport({ periodType });
 }
 
 const freeChannelService = createFreeChannelService({
@@ -455,6 +465,7 @@ registerSystemRoutes(app, {
     learningLoggingEnabled: LEARNING_LOGGING_ENABLED,
     candidateLoggingEnabled: CANDIDATE_LOGGING_ENABLED,
     shadowValidationEnabled: SHADOW_VALIDATION_ENABLED,
+    optimizerReportsEnabled: OPTIMIZER_REPORTS_ENABLED,
     historicalQualityAdjustmentsEnabled: HISTORICAL_QUALITY_ADJUSTMENTS_ENABLED,
     duplicateSuppressionEnabled: DUPLICATE_SUPPRESSION_ENABLED,
     allowedSymbols: ALLOWED_SYMBOLS,
@@ -467,6 +478,7 @@ registerSystemRoutes(app, {
   },
   getHealthState: healthStateService.getHealthState,
   sendDailySummary,
+  runOptimizerReport,
   getUtcDateKey,
 });
 
