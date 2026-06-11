@@ -236,8 +236,8 @@ function persistDailySummaryToSupabase(dateKey) {
   supabasePersistence.persistDailySummary(dateKey);
 }
 
-function runOptimizerReport({ periodType }) {
-  return optimizerReportingService.runReport({ periodType });
+function runOptimizerReport({ periodType, detail }) {
+  return optimizerReportingService.runReport({ periodType, detail });
 }
 
 const freeChannelService = createFreeChannelService({

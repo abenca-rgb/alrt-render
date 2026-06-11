@@ -89,6 +89,78 @@ function getConfidence(closedOutcomes, expectancyDelta = 0) {
   };
 }
 
+function dayDiff(start, end) {
+  const first = parseDate(start);
+  const last = parseDate(end);
+  if (!first || !last) return 0;
+  const ms = Math.max(0, last.getTime() - first.getTime());
+  return Math.floor(ms / (24 * 60 * 60 * 1000)) + 1;
+}
+
+function stabilityScore({ netValue, expectancyDelta, closedOutcomes }) {
+  if (!closedOutcomes) return 0;
+  let score = 50;
+  if (netValue > 0) score += 15;
+  if (netValue < 0) score -= 20;
+  if (expectancyDelta !== null && expectancyDelta >= 0) score += 15;
+  if (expectancyDelta !== null && expectancyDelta < 0) score -= 25;
+  if (closedOutcomes >= 100) score += 10;
+  if (closedOutcomes >= 250) score += 10;
+  return Math.max(0, Math.min(100, score));
+}
+
+function recommendationStatus({
+  closedOutcomes,
+  observationDays,
+  netValue,
+  expectancyDelta,
+  confidenceLevel,
+  stability,
+}) {
+  if (closedOutcomes < 20) return "insufficient_sample";
+
+  const expectancyOk = expectancyDelta === null || expectancyDelta >= 0;
+  const confidenceRank = {
+    INSUFFICIENT_SAMPLE: 0,
+    LOW: 1,
+    MEDIUM_LOW: 2,
+    MEDIUM: 3,
+    HIGH: 4,
+    VERY_HIGH: 5,
+  };
+  const confidence = confidenceRank[confidenceLevel] || 0;
+
+  if (closedOutcomes >= 20 && netValue < 0 && expectancyDelta !== null && expectancyDelta < 0) {
+    return "harmful";
+  }
+  if (closedOutcomes >= 50 && netValue <= 0 && expectancyDelta !== null && expectancyDelta < 0) {
+    return "discard";
+  }
+  if (
+    closedOutcomes >= 250 &&
+    observationDays >= 60 &&
+    netValue > 0 &&
+    expectancyOk &&
+    confidence >= confidenceRank.HIGH &&
+    stability >= 70
+  ) {
+    return "ready_for_ab_test";
+  }
+  if (
+    closedOutcomes >= 100 &&
+    observationDays >= 30 &&
+    netValue > 0 &&
+    expectancyOk &&
+    confidence >= confidenceRank.MEDIUM
+  ) {
+    return "candidate_for_test";
+  }
+  if (closedOutcomes >= 50 && netValue > 0 && expectancyOk) {
+    return "promising";
+  }
+  return "watch";
+}
+
 function summarizeRows(rows, groupKey, subjectType) {
   const groups = new Map();
 
@@ -145,19 +217,19 @@ function summarizeRows(rows, groupKey, subjectType) {
 
     const rValues = closedItems.map((row) => numberOrNull(row.r_multiple)).filter((value) => value !== null);
     const avgRMultiple = rValues.length ? rValues.reduce((sum, value) => sum + value, 0) / rValues.length : null;
+    const observedTimes = items.map((row) => row.evaluated_at_utc).filter(Boolean).sort();
+    const observationDays = observedTimes.length ? dayDiff(observedTimes[0], observedTimes[observedTimes.length - 1]) : 0;
 
     const confidence = getConfidence(closedOutcomes, expectancyDelta || 0);
-    let recommendationStatus = confidence.recommendationStatus;
-
-    if (closedOutcomes >= 20) {
-      if (netValue > 0 && (expectancyDelta === null || expectancyDelta >= 0)) {
-        recommendationStatus = confidence.confidenceLevel === "LOW" || confidence.confidenceLevel === "MEDIUM_LOW"
-          ? "promising_watch"
-          : "candidate_for_ab_test";
-      } else if (netValue < 0 || (expectancyDelta !== null && expectancyDelta < 0)) {
-        recommendationStatus = "harmful_or_discard";
-      }
-    }
+    const stability = stabilityScore({ netValue, expectancyDelta, closedOutcomes });
+    const status = recommendationStatus({
+      closedOutcomes,
+      observationDays,
+      netValue,
+      expectancyDelta,
+      confidenceLevel: confidence.confidenceLevel,
+      stability,
+    });
 
     return {
       subjectType,
@@ -184,9 +256,11 @@ function summarizeRows(rows, groupKey, subjectType) {
       simulatedExpectancy,
       expectancyDelta,
       avgRMultiple,
+      observationDays,
+      stabilityScore: stability,
       confidenceLevel: confidence.confidenceLevel,
       confidenceScore: confidence.confidenceScore,
-      recommendationStatus,
+      recommendationStatus: status,
     };
   });
 }
@@ -210,20 +284,58 @@ function recommendationText(item) {
   if (item.confidenceLevel === "INSUFFICIENT_SAMPLE") {
     return "Niet beoordelen: te weinig gesloten outcomes.";
   }
-  if (item.recommendationStatus === "candidate_for_ab_test") {
-    return "Kandidaat voor toekomstige live A/B test, na menselijke review.";
+  if (item.recommendationStatus === "ready_for_ab_test") {
+    return "Klaar voor toekomstige A/B test, alleen na menselijke goedkeuring.";
   }
-  if (item.recommendationStatus === "promising_watch") {
+  if (item.recommendationStatus === "candidate_for_test") {
+    return "Kandidaat voor toekomstige test, alleen na menselijke review.";
+  }
+  if (item.recommendationStatus === "promising") {
     return "Veelbelovend, maar eerst meer live outcomes verzamelen.";
   }
-  if (item.recommendationStatus === "harmful_or_discard") {
-    return "Niet activeren; huidige evidence is negatief of schadelijk.";
+  if (item.recommendationStatus === "harmful") {
+    return "Niet activeren; huidige evidence is schadelijk.";
+  }
+  if (item.recommendationStatus === "discard") {
+    return "Niet activeren; huidige evidence is structureel zwak.";
   }
   return "Blijven monitoren.";
 }
 
+function publicRecommendation(item) {
+  return {
+    rank: item.rank,
+    subjectType: item.subject_type,
+    subjectName: item.subject_name,
+    sampleSize: item.sample_size,
+    confidenceLevel: item.confidence_level,
+    status: item.status,
+    estimatedImpact: item.estimated_impact,
+    recommendation: item.recommendation,
+  };
+}
+
+function compactSnapshot(item) {
+  return {
+    subjectType: item.subjectType,
+    subjectName: item.subjectName,
+    sampleSize: item.closedOutcomes,
+    evaluatedAlerts: item.evaluatedAlerts,
+    flaggedAlerts: item.flaggedAlerts,
+    lossesAvoided: item.lossesAvoided,
+    winsMissed: item.winsMissed,
+    netValue: item.netValue,
+    expectancyDelta: item.expectancyDelta,
+    confidenceLevel: item.confidenceLevel,
+    confidenceScore: item.confidenceScore,
+    status: item.recommendationStatus,
+    observationDays: item.observationDays,
+    stabilityScore: item.stabilityScore,
+  };
+}
+
 export function createOptimizerReportingService({ supabase }) {
-  async function runReport({ periodType = "all", now = new Date() } = {}) {
+  async function runReport({ periodType = "all", now = new Date(), detail = "compact" } = {}) {
     const period = getPeriod(periodType, now);
     const ruleQuery = periodQuery(period, [
       "candidate_key",
@@ -288,6 +400,8 @@ export function createOptimizerReportingService({ supabase }) {
       simulated_expectancy: item.simulatedExpectancy,
       expectancy_delta: item.expectancyDelta,
       avg_r_multiple: item.avgRMultiple,
+      observation_days: item.observationDays,
+      stability_score: item.stabilityScore,
       confidence_level: item.confidenceLevel,
       confidence_score: item.confidenceScore,
       recommendation_status: item.recommendationStatus,
@@ -322,6 +436,8 @@ export function createOptimizerReportingService({ supabase }) {
       simulated_expectancy: item.simulatedExpectancy,
       expectancy_delta: item.expectancyDelta,
       avg_r_multiple: item.avgRMultiple,
+      observation_days: item.observationDays,
+      stability_score: item.stabilityScore,
       confidence_level: item.confidenceLevel,
       confidence_score: item.confidenceScore,
       recommendation_status: item.recommendationStatus,
@@ -351,10 +467,57 @@ export function createOptimizerReportingService({ supabase }) {
         winsMissed: item.winsMissed,
         winrateDelta: item.winrateDelta,
         expectancyDelta: item.expectancyDelta,
+        observationDays: item.observationDays,
+        stabilityScore: item.stabilityScore,
       },
       recommendation: recommendationText(item),
       generated_at_utc: generatedAtUtc,
     }));
+    const compactRecommendations = recommendations.map(publicRecommendation);
+    const monitoringReport = {
+      report_key: `phase4b:${period.periodType}:${period.start ? period.start.toISOString() : "all"}`,
+      report_type: `phase4b_${period.periodType}`,
+      period_type: period.periodType,
+      period_start_utc: period.start ? period.start.toISOString() : null,
+      period_end_utc: period.end ? period.end.toISOString() : null,
+      generated_at_utc: generatedAtUtc,
+      summary: {
+        periodType: period.periodType,
+        rulesEvaluated: rankedRules.length,
+        combosEvaluated: rankedCombos.length,
+        recommendationCount: recommendations.length,
+        topRule: rankedRules[0]?.subjectName || null,
+        topCombo: rankedCombos[0]?.subjectName || null,
+        minClosedOutcomesForJudgement: 20,
+        candidateForTestGate: {
+          closedOutcomes: 100,
+          observationDays: 30,
+          netGain: "positive",
+          expectancyImpact: "non_negative",
+          confidence: "MEDIUM",
+        },
+        readyForAbTestGate: {
+          closedOutcomes: 250,
+          observationDays: 60,
+          performance: "stable_positive",
+          confidence: "HIGH",
+        },
+      },
+      top_rules: rankedRules.slice(0, 10).map(compactSnapshot),
+      top_combos: rankedCombos.slice(0, 10).map(compactSnapshot),
+      fastest_improving: [],
+      fastest_declining: [],
+      highest_confidence: allRanked
+        .slice()
+        .sort((a, b) => b.confidenceScore - a.confidenceScore || b.closedOutcomes - a.closedOutcomes)
+        .slice(0, 10)
+        .map(compactSnapshot),
+      largest_sample: allRanked
+        .slice()
+        .sort((a, b) => b.closedOutcomes - a.closedOutcomes || b.confidenceScore - a.confidenceScore)
+        .slice(0, 10)
+        .map(compactSnapshot),
+    };
 
     await supabase.persistOptimizerReport({
       period,
@@ -362,6 +525,7 @@ export function createOptimizerReportingService({ supabase }) {
       ruleSnapshots,
       comboSnapshots,
       recommendations,
+      monitoringReport,
       summary: {
         periodType: period.periodType,
         ruleCount: rankedRules.length,
@@ -378,9 +542,21 @@ export function createOptimizerReportingService({ supabase }) {
       periodStartUtc: period.start ? period.start.toISOString() : null,
       periodEndUtc: period.end ? period.end.toISOString() : null,
       generatedAtUtc,
-      rules: rankedRules.slice(0, 20),
-      combos: rankedCombos.slice(0, 20),
-      recommendations,
+      summary: {
+        rulesEvaluated: rankedRules.length,
+        combosEvaluated: rankedCombos.length,
+        recommendations: recommendations.length,
+        topRule: rankedRules[0]?.subjectName || null,
+        topCombo: rankedCombos[0]?.subjectName || null,
+        highestConfidence: allRanked[0]?.confidenceLevel || "INSUFFICIENT_SAMPLE",
+      },
+      recommendations: compactRecommendations,
+      ...(detail === "full"
+        ? {
+            rules: rankedRules.slice(0, 20),
+            combos: rankedCombos.slice(0, 20),
+          }
+        : {}),
     };
   }
 

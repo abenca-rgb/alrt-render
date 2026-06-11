@@ -91,6 +91,7 @@ export function registerSystemRoutes(app, {
   app.post("/optimizer/run-now", async (req, res) => {
     const token = String(req.query.token || req.headers["x-summary-token"] || "");
     const periodType = String(req.query.period || req.body?.period || "all");
+    const detail = String(req.query.detail || req.body?.detail || "compact");
 
     if (!config.summaryAdminToken || token !== config.summaryAdminToken) {
       return res.status(403).json({
@@ -107,7 +108,24 @@ export function registerSystemRoutes(app, {
     }
 
     try {
-      const report = await runOptimizerReport({ periodType });
+      if (periodType === "all_periods") {
+        const periods = ["daily", "weekly", "monthly", "all"];
+        const reports = [];
+        for (const period of periods) {
+          reports.push(await runOptimizerReport({ periodType: period, detail: "compact" }));
+        }
+        return res.status(200).json({
+          ok: true,
+          periods: reports.map((report) => ({
+            periodType: report.periodType,
+            generatedAtUtc: report.generatedAtUtc,
+            summary: report.summary,
+            recommendationCount: report.recommendations?.length || 0,
+          })),
+        });
+      }
+
+      const report = await runOptimizerReport({ periodType, detail });
       res.status(200).json(report);
     } catch (err) {
       console.error("MANUAL OPTIMIZER ERROR:", err);

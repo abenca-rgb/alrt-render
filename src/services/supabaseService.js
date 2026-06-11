@@ -475,6 +475,7 @@ export function createSupabaseService({ enabled, url, serviceRoleKey, backendVer
     comboSnapshots = [],
     recommendations = [],
     summary = {},
+    monitoringReport = null,
   }) {
     if (!ready()) return { skipped: true };
 
@@ -516,6 +517,14 @@ export function createSupabaseService({ enabled, url, serviceRoleKey, backendVer
         recommendations,
       },
     });
+
+    if (monitoringReport) {
+      await request("optimizer_monitoring_reports", {
+        query: "?on_conflict=report_key",
+        prefer: "resolution=merge-duplicates,return=minimal",
+        body: monitoringReport,
+      });
+    }
 
     return { ok: true };
   }
