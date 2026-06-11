@@ -30,9 +30,9 @@ function getPeriod(periodType, now = new Date()) {
   return { periodType: "all", start: null, end: now };
 }
 
-function periodQuery({ start, end }) {
+function periodQuery({ start, end }, selectColumns) {
   const params = [
-    "select=candidate_key,alert_id,ref_id,rule_name,combo_name,rule_names,shadow_version,would_reject,outcome_type,move_pct,r_multiple,evaluated_at_utc",
+    `select=${selectColumns.join(",")}`,
   ];
   if (start) params.push(`evaluated_at_utc=gte.${encodeURIComponent(start.toISOString())}`);
   if (end) params.push(`evaluated_at_utc=lte.${encodeURIComponent(end.toISOString())}`);
@@ -225,11 +225,35 @@ function recommendationText(item) {
 export function createOptimizerReportingService({ supabase }) {
   async function runReport({ periodType = "all", now = new Date() } = {}) {
     const period = getPeriod(periodType, now);
-    const query = periodQuery(period);
+    const ruleQuery = periodQuery(period, [
+      "candidate_key",
+      "alert_id",
+      "ref_id",
+      "rule_name",
+      "shadow_version",
+      "would_reject",
+      "outcome_type",
+      "move_pct",
+      "r_multiple",
+      "evaluated_at_utc",
+    ]);
+    const comboQuery = periodQuery(period, [
+      "candidate_key",
+      "alert_id",
+      "ref_id",
+      "combo_name",
+      "rule_names",
+      "shadow_version",
+      "would_reject",
+      "outcome_type",
+      "move_pct",
+      "r_multiple",
+      "evaluated_at_utc",
+    ]);
 
     const [ruleRows, comboRows] = await Promise.all([
-      supabase.selectRows("shadow_rule_results", query),
-      supabase.selectRows("shadow_combo_results", query),
+      supabase.selectRows("shadow_rule_results", ruleQuery),
+      supabase.selectRows("shadow_combo_results", comboQuery),
     ]);
 
     const generatedAtUtc = new Date().toISOString();
