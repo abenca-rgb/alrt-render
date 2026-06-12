@@ -5,6 +5,7 @@
   "scripts": {
     "start": "node server.js",
     "guardrail:cluster-impact": "node scripts/guardrails/clusterImpactAnalysis.js",
+    "guardrail:investigate-cluster-pairs": "node scripts/guardrails/investigateClusterPairs.js",
     "postinstall": "npx playwright install chromium"
   },
   "dependencies": {

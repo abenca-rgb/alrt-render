@@ -85,9 +85,11 @@ function analyzePeriod(alerts, days) {
       });
 
     if (previous) {
+      const secondsSincePreviousAlert = Math.max(0, Math.round((alert.signalTimeMs - previous.signalTimeMs) / 1000));
       blocked.push({
         ...alert,
         matchedPreviousAlertId: previous.alertId,
+        secondsSincePreviousAlert,
         minutesSincePreviousAlert: Math.max(0, Math.round((alert.signalTimeMs - previous.signalTimeMs) / 60000)),
       });
       continue;
@@ -126,6 +128,7 @@ function analyzePeriod(alerts, days) {
       setupGroup: alert.setupGroup,
       signalTimeUtc: alert.signalTimeUtc,
       matchedPreviousAlertId: alert.matchedPreviousAlertId,
+      secondsSincePreviousAlert: alert.secondsSincePreviousAlert,
       minutesSincePreviousAlert: alert.minutesSincePreviousAlert,
       outcomeType: alert.outcomeType,
     })),
