@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
+    "guardrail:cluster-impact": "node scripts/guardrails/clusterImpactAnalysis.js",
     "postinstall": "npx playwright install chromium"
   },
   "dependencies": {

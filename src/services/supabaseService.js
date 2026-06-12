@@ -446,6 +446,50 @@ export function createSupabaseService({ enabled, url, serviceRoleKey, backendVer
     );
   }
 
+  function persistGuardrailBlock({
+    alertId,
+    candidateKey,
+    symbol,
+    side,
+    setupType,
+    setupGroup,
+    blockedBy,
+    matchedPreviousAlertId,
+    matchedPreviousRefId,
+    minutesSincePreviousAlert,
+    timestampMs,
+    guardrailVersion,
+    mode,
+    windowMinutes,
+    rawPayload,
+  }) {
+    if (!alertId || !blockedBy) return;
+
+    background("GUARDRAIL BLOCK INSERT", () =>
+      request("guardrail_blocks", {
+        query: "?on_conflict=alert_id,blocked_by,guardrail_version",
+        prefer: "resolution=merge-duplicates,return=minimal",
+        body: {
+          alert_id: String(alertId),
+          candidate_key: candidateKey ? String(candidateKey) : null,
+          symbol: symbol || null,
+          direction: side || null,
+          setup_type: setupType || "UNKNOWN",
+          setup_group: setupGroup || "UNKNOWN",
+          blocked_by: blockedBy,
+          matched_previous_alert_id: matchedPreviousAlertId ? String(matchedPreviousAlertId) : null,
+          matched_previous_ref_id: matchedPreviousRefId ? String(matchedPreviousRefId) : null,
+          minutes_since_previous_alert: minutesSincePreviousAlert ?? null,
+          timestamp_utc: isoFromMs(timestampMs),
+          guardrail_version: guardrailVersion || null,
+          mode: mode || null,
+          window_minutes: windowMinutes ?? null,
+          raw_payload: rawPayload || null,
+        },
+      }),
+    );
+  }
+
   function persistDailySummary({ dateKey, stat, openCount, winrate }) {
     background("DAILY SUMMARY UPSERT", () =>
       request("daily_summaries", {
@@ -541,6 +585,7 @@ export function createSupabaseService({ enabled, url, serviceRoleKey, backendVer
     persistShadowEvaluation,
     updateShadowOutcome,
     persistRejection,
+    persistGuardrailBlock,
     persistDailySummary,
     persistOptimizerReport,
   };

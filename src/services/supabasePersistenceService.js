@@ -31,6 +31,10 @@ export function createSupabasePersistenceService({ supabase, getDailyStat, activ
     supabase.persistRejection(payload);
   }
 
+  function persistGuardrailBlock(payload) {
+    supabase.persistGuardrailBlock(payload);
+  }
+
   function persistDailySummary(dateKey) {
     const stat = getDailyStat(dateKey);
     const closed =
@@ -59,6 +63,7 @@ export function createSupabasePersistenceService({ supabase, getDailyStat, activ
     persistShadowEvaluation,
     updateShadowOutcome,
     persistRejection,
+    persistGuardrailBlock,
     persistDailySummary,
     persistOptimizerReport,
   };

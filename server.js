@@ -8,8 +8,12 @@ import {
   BOT_TOKEN,
   CANDIDATE_LOGGING_ENABLED,
   CANDIDATE_QUALITY_FILTER_ENABLED,
-  CHAT_ID,
   CHART_IMAGE_TEMPLATE,
+  CLUSTER_GUARDRAIL_ENABLED,
+  CLUSTER_GUARDRAIL_MODE,
+  CLUSTER_GUARDRAIL_ROLLBACK_ENABLED,
+  CLUSTER_GUARDRAIL_VERSION,
+  CLUSTER_GUARDRAIL_WINDOW_MINUTES,
   DAILY_SL_CIRCUIT_BREAKER,
   DAILY_SUMMARY_ENABLED,
   DAILY_SUMMARY_UTC_HOUR,
@@ -46,6 +50,10 @@ import {
 } from "./src/config/env.js";
 import { createChartService } from "./src/services/chartService.js";
 import { createCandidateLoggingService } from "./src/services/candidateLoggingService.js";
+import {
+  buildClusterGuardrailBlockRecord,
+  evaluateClusterGuardrail,
+} from "./src/services/clusterGuardrailService.js";
 import { createCloseCompletionService } from "./src/services/closeCompletionService.js";
 import { createCloseFlowService } from "./src/services/closeFlowService.js";
 import { appendChartLinkIfMissing } from "./src/services/messageTemplates.js";
@@ -81,6 +89,7 @@ import { fmtPct, fmtPrice, fmtRR, parseNum } from "./src/utils/numbers.js";
 import {
   isLikelySignalEvent,
 } from "./src/utils/outcomes.js";
+import { sanitizePayloadForStorage } from "./src/utils/payload.js";
 
 const app = express();
 const supabase = createSupabaseService({
@@ -104,7 +113,7 @@ const inviteService = createInviteService({
 });
 const telegramDispatch = createTelegramDispatchService({
   botToken: BOT_TOKEN,
-  defaultChatId: CHAT_ID,
+  defaultChatId: PAID_TELEGRAM_CHAT_ID,
   appendChartLinkIfMissing,
 });
 const {
@@ -233,6 +242,10 @@ function persistRejectionToSupabase(payload) {
   supabasePersistence.persistRejection(payload);
 }
 
+function persistGuardrailBlockToSupabase(payload) {
+  supabasePersistence.persistGuardrailBlock(payload);
+}
+
 function runOptimizerReport({ periodType, detail }) {
   return optimizerReportingService.runReport({ periodType, detail });
 }
@@ -299,7 +312,7 @@ const persistentSummaryService = createPersistentSummaryService({
   getDailyStat,
   getActiveTrades: () => Array.from(activeTrades.values()),
   sendTelegramMessage,
-  paidChatId: CHAT_ID,
+  paidChatId: PAID_TELEGRAM_CHAT_ID,
   freeChatId: FREE_CHAT_ID,
 });
 
@@ -354,7 +367,7 @@ function cleanupState() {
 const hitNotificationService = createHitNotificationService({
   chartService,
   sendTelegramAlert,
-  defaultChatId: CHAT_ID,
+  defaultChatId: PAID_TELEGRAM_CHAT_ID,
 });
 
 const closeCompletionService = createCloseCompletionService({
@@ -371,7 +384,7 @@ const closeFlowService = createCloseFlowService({
   hitNotificationService,
   wasRecentHitSent,
   wasSharedToFree,
-  paidChatId: CHAT_ID,
+  paidChatId: PAID_TELEGRAM_CHAT_ID,
   freeChatId: FREE_CHAT_ID,
 });
 
@@ -385,7 +398,7 @@ const signalDeliveryService = createSignalDeliveryService({
   recordSignalStat,
   persistAlertToSupabase,
   maxTradeAgeMs: MAX_TRADE_AGE_MS,
-  paidChatId: CHAT_ID,
+  paidChatId: PAID_TELEGRAM_CHAT_ID,
   freeChatId: FREE_CHAT_ID,
 });
 
@@ -469,6 +482,11 @@ registerSystemRoutes(app, {
     optimizerReportsEnabled: OPTIMIZER_REPORTS_ENABLED,
     historicalQualityAdjustmentsEnabled: HISTORICAL_QUALITY_ADJUSTMENTS_ENABLED,
     duplicateSuppressionEnabled: DUPLICATE_SUPPRESSION_ENABLED,
+    clusterGuardrailEnabled: CLUSTER_GUARDRAIL_ENABLED,
+    clusterGuardrailWindowMinutes: CLUSTER_GUARDRAIL_WINDOW_MINUTES,
+    clusterGuardrailMode: CLUSTER_GUARDRAIL_MODE,
+    clusterGuardrailVersion: CLUSTER_GUARDRAIL_VERSION,
+    clusterGuardrailRollbackEnabled: CLUSTER_GUARDRAIL_ROLLBACK_ENABLED,
     allowedSymbols: ALLOWED_SYMBOLS,
     freeChatId: FREE_CHAT_ID,
     freeDailyLimit: FREE_DAILY_LIMIT,
@@ -546,8 +564,8 @@ async function handleTradingViewWebhook(req, res) {
       receivedAtMs,
     });
 
-    if (!BOT_TOKEN || !CHAT_ID) {
-      console.error("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID");
+    if (!BOT_TOKEN || !PAID_TELEGRAM_CHAT_ID) {
+      console.error("Missing TELEGRAM_BOT_TOKEN or PAID_TELEGRAM_CHAT_ID");
       return;
     }
 
@@ -743,6 +761,62 @@ async function handleTradingViewWebhook(req, res) {
     }
 
     const { quality } = signalGate;
+
+    const clusterGuardrail = evaluateClusterGuardrail({
+      enabled: CLUSTER_GUARDRAIL_ENABLED,
+      rollbackEnabled: CLUSTER_GUARDRAIL_ROLLBACK_ENABLED,
+      mode: CLUSTER_GUARDRAIL_MODE,
+      version: CLUSTER_GUARDRAIL_VERSION,
+      windowMinutes: CLUSTER_GUARDRAIL_WINDOW_MINUTES,
+      dailyStats,
+      context: signalContext,
+      receivedAtMs,
+    });
+
+    if (clusterGuardrail.blocked) {
+      const blockAlertId = candidateIdsBase[0] || incomingRef || candidateKey;
+      const rawPayload = sanitizePayloadForStorage(body);
+
+      await recordRejectStat({
+        symbol,
+        side,
+        setupType,
+        reason: clusterGuardrail.blockedBy,
+        qualityScore: quality?.score ?? null,
+        qualityGrade: quality?.grade ?? null,
+        rawPayload,
+        ts: receivedAtMs,
+      });
+
+      persistGuardrailBlockToSupabase(buildClusterGuardrailBlockRecord({
+        result: clusterGuardrail,
+        alertId: blockAlertId,
+        candidateKey,
+        eventTimeMs: signalContext.eventTimeMs || receivedAtMs,
+        rawPayload,
+      }));
+
+      candidateLoggingService.updateDecision({
+        candidateKey: loggedCandidate?.candidateKey,
+        decision: "REJECTED",
+        reason: clusterGuardrail.blockedBy,
+        quality,
+        alertId: blockAlertId,
+        postedToPaid: false,
+        postedToFree: false,
+      });
+
+      console.log("SIGNAL BLOCKED BY CLUSTER GUARDRAIL:", {
+        symbol,
+        side,
+        setupType,
+        alertId: blockAlertId,
+        matchedPreviousAlertId: clusterGuardrail.matchedPreviousAlertId,
+        minutesSincePreviousAlert: clusterGuardrail.minutesSincePreviousAlert,
+        guardrailVersion: clusterGuardrail.guardrailVersion,
+      });
+      return;
+    }
 
     const delivery = await signalDeliveryService.deliverSignal({
       body,

@@ -181,6 +181,7 @@ export function createSignalDeliveryService({
 
     await recordSignalStat({
       refId,
+      alertId: primaryAlertId,
       symbol,
       side,
       strength,

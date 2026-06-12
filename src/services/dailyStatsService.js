@@ -102,6 +102,7 @@ export function createDailyStatsService({ dailyStats, persistState, persistRejec
 
   async function recordSignalStat({
     refId,
+    alertId,
     symbol,
     side,
     strength,
@@ -138,6 +139,8 @@ export function createDailyStatsService({ dailyStats, persistState, persistRejec
 
     stat.byRef[String(refId)] = {
       refId: String(refId),
+      alertId: alertId ? String(alertId) : String(refId),
+      primaryAlertId: alertId ? String(alertId) : String(refId),
       symbol,
       side,
       strength,

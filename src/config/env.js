@@ -15,7 +15,7 @@ export const APP_VERSION = "v25.5.48-deploy-safe-summaries";
 export const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 export const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 export const FREE_CHAT_ID = process.env.FREE_TELEGRAM_CHAT_ID || "";
-export const PAID_TELEGRAM_CHAT_ID = process.env.PAID_TELEGRAM_CHAT_ID || CHAT_ID;
+export const PAID_TELEGRAM_CHAT_ID = process.env.PAID_TELEGRAM_CHAT_ID || "";
 
 export const PUBLIC_SITE_URL = (process.env.PUBLIC_SITE_URL || "https://dalrt.com").replace(/\/+$/, "");
 export const APP_BASE_URL = (process.env.APP_BASE_URL || "").replace(/\/+$/, "");
@@ -77,6 +77,14 @@ export const HISTORICAL_QUALITY_ADJUSTMENTS_ENABLED =
 export const DUPLICATE_SUPPRESSION_ENABLED =
   String(process.env.DUPLICATE_SUPPRESSION_ENABLED || "false").toLowerCase() === "true";
 export const ALLOWED_SYMBOLS = getAllowedSymbolsFromEnv(process.env.ALLOWED_SYMBOLS || "");
+
+export const CLUSTER_GUARDRAIL_ENABLED =
+  String(process.env.CLUSTER_GUARDRAIL_ENABLED || "false").toLowerCase() === "true";
+export const CLUSTER_GUARDRAIL_WINDOW_MINUTES = Number(process.env.CLUSTER_GUARDRAIL_WINDOW_MINUTES || 60);
+export const CLUSTER_GUARDRAIL_MODE = process.env.CLUSTER_GUARDRAIL_MODE || "conservative";
+export const CLUSTER_GUARDRAIL_VERSION = process.env.CLUSTER_GUARDRAIL_VERSION || "v1";
+export const CLUSTER_GUARDRAIL_ROLLBACK_ENABLED =
+  String(process.env.CLUSTER_GUARDRAIL_ROLLBACK_ENABLED || "true").toLowerCase() !== "false";
 
 // State.json wint altijd als daar een hogere nextRef in staat.
 export const REF_START_FLOOR = Number(process.env.NEXT_REF_START || 100127);
