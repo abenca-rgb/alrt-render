@@ -43,6 +43,8 @@ export function registerSystemRoutes(app, {
       stateFile: config.stateFile,
       supabaseEnabled: config.supabaseEnabled,
       supabaseReady: state.supabaseReady,
+      wordpressSyncEnabled: Boolean(config.wordpressSyncEnabled),
+      wordpressSyncReady: Boolean(config.wordpressSyncReady),
       activeTrades: state.activeTrades,
       recentHitKeys: state.recentHitKeys,
       recentLossStops: state.recentLossStops,
