@@ -50,6 +50,9 @@ function buildEmptyResult({ generatedAtUtc, source = "supabase" } = {}) {
     alerts_last_30_days: 0,
     tp_hits: 0,
     sl_hits: 0,
+    time_exit_profit_hits: 0,
+    time_exit_loss_hits: 0,
+    time_closed_trades: 0,
     tp_hit_pct: null,
     sl_hit_pct: null,
     win_rate_pct: null,
@@ -102,6 +105,8 @@ export function createPublicResultsService({ supabase } = {}) {
     let closedTrades = 0;
     let tpCount = 0;
     let slCount = 0;
+    let timeExitProfitCount = 0;
+    let timeExitLossCount = 0;
     let winCount = 0;
     let moveSum = 0;
     let moveCount = 0;
@@ -118,6 +123,8 @@ export function createPublicResultsService({ supabase } = {}) {
       if (alertId) closedAlertIds.add(alertId);
       if (row.outcome_type === "TP") tpCount += 1;
       if (row.outcome_type === "SL") slCount += 1;
+      if (row.outcome_type === "TIME_EXIT_PROFIT") timeExitProfitCount += 1;
+      if (row.outcome_type === "TIME_EXIT_LOSS") timeExitLossCount += 1;
       if (WIN_OUTCOMES.has(row.outcome_type)) winCount += 1;
 
       const movePct = toNumber(row.pnl_percent);
@@ -163,6 +170,9 @@ export function createPublicResultsService({ supabase } = {}) {
       alerts_last_30_days: uniqueAlerts30.size,
       tp_hits: tpCount,
       sl_hits: slCount,
+      time_exit_profit_hits: timeExitProfitCount,
+      time_exit_loss_hits: timeExitLossCount,
+      time_closed_trades: timeExitProfitCount + timeExitLossCount,
       tp_hit_pct: pct(tpCount, closedTrades),
       sl_hit_pct: pct(slCount, closedTrades),
       win_rate_pct: pct(winCount, closedTrades),
