@@ -41,6 +41,7 @@ import {
   REF_START_FLOOR,
   ROOT_DIR,
   STATE_FILE,
+  SUMMARY_DISPATCH_SCOPE,
   SUMMARY_ADMIN_TOKEN,
   SHADOW_VALIDATION_ENABLED,
   OPTIMIZER_REPORTS_ENABLED,
@@ -314,6 +315,7 @@ const persistentSummaryService = createPersistentSummaryService({
   sendTelegramMessage,
   paidChatId: PAID_TELEGRAM_CHAT_ID,
   freeChatId: FREE_CHAT_ID,
+  dispatchScope: SUMMARY_DISPATCH_SCOPE,
 });
 
 const dailySummaryRunner = createDailySummaryRunnerService({
@@ -493,6 +495,7 @@ registerSystemRoutes(app, {
     dailySummaryEnabled: DAILY_SUMMARY_ENABLED,
     dailySummaryUtcHour: DAILY_SUMMARY_UTC_HOUR,
     dailySummaryUtcMinute: DAILY_SUMMARY_UTC_MINUTE,
+    summaryDispatchScope: SUMMARY_DISPATCH_SCOPE,
     summaryAdminToken: SUMMARY_ADMIN_TOKEN,
   },
   getHealthState: healthStateService.getHealthState,

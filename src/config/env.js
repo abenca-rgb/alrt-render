@@ -41,6 +41,12 @@ export const DAILY_SUMMARY_ENABLED =
   String(process.env.DAILY_SUMMARY_ENABLED || "true").toLowerCase() !== "false";
 export const DAILY_SUMMARY_UTC_HOUR = Number(process.env.DAILY_SUMMARY_UTC_HOUR || 23);
 export const DAILY_SUMMARY_UTC_MINUTE = Number(process.env.DAILY_SUMMARY_UTC_MINUTE || 59);
+export const SUMMARY_DISPATCH_SCOPE =
+  process.env.SUMMARY_DISPATCH_SCOPE ||
+  process.env.RENDER_SERVICE_NAME ||
+  APP_BASE_URL ||
+  PUBLIC_SITE_URL ||
+  "default";
 
 export const DATA_DIR = process.env.RENDER_DISK_PATH || process.env.DATA_DIR || "/var/data";
 export const STATE_FILE = path.join(DATA_DIR, "state.json");

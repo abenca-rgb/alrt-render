@@ -82,6 +82,7 @@ export function registerSystemRoutes(app, {
       dailySummaryEnabled: config.dailySummaryEnabled,
       dailySummaryUtcHour: config.dailySummaryUtcHour,
       dailySummaryUtcMinute: config.dailySummaryUtcMinute,
+      summaryDispatchScope: config.summaryDispatchScope,
       manualSummaryEnabled: Boolean(config.summaryAdminToken),
       manualOptimizerEnabled: Boolean(config.summaryAdminToken && config.optimizerReportsEnabled),
       paidMembers: state.paidMembers,

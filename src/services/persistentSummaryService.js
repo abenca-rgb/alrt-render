@@ -128,6 +128,7 @@ export function createPersistentSummaryService({
   sendTelegramMessage,
   paidChatId,
   freeChatId,
+  dispatchScope = "default",
 }) {
   function ready() {
     return supabase.ready();
@@ -308,23 +309,46 @@ export function createPersistentSummaryService({
     if (!ready()) {
       return { claimed: true, alreadySent: false, source: "state_fallback" };
     }
-    return supabase.rpc("claim_summary_dispatch", {
-      p_period_type: periodType,
-      p_period_key: periodKey,
-      p_force: Boolean(force),
-    });
+    try {
+      return await supabase.rpc("claim_summary_dispatch", {
+        p_period_type: periodType,
+        p_period_key: periodKey,
+        p_force: Boolean(force),
+        p_dispatch_scope: dispatchScope,
+      });
+    } catch (err) {
+      console.warn("SUMMARY DISPATCH SCOPE FALLBACK:", err?.message || String(err));
+      return supabase.rpc("claim_summary_dispatch", {
+        p_period_type: periodType,
+        p_period_key: periodKey,
+        p_force: Boolean(force),
+      });
+    }
   }
 
   async function completeSummary({ periodType, periodKey, status, text = null, stats = {}, error = null }) {
     if (!ready()) return { skipped: true };
-    return supabase.rpc("complete_summary_dispatch", {
-      p_period_type: periodType,
-      p_period_key: periodKey,
-      p_status: status,
-      p_summary_text: text,
-      p_stats: stats,
-      p_error: error,
-    });
+    try {
+      return await supabase.rpc("complete_summary_dispatch", {
+        p_period_type: periodType,
+        p_period_key: periodKey,
+        p_status: status,
+        p_summary_text: text,
+        p_stats: stats,
+        p_error: error,
+        p_dispatch_scope: dispatchScope,
+      });
+    } catch (err) {
+      console.warn("SUMMARY COMPLETE SCOPE FALLBACK:", err?.message || String(err));
+      return supabase.rpc("complete_summary_dispatch", {
+        p_period_type: periodType,
+        p_period_key: periodKey,
+        p_status: status,
+        p_summary_text: text,
+        p_stats: stats,
+        p_error: error,
+      });
+    }
   }
 
   async function preview({ periodType = "daily", periodKey }) {
