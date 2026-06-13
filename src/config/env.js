@@ -24,6 +24,10 @@ export const CHART_IMAGE_TEMPLATE = process.env.CHART_IMAGE_TEMPLATE || "";
 export const SUPABASE_ENABLED = String(process.env.SUPABASE_ENABLED || "false").toLowerCase() === "true";
 export const SUPABASE_URL = (process.env.SUPABASE_URL || "").replace(/\/+$/, "");
 export const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+export const WORDPRESS_SYNC_ENABLED =
+  String(process.env.WORDPRESS_SYNC_ENABLED || "false").toLowerCase() === "true";
+export const WORDPRESS_SYNC_BASE_URL = (process.env.WORDPRESS_SYNC_BASE_URL || "").replace(/\/+$/, "");
+export const WORDPRESS_SYNC_TOKEN = process.env.WORDPRESS_SYNC_TOKEN || "";
 export const LEARNING_LOGGING_ENABLED =
   String(process.env.LEARNING_LOGGING_ENABLED || "true").toLowerCase() !== "false";
 export const CANDIDATE_LOGGING_ENABLED =

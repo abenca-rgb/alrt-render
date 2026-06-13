@@ -5,7 +5,18 @@ export function createStripeMemberService({
   createPaidInviteLink,
   persistState,
   sendTelegramMessage,
+  wordpressSync,
 }) {
+  function syncInBackground(label, task) {
+    if (!wordpressSync?.ready?.()) return;
+
+    Promise.resolve()
+      .then(task)
+      .catch((err) => {
+        console.warn(`WORDPRESS SYNC ${label} WARNING:`, err?.message || String(err));
+      });
+  }
+
   function findPaidMemberByStripe({
     stripeCustomerId = null,
     stripeSubscriptionId = null,
@@ -55,6 +66,13 @@ export function createStripeMemberService({
       });
 
       await persistState();
+
+      syncInBackground("CHECKOUT", () =>
+        wordpressSync.syncStripeCheckoutSession({
+          email,
+          session,
+        }),
+      );
 
       await sendTelegramMessage(
 `🔥 <b>NEW PAID MEMBER</b>
@@ -136,6 +154,15 @@ ${inviteLink}`
 
       paidMembers.set(email, member);
       await persistState();
+
+      syncInBackground("SUBSCRIPTION", () =>
+        wordpressSync.syncStripeSubscriptionEvent({
+          email,
+          stripeStatus: newStatus,
+          currentPeriodEnd: obj.current_period_end || null,
+          eventType: event.type,
+        }),
+      );
 
       await sendTelegramMessage(
 `⚠️ <b>PAID MEMBER ACCESS UPDATE</b>

@@ -48,6 +48,9 @@ import {
   SUPABASE_ENABLED,
   SUPABASE_SERVICE_ROLE_KEY,
   SUPABASE_URL,
+  WORDPRESS_SYNC_BASE_URL,
+  WORDPRESS_SYNC_ENABLED,
+  WORDPRESS_SYNC_TOKEN,
 } from "./src/config/env.js";
 import { createChartService } from "./src/services/chartService.js";
 import { createCandidateLoggingService } from "./src/services/candidateLoggingService.js";
@@ -78,6 +81,7 @@ import { createSupabaseService } from "./src/services/supabaseService.js";
 import { createTelegramDispatchService } from "./src/services/telegramDispatchService.js";
 import { createTradingViewCloseService } from "./src/services/tradingViewCloseService.js";
 import { buildTradingViewContext } from "./src/services/tradingViewContextService.js";
+import { createWordPressSyncService } from "./src/services/wordpressSyncService.js";
 import { registerChartRoutes } from "./src/routes/chartRoutes.js";
 import { registerMemberRoutes } from "./src/routes/memberRoutes.js";
 import { registerPublicResultsRoutes } from "./src/routes/publicResultsRoutes.js";
@@ -113,6 +117,11 @@ const inviteService = createInviteService({
   botToken: BOT_TOKEN,
   paidChatId: PAID_TELEGRAM_CHAT_ID,
   freeChatId: FREE_CHAT_ID,
+});
+const wordpressSync = createWordPressSyncService({
+  enabled: WORDPRESS_SYNC_ENABLED,
+  baseUrl: WORDPRESS_SYNC_BASE_URL,
+  token: WORDPRESS_SYNC_TOKEN,
 });
 const telegramDispatch = createTelegramDispatchService({
   botToken: BOT_TOKEN,
@@ -432,6 +441,7 @@ const stripeMemberService = createStripeMemberService({
   createPaidInviteLink: createTelegramInviteLink,
   persistState,
   sendTelegramMessage,
+  wordpressSync,
 });
 
 const handleStripeEvent = stripeMemberService.handleStripeEvent;
@@ -471,6 +481,8 @@ registerSystemRoutes(app, {
     dataDir: DATA_DIR,
     stateFile: STATE_FILE,
     supabaseEnabled: SUPABASE_ENABLED,
+    wordpressSyncEnabled: WORDPRESS_SYNC_ENABLED,
+    wordpressSyncReady: wordpressSync.ready(),
     refStartFloor: REF_START_FLOOR,
     maxTradeAgeMs: MAX_TRADE_AGE_MS,
     lossGuardSymbolCooldownMs: LOSS_GUARD_SYMBOL_COOLDOWN_MS,
