@@ -88,11 +88,11 @@ export function createPublicResultsService({ supabase } = {}) {
       ),
       selectRows(
         "alert_performance",
-        `?select=alert_id,ref_id,symbol,direction,signal_time_utc,outcome_type,outcome_time_utc,closed_at_utc,move_pct,pnl_percent&signal_time_utc=gte.${encodeURIComponent(start30)}&limit=10000`,
+        `?select=alert_id,ref_id,symbol,direction,signal_time_utc,outcome_type,outcome_time_utc,pnl_percent&signal_time_utc=gte.${encodeURIComponent(start30)}&limit=10000`,
       ),
       selectRows(
         "alert_performance",
-        "?select=ref_id,symbol,direction,signal_time_utc,outcome_type,outcome_time_utc,closed_at_utc,move_pct,pnl_percent&outcome_type=not.is.null&order=closed_at_utc.desc.nullslast,outcome_time_utc.desc&limit=12",
+        "?select=ref_id,symbol,direction,signal_time_utc,outcome_type,outcome_time_utc,pnl_percent&outcome_type=not.is.null&order=outcome_time_utc.desc&limit=12",
       ),
     ]);
 
@@ -118,7 +118,7 @@ export function createPublicResultsService({ supabase } = {}) {
       if (row.outcome_type === "SL") slCount += 1;
       if (WIN_OUTCOMES.has(row.outcome_type)) winCount += 1;
 
-      const movePct = toNumber(row.move_pct ?? row.pnl_percent);
+      const movePct = toNumber(row.pnl_percent);
       if (movePct !== null) {
         moveSum += movePct;
         moveCount += 1;
@@ -173,11 +173,11 @@ export function createPublicResultsService({ supabase } = {}) {
         symbol: normalizeSymbol(row.symbol),
         direction: row.direction || null,
         result: resultLabel(row.outcome_type),
-        market_move_pct: round(row.move_pct ?? row.pnl_percent, 2),
+        market_move_pct: round(row.pnl_percent, 2),
         example_return_4x_before_fees_pct:
-          toNumber(row.move_pct ?? row.pnl_percent) === null ? null : round(toNumber(row.move_pct ?? row.pnl_percent) * 4, 2),
+          toNumber(row.pnl_percent) === null ? null : round(toNumber(row.pnl_percent) * 4, 2),
         opened_at_utc: row.signal_time_utc || null,
-        closed_at_utc: row.closed_at_utc || row.outcome_time_utc || null,
+        closed_at_utc: row.outcome_time_utc || null,
       })),
       disclaimer:
         "Signals are not financial advice. Results are based on market movement, not guaranteed personal profit.",
