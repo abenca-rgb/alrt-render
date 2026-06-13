@@ -65,6 +65,7 @@ import { createOptimizerReportingService } from "./src/services/optimizerReporti
 import { createPersistentSummaryService } from "./src/services/persistentSummaryService.js";
 import { createFreeChannelService } from "./src/services/freeChannelService.js";
 import { createHealthStateService } from "./src/services/healthStateService.js";
+import { createPublicResultsService } from "./src/services/publicResultsService.js";
 import { createHitNotificationService } from "./src/services/hitNotificationService.js";
 import { createRecentHitService } from "./src/services/recentHitService.js";
 import { createRefAllocatorService } from "./src/services/refAllocatorService.js";
@@ -79,6 +80,7 @@ import { createTradingViewCloseService } from "./src/services/tradingViewCloseSe
 import { buildTradingViewContext } from "./src/services/tradingViewContextService.js";
 import { registerChartRoutes } from "./src/routes/chartRoutes.js";
 import { registerMemberRoutes } from "./src/routes/memberRoutes.js";
+import { registerPublicResultsRoutes } from "./src/routes/publicResultsRoutes.js";
 import { registerStripeRoutes } from "./src/routes/stripeRoutes.js";
 import { registerSystemRoutes } from "./src/routes/systemRoutes.js";
 import { registerTradingViewRoutes } from "./src/routes/tradingViewRoutes.js";
@@ -208,6 +210,9 @@ const supabasePersistence = createSupabasePersistenceService({
 });
 
 const optimizerReportingService = createOptimizerReportingService({
+  supabase,
+});
+const publicResultsService = createPublicResultsService({
   supabase,
 });
 
@@ -514,6 +519,10 @@ registerMemberRoutes(app, {
   createFreeInviteLink: createFreeTelegramInviteLink,
   persistState,
   sendTelegramMessage,
+});
+
+registerPublicResultsRoutes(app, {
+  publicResultsService,
 });
 
 // ===== WEBHOOK HANDLER =====
