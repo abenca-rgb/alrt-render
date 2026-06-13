@@ -28,6 +28,7 @@ export const WORDPRESS_SYNC_ENABLED =
   String(process.env.WORDPRESS_SYNC_ENABLED || "false").toLowerCase() === "true";
 export const WORDPRESS_SYNC_BASE_URL = (process.env.WORDPRESS_SYNC_BASE_URL || "").replace(/\/+$/, "");
 export const WORDPRESS_SYNC_TOKEN = process.env.WORDPRESS_SYNC_TOKEN || "";
+export const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || "";
 export const LEARNING_LOGGING_ENABLED =
   String(process.env.LEARNING_LOGGING_ENABLED || "true").toLowerCase() !== "false";
 export const CANDIDATE_LOGGING_ENABLED =

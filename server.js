@@ -41,6 +41,7 @@ import {
   REF_START_FLOOR,
   ROOT_DIR,
   STATE_FILE,
+  STRIPE_WEBHOOK_SECRET,
   SUMMARY_DISPATCH_SCOPE,
   SUMMARY_ADMIN_TOKEN,
   SHADOW_VALIDATION_ENABLED,
@@ -449,6 +450,7 @@ const handleStripeEvent = stripeMemberService.handleStripeEvent;
 // Stripe raw body route MUST be before express.json()
 registerStripeRoutes(app, {
   handleStripeEvent,
+  stripeWebhookSecret: STRIPE_WEBHOOK_SECRET,
 });
 
 app.use(express.json({ limit: "2mb" }));
@@ -483,6 +485,7 @@ registerSystemRoutes(app, {
     supabaseEnabled: SUPABASE_ENABLED,
     wordpressSyncEnabled: WORDPRESS_SYNC_ENABLED,
     wordpressSyncReady: wordpressSync.ready(),
+    stripeWebhookVerificationEnabled: Boolean(STRIPE_WEBHOOK_SECRET),
     refStartFloor: REF_START_FLOOR,
     maxTradeAgeMs: MAX_TRADE_AGE_MS,
     lossGuardSymbolCooldownMs: LOSS_GUARD_SYMBOL_COOLDOWN_MS,

@@ -45,6 +45,7 @@ export function registerSystemRoutes(app, {
       supabaseReady: state.supabaseReady,
       wordpressSyncEnabled: Boolean(config.wordpressSyncEnabled),
       wordpressSyncReady: Boolean(config.wordpressSyncReady),
+      stripeWebhookVerificationEnabled: Boolean(config.stripeWebhookVerificationEnabled),
       activeTrades: state.activeTrades,
       recentHitKeys: state.recentHitKeys,
       recentLossStops: state.recentLossStops,
