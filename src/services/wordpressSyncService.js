@@ -78,13 +78,17 @@ export function createWordPressSyncService({
   async function syncStripeCheckoutSession({ email, session }) {
     return syncMember({
       email,
+      create_if_missing: true,
       account_status: "Paid",
       subscription_plan: "Paid",
       renewal_date: "",
       telegram_status: "pending",
       source: "render_stripe_checkout",
+      stripe_status: "active",
+      stripe_event: "checkout.session.completed",
       stripe_customer_id: session?.customer || null,
       stripe_subscription_id: session?.subscription || null,
+      stripe_session_id: session?.id || null,
     });
   }
 
