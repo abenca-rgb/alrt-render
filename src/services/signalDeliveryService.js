@@ -16,6 +16,7 @@ export function createSignalDeliveryService({
   maxTradeAgeMs,
   paidChatId,
   freeChatId,
+  mirrorChatIds = [],
 }) {
   async function deliverSignal({
     body,
@@ -112,6 +113,24 @@ export function createSignalDeliveryService({
       fallbackChartLink: chartLink,
       chatId: paidChatId,
     });
+
+    for (const mirrorChatId of mirrorChatIds) {
+      try {
+        await sendTelegramAlert({
+          text,
+          imageUrl: chartAssets.imageUrl,
+          imageBuffer: chartAssets.imageBuffer,
+          imageFilename: chartAssets.imageFilename,
+          fallbackChartLink: chartLink,
+          chatId: mirrorChatId,
+        });
+      } catch (err) {
+        console.error("MIRROR SIGNAL SEND FAILED:", {
+          refId,
+          error: err?.message || String(err),
+        });
+      }
+    }
 
     let sharedToFree = false;
 

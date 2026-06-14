@@ -128,6 +128,7 @@ export function createPersistentSummaryService({
   sendTelegramMessage,
   paidChatId,
   freeChatId,
+  mirrorChatIds = [],
   dispatchScope = "default",
 }) {
   function ready() {
@@ -380,6 +381,17 @@ export function createPersistentSummaryService({
       await sendTelegramMessage(built.text, paidChatId);
       if (freeChatId) {
         await sendTelegramMessage(built.text, freeChatId);
+      }
+      for (const mirrorChatId of mirrorChatIds) {
+        try {
+          await sendTelegramMessage(built.text, mirrorChatId);
+        } catch (err) {
+          console.error("MIRROR SUMMARY SEND FAILED:", {
+            periodType,
+            periodKey,
+            error: err?.message || String(err),
+          });
+        }
       }
 
       await completeSummary({

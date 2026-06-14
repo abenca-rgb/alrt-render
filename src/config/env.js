@@ -17,6 +17,18 @@ export const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 export const FREE_CHAT_ID = process.env.FREE_TELEGRAM_CHAT_ID || "";
 export const PAID_TELEGRAM_CHAT_ID = process.env.PAID_TELEGRAM_CHAT_ID || "";
 
+function parseCsv(value = "") {
+  return String(value)
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+export const TELEGRAM_MIRROR_CHAT_IDS = Array.from(new Set([
+  ...parseCsv(process.env.TELEGRAM_MIRROR_CHAT_IDS || ""),
+  ...parseCsv(process.env.STAGING_TELEGRAM_CHAT_ID || ""),
+]));
+
 export const PUBLIC_SITE_URL = (process.env.PUBLIC_SITE_URL || "https://dalrt.com").replace(/\/+$/, "");
 export const APP_BASE_URL = (process.env.APP_BASE_URL || "").replace(/\/+$/, "");
 export const CHART_IMAGE_TEMPLATE = process.env.CHART_IMAGE_TEMPLATE || "";

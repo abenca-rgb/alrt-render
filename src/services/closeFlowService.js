@@ -10,6 +10,7 @@ export function createCloseFlowService({
   wasSharedToFree,
   paidChatId,
   freeChatId,
+  mirrorChatIds = [],
 }) {
   async function sendHitAlert({
     trade,
@@ -80,6 +81,22 @@ export function createCloseFlowService({
       hitPrice: exitPrice,
       chatId: paidChatId,
     });
+
+    for (const mirrorChatId of mirrorChatIds) {
+      try {
+        await sendHitAlert({
+          trade,
+          closeType: finalCloseType,
+          hitPrice: exitPrice,
+          chatId: mirrorChatId,
+        });
+      } catch (err) {
+        console.error("MIRROR CLOSE SEND FAILED:", {
+          refId: trade.refId,
+          error: err?.message || String(err),
+        });
+      }
+    }
 
     if (wasSharedToFree(trade.refId)) {
       try {

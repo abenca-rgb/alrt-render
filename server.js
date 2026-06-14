@@ -49,6 +49,7 @@ import {
   SUPABASE_ENABLED,
   SUPABASE_SERVICE_ROLE_KEY,
   SUPABASE_URL,
+  TELEGRAM_MIRROR_CHAT_IDS,
   WORDPRESS_SYNC_BASE_URL,
   WORDPRESS_SYNC_ENABLED,
   WORDPRESS_SYNC_TOKEN,
@@ -330,6 +331,7 @@ const persistentSummaryService = createPersistentSummaryService({
   sendTelegramMessage,
   paidChatId: PAID_TELEGRAM_CHAT_ID,
   freeChatId: FREE_CHAT_ID,
+  mirrorChatIds: TELEGRAM_MIRROR_CHAT_IDS,
   dispatchScope: SUMMARY_DISPATCH_SCOPE,
 });
 
@@ -403,6 +405,7 @@ const closeFlowService = createCloseFlowService({
   wasSharedToFree,
   paidChatId: PAID_TELEGRAM_CHAT_ID,
   freeChatId: FREE_CHAT_ID,
+  mirrorChatIds: TELEGRAM_MIRROR_CHAT_IDS,
 });
 
 const signalDeliveryService = createSignalDeliveryService({
@@ -417,6 +420,7 @@ const signalDeliveryService = createSignalDeliveryService({
   maxTradeAgeMs: MAX_TRADE_AGE_MS,
   paidChatId: PAID_TELEGRAM_CHAT_ID,
   freeChatId: FREE_CHAT_ID,
+  mirrorChatIds: TELEGRAM_MIRROR_CHAT_IDS,
 });
 
 const closeTrade = closeFlowService.closeTrade;
@@ -511,6 +515,7 @@ registerSystemRoutes(app, {
     clusterGuardrailRollbackEnabled: CLUSTER_GUARDRAIL_ROLLBACK_ENABLED,
     allowedSymbols: ALLOWED_SYMBOLS,
     freeChatId: FREE_CHAT_ID,
+    mirrorChatCount: TELEGRAM_MIRROR_CHAT_IDS.length,
     freeDailyLimit: FREE_DAILY_LIMIT,
     dailySummaryEnabled: DAILY_SUMMARY_ENABLED,
     dailySummaryUtcHour: DAILY_SUMMARY_UTC_HOUR,
