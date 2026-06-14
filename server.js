@@ -555,9 +555,11 @@ registerMemberRoutes(app, {
   summaryAdminToken: SUMMARY_ADMIN_TOKEN,
   getFreeMember: (email) => freeMembers.get(email),
   setFreeMember: (email, member) => freeMembers.set(email, member),
+  setPaidMember: (email, member) => paidMembers.set(email, member),
   getPaidMembers: () => Array.from(paidMembers.values()),
   getFreeMembers: () => Array.from(freeMembers.values()),
   createFreeInviteLink: createFreeTelegramInviteLink,
+  createPaidInviteLink: createTelegramInviteLink,
   persistState,
   sendTelegramMessage,
 });
