@@ -173,6 +173,24 @@ export function registerSystemRoutes(app, {
     }
   });
 
+  app.post("/summary/daily/send-mirror-now", async (req, res) => {
+    if (!authorizeSummary(req, res)) return;
+
+    try {
+      const dateKey = String(req.query.date || req.body?.date || getUtcDateKey(Date.now()));
+      const result = await summaryService.sendMirrorOnly({
+        periodType: "daily",
+        periodKey: dateKey,
+      });
+      res.status(result.ok ? 200 : 400).json(result);
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        error: err?.message || String(err),
+      });
+    }
+  });
+
   app.get("/summary/weekly/preview", async (req, res) => {
     if (!authorizeSummary(req, res)) return;
 

@@ -416,9 +416,33 @@ export function createPersistentSummaryService({
     }
   }
 
+  async function sendMirrorOnly({ periodType = "daily", periodKey }) {
+    if (!mirrorChatIds.length) {
+      return { ok: false, sent: false, reason: "no mirror chat configured", periodType, periodKey };
+    }
+
+    const built = await buildSummary({ periodType, periodKey });
+    let sentCount = 0;
+
+    for (const mirrorChatId of mirrorChatIds) {
+      await sendTelegramMessage(built.text, mirrorChatId);
+      sentCount += 1;
+    }
+
+    return {
+      ok: true,
+      sent: sentCount > 0,
+      sentCount,
+      periodType,
+      periodKey,
+      source: built.source,
+    };
+  }
+
   return {
     getUtcWeekKey,
     preview,
     send,
+    sendMirrorOnly,
   };
 }
