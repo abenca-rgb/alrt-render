@@ -126,6 +126,7 @@ export function createPersistentSummaryService({
   getDailyStat,
   getActiveTrades,
   sendTelegramMessage,
+  sendMirrorTelegramMessage = sendTelegramMessage,
   paidChatId,
   freeChatId,
   mirrorChatIds = [],
@@ -384,7 +385,7 @@ export function createPersistentSummaryService({
       }
       for (const mirrorChatId of mirrorChatIds) {
         try {
-          await sendTelegramMessage(built.text, mirrorChatId);
+          await sendMirrorTelegramMessage(built.text, mirrorChatId);
         } catch (err) {
           console.error("MIRROR SUMMARY SEND FAILED:", {
             periodType,
@@ -425,7 +426,7 @@ export function createPersistentSummaryService({
     let sentCount = 0;
 
     for (const mirrorChatId of mirrorChatIds) {
-      await sendTelegramMessage(built.text, mirrorChatId);
+      await sendMirrorTelegramMessage(built.text, mirrorChatId);
       sentCount += 1;
     }
 

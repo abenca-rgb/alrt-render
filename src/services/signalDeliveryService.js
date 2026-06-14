@@ -8,6 +8,7 @@ export function createSignalDeliveryService({
   allocSignalRef,
   chartService,
   sendTelegramAlert,
+  sendMirrorTelegramAlert = sendTelegramAlert,
   canSendFreeSignal,
   markFreeSignalShared,
   upsertTrade,
@@ -116,7 +117,7 @@ export function createSignalDeliveryService({
 
     for (const mirrorChatId of mirrorChatIds) {
       try {
-        await sendTelegramAlert({
+        await sendMirrorTelegramAlert({
           text,
           imageUrl: chartAssets.imageUrl,
           imageBuffer: chartAssets.imageBuffer,

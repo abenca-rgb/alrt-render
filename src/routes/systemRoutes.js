@@ -78,6 +78,7 @@ export function registerSystemRoutes(app, {
       freeEnabled: Boolean(config.freeChatId),
       mirrorEnabled: Number(config.mirrorChatCount || 0) > 0,
       mirrorChatCount: Number(config.mirrorChatCount || 0),
+      mirrorBotEnabled: Boolean(config.mirrorBotEnabled),
       freePostDate: state.freePostDate,
       freePostsToday: state.freePostsToday,
       freeDailyLimit: config.freeDailyLimit,

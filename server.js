@@ -49,6 +49,7 @@ import {
   SUPABASE_ENABLED,
   SUPABASE_SERVICE_ROLE_KEY,
   SUPABASE_URL,
+  TELEGRAM_MIRROR_BOT_TOKEN,
   TELEGRAM_MIRROR_CHAT_IDS,
   WORDPRESS_SYNC_BASE_URL,
   WORDPRESS_SYNC_ENABLED,
@@ -130,11 +131,22 @@ const telegramDispatch = createTelegramDispatchService({
   defaultChatId: PAID_TELEGRAM_CHAT_ID,
   appendChartLinkIfMissing,
 });
+const mirrorTelegramDispatch = TELEGRAM_MIRROR_BOT_TOKEN
+  ? createTelegramDispatchService({
+      botToken: TELEGRAM_MIRROR_BOT_TOKEN,
+      defaultChatId: TELEGRAM_MIRROR_CHAT_IDS[0] || "",
+      appendChartLinkIfMissing,
+    })
+  : telegramDispatch;
 const {
   sendTelegramMessage,
   sendTelegramPhoto,
   sendTelegramAlert,
 } = telegramDispatch;
+const {
+  sendTelegramMessage: sendMirrorTelegramMessage,
+  sendTelegramAlert: sendMirrorTelegramAlert,
+} = mirrorTelegramDispatch;
 
 // ===== STATE =====
 const activeTrades = new Map();
@@ -329,6 +341,7 @@ const persistentSummaryService = createPersistentSummaryService({
   getDailyStat,
   getActiveTrades: () => Array.from(activeTrades.values()),
   sendTelegramMessage,
+  sendMirrorTelegramMessage,
   paidChatId: PAID_TELEGRAM_CHAT_ID,
   freeChatId: FREE_CHAT_ID,
   mirrorChatIds: TELEGRAM_MIRROR_CHAT_IDS,
@@ -388,6 +401,11 @@ const hitNotificationService = createHitNotificationService({
   sendTelegramAlert,
   defaultChatId: PAID_TELEGRAM_CHAT_ID,
 });
+const mirrorHitNotificationService = createHitNotificationService({
+  chartService,
+  sendTelegramAlert: sendMirrorTelegramAlert,
+  defaultChatId: TELEGRAM_MIRROR_CHAT_IDS[0] || PAID_TELEGRAM_CHAT_ID,
+});
 
 const closeCompletionService = createCloseCompletionService({
   recentLossStops,
@@ -401,6 +419,7 @@ const closeCompletionService = createCloseCompletionService({
 const closeFlowService = createCloseFlowService({
   closeCompletionService,
   hitNotificationService,
+  mirrorHitNotificationService,
   wasRecentHitSent,
   wasSharedToFree,
   paidChatId: PAID_TELEGRAM_CHAT_ID,
@@ -412,6 +431,7 @@ const signalDeliveryService = createSignalDeliveryService({
   allocSignalRef,
   chartService,
   sendTelegramAlert,
+  sendMirrorTelegramAlert,
   canSendFreeSignal,
   markFreeSignalShared,
   upsertTrade,
@@ -516,6 +536,7 @@ registerSystemRoutes(app, {
     allowedSymbols: ALLOWED_SYMBOLS,
     freeChatId: FREE_CHAT_ID,
     mirrorChatCount: TELEGRAM_MIRROR_CHAT_IDS.length,
+    mirrorBotEnabled: Boolean(TELEGRAM_MIRROR_BOT_TOKEN),
     freeDailyLimit: FREE_DAILY_LIMIT,
     dailySummaryEnabled: DAILY_SUMMARY_ENABLED,
     dailySummaryUtcHour: DAILY_SUMMARY_UTC_HOUR,

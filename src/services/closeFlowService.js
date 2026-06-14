@@ -6,6 +6,7 @@ import { getTimeExitResult } from "../utils/outcomes.js";
 export function createCloseFlowService({
   closeCompletionService,
   hitNotificationService,
+  mirrorHitNotificationService = hitNotificationService,
   wasRecentHitSent,
   wasSharedToFree,
   paidChatId,
@@ -17,8 +18,9 @@ export function createCloseFlowService({
     closeType,
     hitPrice = null,
     chatId = paidChatId,
+    hitNotificationTarget = hitNotificationService,
   }) {
-    return hitNotificationService.sendHitAlert({
+    return hitNotificationTarget.sendHitAlert({
       trade,
       closeType,
       hitPrice,
@@ -89,6 +91,7 @@ export function createCloseFlowService({
           closeType: finalCloseType,
           hitPrice: exitPrice,
           chatId: mirrorChatId,
+          hitNotificationTarget: mirrorHitNotificationService,
         });
       } catch (err) {
         console.error("MIRROR CLOSE SEND FAILED:", {

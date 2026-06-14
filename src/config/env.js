@@ -28,6 +28,10 @@ export const TELEGRAM_MIRROR_CHAT_IDS = Array.from(new Set([
   ...parseCsv(process.env.TELEGRAM_MIRROR_CHAT_IDS || ""),
   ...parseCsv(process.env.STAGING_TELEGRAM_CHAT_ID || ""),
 ]));
+export const TELEGRAM_MIRROR_BOT_TOKEN =
+  process.env.TELEGRAM_MIRROR_BOT_TOKEN ||
+  process.env.STAGING_TELEGRAM_BOT_TOKEN ||
+  "";
 
 export const PUBLIC_SITE_URL = (process.env.PUBLIC_SITE_URL || "https://dalrt.com").replace(/\/+$/, "");
 export const APP_BASE_URL = (process.env.APP_BASE_URL || "").replace(/\/+$/, "");
