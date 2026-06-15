@@ -66,6 +66,7 @@ import { createCloseFlowService } from "./src/services/closeFlowService.js";
 import { appendChartLinkIfMissing } from "./src/services/messageTemplates.js";
 import { createInviteService } from "./src/services/inviteService.js";
 import { createLifecycleAutoCloseService } from "./src/services/lifecycleAutoCloseService.js";
+import { createLastPriceCacheService } from "./src/services/lastPriceCacheService.js";
 import { createMarketPriceService } from "./src/services/marketPriceService.js";
 import { createDailyStatsService } from "./src/services/dailyStatsService.js";
 import { createDailySummaryRunnerService } from "./src/services/dailySummaryRunnerService.js";
@@ -159,6 +160,7 @@ const activeTrades = new Map();
 const recentHitKeys = new Map();
 const recentLossStops = new Map();
 const freeSharedRefs = new Map();
+const lastPrices = new Map();
 const dailyStats = new Map();
 const paidMembers = new Map();
 const freeMembers = new Map();
@@ -180,6 +182,7 @@ const runtimeState = createRuntimeStateService({
     recentHitKeys,
     recentLossStops,
     freeSharedRefs,
+    lastPrices,
     dailyStats,
     paidMembers,
     freeMembers,
@@ -252,7 +255,10 @@ const openTradeAuditService = createOpenTradeAuditService({
   getActiveTrades: () => Array.from(activeTrades.values()),
   maxTradeAgeMs: MAX_TRADE_AGE_MS,
 });
-const marketPriceService = createMarketPriceService();
+let lastPriceCacheService;
+const marketPriceService = createMarketPriceService({
+  getCachedPrice: (...args) => lastPriceCacheService?.getCachedPrice(...args),
+});
 
 function supabaseReady() {
   return supabasePersistence.ready();
@@ -317,6 +323,10 @@ const freeChannelService = createFreeChannelService({
 
 const recentHitService = createRecentHitService({
   recentHitKeys,
+  persistState,
+});
+lastPriceCacheService = createLastPriceCacheService({
+  lastPrices,
   persistState,
 });
 
@@ -410,6 +420,7 @@ function cleanupState() {
       recentHitKeys,
       recentLossStops,
       freeSharedRefs,
+      lastPrices,
       dailyStats,
     },
     now,
@@ -612,6 +623,7 @@ registerScoreAuditRoutes(app, {
   scoreAuditService,
   openTradeAuditService,
   lifecycleAutoCloseService,
+  lastPriceCacheService,
 });
 
 // ===== WEBHOOK HANDLER =====
@@ -687,6 +699,15 @@ async function handleTradingViewWebhook(req, res) {
       currentPrice: fmtPrice(currentPrice),
       activeTrades: activeTrades.size,
       nextRef,
+    });
+
+    lastPriceCacheService.recordTradingViewPrice({
+      symbol,
+      price: currentPrice,
+      eventType,
+      alertId: candidateKey,
+      refId: incomingRef,
+      receivedAtMs,
     });
 
     const closeLifecycleHandled = await tradingViewCloseService.handleCloseLifecycle({

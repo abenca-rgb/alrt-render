@@ -42,6 +42,7 @@ export function hydrateStateFromPayload({
   const hits = arrayEntries(parsed?.recentHitKeys);
   const lossStops = arrayEntries(parsed?.recentLossStops);
   const freeRefs = arrayEntries(parsed?.freeSharedRefs);
+  const lastPrices = arrayEntries(parsed?.lastPrices);
   const stats = arrayEntries(parsed?.dailyStats);
 
   let nextRef = Number.isFinite(Number(parsed?.nextRef))
@@ -101,6 +102,20 @@ export function hydrateStateFromPayload({
     if (now - info.sharedAtMs > freeRefTtlMs) continue;
 
     maps.freeSharedRefs.set(String(refId), info);
+  }
+
+  for (const item of lastPrices) {
+    if (!Array.isArray(item) || item.length !== 2) continue;
+
+    const [symbol, info] = item;
+    const receivedAtMs = Number(info?.received_at_ms || Date.parse(info?.received_at_utc || ""));
+
+    if (!symbol || !info || !Number.isFinite(receivedAtMs)) continue;
+
+    maps.lastPrices.set(String(symbol), {
+      ...info,
+      received_at_ms: receivedAtMs,
+    });
   }
 
   if (Array.isArray(parsed?.paidMembers)) {

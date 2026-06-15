@@ -107,6 +107,7 @@ export function createMarketPriceService({
   binanceBaseUrl = "https://api.binance.com",
   bybitBaseUrl = "https://api.bybit.com",
   coinGeckoBaseUrl = "https://api.coingecko.com/api/v3",
+  getCachedPrice = null,
   timeoutMs = 8000,
 } = {}) {
   function eventPrice({ symbol, eventPrice: rawEventPrice, eventSymbol = null } = {}) {
@@ -284,6 +285,12 @@ export function createMarketPriceService({
       });
       attempts.push(eventResult);
       if (eventResult.reliable) return { ...eventResult, attempts };
+    }
+
+    if (typeof getCachedPrice === "function") {
+      const cachedResult = getCachedPrice(cleanSymbol, Date.now());
+      attempts.push(cachedResult);
+      if (cachedResult.reliable) return { ...cachedResult, attempts };
     }
 
     for (const resolver of [bybitPrice, coinGeckoPrice, binancePrice]) {

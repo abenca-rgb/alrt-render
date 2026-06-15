@@ -4,6 +4,7 @@ export function cleanupRuntimeState({
   hitDedupTtlMs,
   lossGuardRetentionMs,
   freeRefTtlMs,
+  lastPriceTtlMs = 6 * 60 * 60 * 1000,
   dailyStatsRetentionDays = 10,
 }) {
   let changed = false;
@@ -26,6 +27,16 @@ export function cleanupRuntimeState({
     if (!info?.sharedAtMs || now - info.sharedAtMs > freeRefTtlMs) {
       maps.freeSharedRefs.delete(refId);
       changed = true;
+    }
+  }
+
+  if (maps.lastPrices) {
+    for (const [symbol, info] of maps.lastPrices.entries()) {
+      const receivedAtMs = Number(info?.received_at_ms || Date.parse(info?.received_at_utc || ""));
+      if (!Number.isFinite(receivedAtMs) || now - receivedAtMs > lastPriceTtlMs) {
+        maps.lastPrices.delete(symbol);
+        changed = true;
+      }
     }
   }
 

@@ -34,6 +34,7 @@ export function createRuntimeStateService({
           freePostDate: freeCounter.freePostDate,
           freePostsToday: freeCounter.freePostsToday,
           freeSharedRefs: Array.from(maps.freeSharedRefs.entries()).map(([refId, info]) => [refId, info]),
+          lastPrices: Array.from(maps.lastPrices.entries()).map(([symbol, info]) => [symbol, info]),
           dailyStats: Array.from(maps.dailyStats.entries()).map(([dateKey, stat]) => [dateKey, stat]),
           lastSummarySentDate: getLastSummarySentDate(),
           paidMembers: Array.from(maps.paidMembers.entries()).map(([email, info]) => [email, info]),
@@ -71,6 +72,7 @@ export function createRuntimeStateService({
       console.log(`Loaded ${maps.recentHitKeys.size} recent hit keys from disk`);
       console.log(`Loaded ${maps.recentLossStops.size} recent loss stops from disk`);
       console.log(`Loaded ${maps.freeSharedRefs.size} free shared refs from disk`);
+      console.log(`Loaded ${maps.lastPrices.size} last prices from disk`);
       console.log(`Loaded ${maps.dailyStats.size} daily stat days from disk`);
       console.log(`Loaded ${maps.paidMembers.size} paid members from disk`);
       console.log(`Loaded ${maps.freeMembers.size} free members from disk`);

@@ -3,6 +3,7 @@ export function registerScoreAuditRoutes(app, {
   scoreAuditService,
   openTradeAuditService,
   lifecycleAutoCloseService,
+  lastPriceCacheService,
 } = {}) {
   function authorize(req, res) {
     const token = String(req.query.token || req.headers["x-summary-token"] || "");
@@ -117,6 +118,29 @@ export function registerScoreAuditRoutes(app, {
       return res.status(500).json({
         ok: false,
         error: "lifecycle auto-close failed",
+        generated_at_utc: new Date().toISOString(),
+      });
+    }
+  });
+
+  app.get("/admin/audit/last-prices", async (req, res) => {
+    if (!authorize(req, res)) return;
+
+    try {
+      const prices = lastPriceCacheService.listCachedPrices();
+
+      res.set("Cache-Control", "no-store");
+      return res.status(200).json({
+        ok: true,
+        generated_at_utc: new Date().toISOString(),
+        count: prices.length,
+        prices,
+      });
+    } catch (err) {
+      console.error("LAST PRICE CACHE ERROR:", err?.message || String(err));
+      return res.status(500).json({
+        ok: false,
+        error: "last price cache failed",
         generated_at_utc: new Date().toISOString(),
       });
     }
