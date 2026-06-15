@@ -1,9 +1,10 @@
-import { buildDailySummaryText } from "./summaryService.js";
+import { buildAdminDailySummaryText, buildDailySummaryText } from "./summaryService.js";
 import { fmtPct } from "../utils/numbers.js";
 
 const WIN_OUTCOMES = new Set(["TP", "TIME_EXIT_PROFIT"]);
 const LOSS_OUTCOMES = new Set(["SL", "TIME_EXIT_LOSS"]);
 const CLOSE_OUTCOMES = new Set(["TP", "SL", "TIME_EXIT_PROFIT", "TIME_EXIT_LOSS", "EXPIRED"]);
+const DEFAULT_MAX_TRADE_AGE_MS = 24 * 60 * 60 * 1000;
 
 function startOfUtcDay(dateKey) {
   return new Date(`${dateKey}T00:00:00.000Z`);
@@ -104,6 +105,77 @@ function normalizeOutcomeTime(outcome) {
   return outcome.closed_at_utc || outcome.outcome_time_utc || outcome.created_at || null;
 }
 
+function ageBucket(ageHours) {
+  if (ageHours < 24) return "0-24h";
+  if (ageHours < 72) return "1-3d";
+  if (ageHours < 168) return "3-7d";
+  return "7+d";
+}
+
+function buildOpenAuditSummary({ openAlerts, allOutcomesBeforeEnd, rangeEndMs, maxTradeAgeMs }) {
+  const closedByRef = new Set(
+    allOutcomesBeforeEnd
+      .filter((outcome) => CLOSE_OUTCOMES.has(outcome.outcome_type))
+      .map((outcome) => String(outcome.ref_id || ""))
+      .filter(Boolean),
+  );
+
+  const openByAge = {
+    "0-24h": 0,
+    "1-3d": 0,
+    "3-7d": 0,
+    "7+d": 0,
+  };
+
+  let genuinelyActive = 0;
+  let missingClose = 0;
+  let timeExitRequired = 0;
+  let ageTotal = 0;
+  let ageCount = 0;
+  let oldestActive = null;
+
+  const activeOpenRows = [];
+  const staleOpenRows = [];
+
+  for (const alert of openAlerts) {
+    const openedMs = new Date(alert.signal_time_utc || 0).getTime();
+    const ageMs = Number.isFinite(openedMs) ? Math.max(0, rangeEndMs - openedMs) : null;
+    const ageHours = ageMs === null ? null : ageMs / 3600000;
+    if (ageHours !== null) openByAge[ageBucket(ageHours)] += 1;
+
+    if (closedByRef.has(String(alert.ref_id || ""))) {
+      missingClose += 1;
+      staleOpenRows.push(alert);
+    } else if (ageMs !== null && ageMs <= maxTradeAgeMs) {
+      genuinelyActive += 1;
+      activeOpenRows.push(alert);
+      ageTotal += ageHours;
+      ageCount += 1;
+      oldestActive = oldestActive === null ? ageHours : Math.max(oldestActive, ageHours);
+    } else {
+      timeExitRequired += 1;
+      staleOpenRows.push(alert);
+    }
+  }
+
+  return {
+    activeOpenRows,
+    staleOpenRows,
+    totals: {
+      supabase_open_missing_close: openAlerts.length,
+      genuinely_active: genuinelyActive,
+      time_exit_required: timeExitRequired,
+      missing_close: missingClose,
+    },
+    open_trade_quality: {
+      active_trades: genuinelyActive,
+      average_open_duration_hours: ageCount > 0 ? Math.round((ageTotal / ageCount) * 100) / 100 : null,
+      oldest_active_trade_hours: oldestActive === null ? null : Math.round(oldestActive * 100) / 100,
+    },
+    open_by_age: openByAge,
+  };
+}
+
 function buildWeeklySummaryText({ weekKey, startKey, endKey, stats }) {
   const closed = stats.tp + stats.sl + stats.timeExitProfit + stats.timeExitLoss + stats.expired;
   const wins = stats.tp + stats.timeExitProfit;
@@ -131,6 +203,7 @@ export function createPersistentSummaryService({
   freeChatId,
   mirrorChatIds = [],
   dispatchScope = "default",
+  maxTradeAgeMs = DEFAULT_MAX_TRADE_AGE_MS,
 }) {
   function ready() {
     return supabase.ready();
@@ -240,7 +313,22 @@ export function createPersistentSummaryService({
         .filter((outcome) => CLOSE_OUTCOMES.has(outcome.outcome_type))
         .map((outcome) => String(outcome.alert_id)),
     );
-    const openTotal = allAlertsBeforeEnd.filter((alert) => !closedBeforeEnd.has(String(alert.alert_id))).length;
+    const openAlerts = allAlertsBeforeEnd.filter((alert) => !closedBeforeEnd.has(String(alert.alert_id)));
+    const openAudit = buildOpenAuditSummary({
+      openAlerts,
+      allOutcomesBeforeEnd,
+      rangeEndMs: range.end.getTime(),
+      maxTradeAgeMs,
+    });
+    const activeTrades = openAudit.activeOpenRows.map((alert) => ({
+      hit: false,
+      alertId: alert.alert_id,
+      refId: alert.ref_id,
+      symbol: alert.symbol,
+      side: alert.direction,
+      setupType: alert.setup_type,
+      openedAtUtc: alert.signal_time_utc,
+    }));
 
     return {
       periodType,
@@ -250,8 +338,10 @@ export function createPersistentSummaryService({
       startKey: toDateKey(range.start),
       endKey: toDateKey(addDays(range.end, -1)),
       stat,
-      activeTrades: Array.from(stat.byRef ? Object.values(stat.byRef) : []).filter((trade) => trade.result === "OPEN"),
-      openTotal,
+      activeTrades,
+      openTotal: activeTrades.length,
+      legacyOpenTotal: openAlerts.length,
+      openAudit,
       source: "supabase",
     };
   }
@@ -263,6 +353,7 @@ export function createPersistentSummaryService({
       stat: getDailyStat(dateKey),
       activeTrades: getActiveTrades(),
       openTotal: getActiveTrades().filter((trade) => !trade.hit).length,
+      openAudit: null,
       source: "state_fallback",
     };
   }
@@ -284,9 +375,14 @@ export function createPersistentSummaryService({
         const text = buildDailySummaryText({
           dateKey: periodKey,
           stat: data.stat,
-          activeTrades: new Array(data.openTotal).fill({ hit: false }),
+          activeTrades: data.activeTrades,
         });
-        return { ...data, text };
+        const adminText = buildAdminDailySummaryText({
+          dateKey: periodKey,
+          stat: data.stat,
+          openAudit: data.openAudit,
+        });
+        return { ...data, text, adminText };
       } catch (err) {
         console.warn("PERSISTENT SUMMARY FALLBACK:", err?.message || String(err));
       }
@@ -303,6 +399,11 @@ export function createPersistentSummaryService({
         dateKey: periodKey,
         stat: data.stat,
         activeTrades: data.activeTrades,
+      }),
+      adminText: buildAdminDailySummaryText({
+        dateKey: periodKey,
+        stat: data.stat,
+        openAudit: data.openAudit,
       }),
     };
   }
@@ -376,6 +477,8 @@ export function createPersistentSummaryService({
       expired: built.stat.expired,
       rejectedSignals: built.stat.rejectedSignals,
       openTotal: built.openTotal,
+      legacyOpenTotal: built.legacyOpenTotal,
+      openAudit: built.openAudit,
     };
 
     try {

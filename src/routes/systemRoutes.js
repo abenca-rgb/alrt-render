@@ -141,11 +141,51 @@ export function registerSystemRoutes(app, {
           expired: summary.stat.expired,
           rejectedSignals: summary.stat.rejectedSignals,
           openTotal: summary.openTotal,
+          legacyOpenTotal: summary.legacyOpenTotal,
+          openAudit: summary.openAudit,
         },
         text: summary.text,
       });
     } catch (err) {
       console.error("DAILY SUMMARY PREVIEW ERROR:", err);
+      res.status(500).json({
+        ok: false,
+        error: err?.message || String(err),
+      });
+    }
+  });
+
+  app.get("/summary/daily/admin-preview", async (req, res) => {
+    if (!authorizeSummary(req, res)) return;
+
+    try {
+      const dateKey = String(req.query.date || getUtcDateKey(Date.now()));
+      const summary = await summaryService.preview({
+        periodType: "daily",
+        periodKey: dateKey,
+      });
+
+      res.status(200).json({
+        ok: true,
+        periodType: "daily",
+        periodKey: dateKey,
+        source: summary.source,
+        stats: {
+          alerts: summary.stat.alerts,
+          tp: summary.stat.tp,
+          sl: summary.stat.sl,
+          timeExitProfit: summary.stat.timeExitProfit,
+          timeExitLoss: summary.stat.timeExitLoss,
+          expired: summary.stat.expired,
+          rejectedSignals: summary.stat.rejectedSignals,
+          openTotal: summary.openTotal,
+          legacyOpenTotal: summary.legacyOpenTotal,
+          openAudit: summary.openAudit,
+        },
+        text: summary.adminText || summary.text,
+      });
+    } catch (err) {
+      console.error("ADMIN DAILY SUMMARY PREVIEW ERROR:", err);
       res.status(500).json({
         ok: false,
         error: err?.message || String(err),

@@ -68,6 +68,7 @@ import { createInviteService } from "./src/services/inviteService.js";
 import { createDailyStatsService } from "./src/services/dailyStatsService.js";
 import { createDailySummaryRunnerService } from "./src/services/dailySummaryRunnerService.js";
 import { createOptimizerReportingService } from "./src/services/optimizerReportingService.js";
+import { createOpenTradeAuditService } from "./src/services/openTradeAuditService.js";
 import { createPersistentSummaryService } from "./src/services/persistentSummaryService.js";
 import { createFreeChannelService } from "./src/services/freeChannelService.js";
 import { createHealthStateService } from "./src/services/healthStateService.js";
@@ -244,6 +245,11 @@ const publicResultsService = createPublicResultsService({
 const scoreAuditService = createScoreAuditService({
   supabase,
 });
+const openTradeAuditService = createOpenTradeAuditService({
+  supabase,
+  getActiveTrades: () => Array.from(activeTrades.values()),
+  maxTradeAgeMs: MAX_TRADE_AGE_MS,
+});
 
 function supabaseReady() {
   return supabasePersistence.ready();
@@ -365,6 +371,7 @@ const persistentSummaryService = createPersistentSummaryService({
   freeChatId: FREE_CHAT_ID,
   mirrorChatIds: TELEGRAM_MIRROR_CHAT_IDS,
   dispatchScope: SUMMARY_DISPATCH_SCOPE,
+  maxTradeAgeMs: MAX_TRADE_AGE_MS,
 });
 
 const dailySummaryRunner = createDailySummaryRunnerService({
@@ -593,6 +600,7 @@ registerPublicResultsRoutes(app, {
 registerScoreAuditRoutes(app, {
   summaryAdminToken: SUMMARY_ADMIN_TOKEN,
   scoreAuditService,
+  openTradeAuditService,
 });
 
 // ===== WEBHOOK HANDLER =====

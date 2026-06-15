@@ -1,16 +1,24 @@
 export function registerScoreAuditRoutes(app, {
   summaryAdminToken = "",
   scoreAuditService,
+  openTradeAuditService,
 } = {}) {
-  app.get("/admin/audit/score", async (req, res) => {
+  function authorize(req, res) {
     const token = String(req.query.token || req.headers["x-summary-token"] || "");
 
     if (!summaryAdminToken || token !== summaryAdminToken) {
-      return res.status(403).json({
+      res.status(403).json({
         ok: false,
         error: "forbidden",
       });
+      return false;
     }
+
+    return true;
+  }
+
+  app.get("/admin/audit/score", async (req, res) => {
+    if (!authorize(req, res)) return;
 
     try {
       const report = await scoreAuditService.runScoreAudit();
@@ -28,14 +36,7 @@ export function registerScoreAuditRoutes(app, {
   });
 
   app.get("/admin/audit/shadow-score", async (req, res) => {
-    const token = String(req.query.token || req.headers["x-summary-token"] || "");
-
-    if (!summaryAdminToken || token !== summaryAdminToken) {
-      return res.status(403).json({
-        ok: false,
-        error: "forbidden",
-      });
-    }
+    if (!authorize(req, res)) return;
 
     try {
       const report = await scoreAuditService.getShadowScoreReport();
@@ -53,14 +54,7 @@ export function registerScoreAuditRoutes(app, {
   });
 
   app.post("/admin/audit/shadow-score/backfill", async (req, res) => {
-    const token = String(req.query.token || req.headers["x-summary-token"] || "");
-
-    if (!summaryAdminToken || token !== summaryAdminToken) {
-      return res.status(403).json({
-        ok: false,
-        error: "forbidden",
-      });
-    }
+    if (!authorize(req, res)) return;
 
     try {
       const result = await scoreAuditService.backfillShadowScoreHistory();
@@ -72,6 +66,24 @@ export function registerScoreAuditRoutes(app, {
       return res.status(500).json({
         ok: false,
         error: "shadow score backfill failed",
+        generated_at_utc: new Date().toISOString(),
+      });
+    }
+  });
+
+  app.get("/admin/audit/open-trades", async (req, res) => {
+    if (!authorize(req, res)) return;
+
+    try {
+      const report = await openTradeAuditService.runOpenTradeAudit();
+
+      res.set("Cache-Control", "no-store");
+      return res.status(report.ok ? 200 : 503).json(report);
+    } catch (err) {
+      console.error("OPEN TRADE AUDIT ERROR:", err?.message || String(err));
+      return res.status(500).json({
+        ok: false,
+        error: "open trade audit failed",
         generated_at_utc: new Date().toISOString(),
       });
     }
