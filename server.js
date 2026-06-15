@@ -76,6 +76,7 @@ import { createHitNotificationService } from "./src/services/hitNotificationServ
 import { createRecentHitService } from "./src/services/recentHitService.js";
 import { createRefAllocatorService } from "./src/services/refAllocatorService.js";
 import { createShadowValidationService } from "./src/services/shadowValidationService.js";
+import { createShadowScoringService } from "./src/services/shadowScoringService.js";
 import { createSignalDeliveryService } from "./src/services/signalDeliveryService.js";
 import { createScoreAuditService } from "./src/services/scoreAuditService.js";
 import { createStripeMemberService } from "./src/services/stripeMemberService.js";
@@ -272,6 +273,14 @@ function updateShadowOutcomeInSupabase(payload) {
   supabasePersistence.updateShadowOutcome(payload);
 }
 
+function persistShadowScoreEvaluationToSupabase(payload) {
+  supabase.persistShadowScoreEvaluation(payload);
+}
+
+function updateShadowScoreOutcomeInSupabase(payload) {
+  supabase.updateShadowScoreOutcome(payload);
+}
+
 function persistRejectionToSupabase(payload) {
   supabasePersistence.persistRejection(payload);
 }
@@ -313,6 +322,11 @@ const shadowValidationService = createShadowValidationService({
   activeTrades,
   persistShadowEvaluationToSupabase,
   updateShadowOutcomeInSupabase,
+});
+const shadowScoringService = createShadowScoringService({
+  enabled: LEARNING_LOGGING_ENABLED && CANDIDATE_LOGGING_ENABLED,
+  persistShadowScoreEvaluation: persistShadowScoreEvaluationToSupabase,
+  updateShadowScoreOutcome: updateShadowScoreOutcomeInSupabase,
 });
 
 // ===== FREE CHANNEL =====
@@ -416,7 +430,10 @@ const closeCompletionService = createCloseCompletionService({
   recentLossStops,
   recordCloseStat,
   persistOutcomeToSupabase,
-  updateShadowOutcome: shadowValidationService.updateOutcome,
+  updateShadowOutcome: (payload) => {
+    shadowValidationService.updateOutcome(payload);
+    shadowScoringService.updateOutcome(payload);
+  },
   markRecentHit,
   removeTrade,
 });
@@ -822,6 +839,12 @@ async function handleTradingViewWebhook(req, res) {
         reason: signalGate.reason || "signal_filter",
         quality: signalGate.quality,
       });
+      shadowScoringService.recordCandidate({
+        context: signalContext,
+        quality: signalGate.quality,
+        liveDecision: "REJECTED",
+        decisionReason: signalGate.reason || "signal_filter",
+      });
       return;
     }
 
@@ -869,6 +892,12 @@ async function handleTradingViewWebhook(req, res) {
         alertId: blockAlertId,
         postedToPaid: false,
         postedToFree: false,
+      });
+      shadowScoringService.recordCandidate({
+        context: signalContext,
+        quality,
+        liveDecision: "REJECTED",
+        decisionReason: clusterGuardrail.blockedBy,
       });
 
       console.log("SIGNAL BLOCKED BY CLUSTER GUARDRAIL:", {
@@ -941,6 +970,13 @@ async function handleTradingViewWebhook(req, res) {
       alertId: delivery.primaryAlertId,
       postedToPaid: true,
       postedToFree: delivery.sharedToFree,
+    });
+    shadowScoringService.recordCandidate({
+      context: signalContext,
+      quality,
+      liveDecision: "ACCEPTED",
+      decisionReason: "published_paid",
+      delivery,
     });
 
     shadowValidationService.evaluateAcceptedSignal({

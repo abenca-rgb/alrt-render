@@ -1,3 +1,9 @@
+import {
+  SHADOW_SCORING_VERSION,
+  buildShadowWeeklyReport,
+  evaluateShadowScore,
+} from "./shadowScoringService.js";
+
 const WIN_OUTCOMES = new Set(["TP", "TP1", "TP2", "TP_FULL", "TIME_EXIT_PROFIT"]);
 const LOSS_OUTCOMES = new Set(["SL", "TIME_EXIT_LOSS"]);
 const TIME_EXIT_OUTCOMES = new Set(["TIME_EXIT_PROFIT", "TIME_EXIT_LOSS"]);
@@ -571,8 +577,154 @@ export function createScoreAuditService({ supabase } = {}) {
     };
   }
 
+  async function getShadowScoreReport() {
+    if (!ready()) {
+      return {
+        ok: false,
+        error: "supabase unavailable",
+        generated_at_utc: new Date().toISOString(),
+      };
+    }
+
+    try {
+      const rows = await selectRows(
+        "shadow_score_evaluations",
+        "?select=candidate_key,alert_id,ref_id,symbol,direction,timeframe,setup_type,live_decision,decision_reason,shadow_version,event_time_utc,evaluated_at_utc,posted_to_paid,posted_to_free,current_score,current_grade,proposed_score,proposed_grade,score_delta,score_components,penalty_reasons,bonus_reasons,major_penalty_active,recommended_action,outcome_type,outcome_time_utc,market_move_pct,r_multiple,return_2x,return_3x,return_4x,return_5x,return_6x&order=event_time_utc.desc&limit=10000",
+      );
+
+      return {
+        ok: true,
+        source: "supabase",
+        row_count: rows.length,
+        ...buildShadowWeeklyReport({ rows }),
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        error: "shadow scoring schema not available or report failed",
+        detail: err?.message || String(err),
+        generated_at_utc: new Date().toISOString(),
+      };
+    }
+  }
+
+  async function backfillShadowScoreHistory() {
+    if (!ready()) {
+      return {
+        ok: false,
+        error: "supabase unavailable",
+        generated_at_utc: new Date().toISOString(),
+      };
+    }
+
+    const [alerts, outcomes, candidates] = await Promise.all([
+      selectRows(
+        "alerts",
+        "?select=alert_id,ref_id,symbol,direction,timeframe,setup_type,entry_price,tp_price,sl_price,rr,risk_score,quality_score,quality_grade,why_text,signal_time_utc,session_name,market_regime,pine_version,backend_version,raw_payload&order=signal_time_utc.asc&limit=10000",
+      ),
+      selectRows(
+        "outcomes",
+        "?select=alert_id,ref_id,candidate_key,symbol,direction,outcome_type,outcome_time_utc,closed_at_utc,pnl_percent,move_pct,r_multiple,duration_minutes,exit_price,raw_payload&order=outcome_time_utc.asc&limit=10000",
+      ),
+      selectRows(
+        "alert_candidates",
+        "?select=candidate_key,alert_id,ref_id,symbol,direction,timeframe,entry_price,tp1_price,sl_price,rr,rsi,trend_strength,atr_pct,volatility_pct,session_name,market_regime,setup_type,setup_score,strength,event_time_utc,decision,quality_score,quality_grade,raw_payload&order=event_time_utc.asc&limit=10000",
+      ),
+    ]);
+
+    const outcomeByAlert = new Map(outcomes.map((row) => [String(row.alert_id), row]));
+    const candidatesByAlert = new Map();
+    const candidatesByRef = new Map();
+    for (const candidate of candidates) {
+      if (candidate.alert_id) candidatesByAlert.set(String(candidate.alert_id), candidate);
+      if (candidate.ref_id) candidatesByRef.set(String(candidate.ref_id), candidate);
+    }
+
+    const rows = alerts.map((alert) => {
+      const outcome = outcomeByAlert.get(String(alert.alert_id)) || null;
+      const candidate = candidatesByAlert.get(String(alert.alert_id)) || candidatesByRef.get(String(alert.ref_id)) || null;
+      const record = makeRecord(alert, outcome, candidate);
+      const context = {
+        candidateKey: record.candidate_key || record.alert_id,
+        symbol: record.symbol,
+        side: record.direction,
+        timeframe: record.timeframe,
+        setupType: record.setup_type,
+        rr: record.rr,
+        strength: record.pine_strength,
+        setupScore: record.setup_score,
+        trendStrength: record.trend_strength,
+        marketRegime: record.market_regime,
+        session: record.session_name,
+        rsi: record.rsi,
+        atrPct: record.atr_pct,
+        eventTimeMs: record.signal_time_utc ? new Date(record.signal_time_utc).getTime() : Date.now(),
+      };
+      const quality = {
+        score: record.quality_score,
+        grade: record.quality_grade,
+      };
+      const shadow = evaluateShadowScore({ context, quality });
+      const move = numberOrNull(record.move_pct);
+
+      return {
+        candidate_key: String(context.candidateKey),
+        alert_id: record.alert_id || null,
+        ref_id: record.ref_id || null,
+        symbol: record.symbol || null,
+        direction: record.direction || null,
+        timeframe: record.timeframe || null,
+        setup_type: record.setup_type || null,
+        live_decision: "ACCEPTED",
+        decision_reason: "historical_backfill",
+        shadow_version: SHADOW_SCORING_VERSION,
+        event_time_utc: record.signal_time_utc || null,
+        evaluated_at_utc: new Date().toISOString(),
+        posted_to_paid: true,
+        posted_to_free: false,
+        current_score: shadow.currentScore,
+        current_grade: shadow.currentGrade,
+        proposed_score: shadow.proposedScore,
+        proposed_grade: shadow.proposedGrade,
+        score_delta: shadow.scoreDelta,
+        score_components: shadow.scoreComponents,
+        penalty_reasons: shadow.penaltyReasons,
+        bonus_reasons: shadow.bonusReasons,
+        major_penalty_active: shadow.majorPenaltyActive,
+        recommended_action: shadow.recommendedAction,
+        outcome_type: record.outcome_type || null,
+        outcome_time_utc: record.outcome_time_utc || null,
+        market_move_pct: move,
+        r_multiple: numberOrNull(record.r_multiple) ?? estimatedR(record),
+        return_2x: move === null ? null : round(move * 2, 4),
+        return_3x: move === null ? null : round(move * 3, 4),
+        return_4x: move === null ? null : round(move * 4, 4),
+        return_5x: move === null ? null : round(move * 5, 4),
+        return_6x: move === null ? null : round(move * 6, 4),
+        updated_at: new Date().toISOString(),
+      };
+    });
+
+    if (rows.length) {
+      await supabase.request("shadow_score_evaluations", {
+        query: "?on_conflict=candidate_key,shadow_version",
+        prefer: "resolution=merge-duplicates,return=minimal",
+        body: rows,
+      });
+    }
+
+    return {
+      ok: true,
+      generated_at_utc: new Date().toISOString(),
+      shadow_version: SHADOW_SCORING_VERSION,
+      backfilled_rows: rows.length,
+    };
+  }
+
   return {
     runScoreAudit,
+    getShadowScoreReport,
+    backfillShadowScoreHistory,
     ready,
   };
 }

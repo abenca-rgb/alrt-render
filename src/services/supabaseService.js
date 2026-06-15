@@ -430,6 +430,106 @@ export function createSupabaseService({ enabled, url, serviceRoleKey, backendVer
     });
   }
 
+  function persistShadowScoreEvaluation({
+    candidateKey,
+    alertId,
+    refId,
+    symbol,
+    side,
+    timeframe,
+    setupType,
+    liveDecision,
+    decisionReason,
+    shadowVersion,
+    eventTimeMs,
+    postedToPaid,
+    postedToFree,
+    currentScore,
+    currentGrade,
+    proposedScore,
+    proposedGrade,
+    scoreDelta,
+    scoreComponents,
+    penaltyReasons,
+    bonusReasons,
+    majorPenaltyActive,
+    recommendedAction,
+  }) {
+    if (!candidateKey || !shadowVersion) return;
+
+    background("SHADOW SCORE UPSERT", () =>
+      request("shadow_score_evaluations", {
+        query: "?on_conflict=candidate_key,shadow_version",
+        prefer: "resolution=merge-duplicates,return=minimal",
+        body: {
+          candidate_key: String(candidateKey),
+          alert_id: alertId ? String(alertId) : null,
+          ref_id: refId ? String(refId) : null,
+          symbol: symbol || null,
+          direction: side || null,
+          timeframe: timeframe || null,
+          setup_type: setupType || null,
+          live_decision: liveDecision || "PENDING",
+          decision_reason: decisionReason || null,
+          shadow_version: shadowVersion,
+          event_time_utc: isoFromMs(eventTimeMs),
+          evaluated_at_utc: new Date().toISOString(),
+          posted_to_paid: Boolean(postedToPaid),
+          posted_to_free: Boolean(postedToFree),
+          current_score: currentScore ?? null,
+          current_grade: currentGrade || null,
+          proposed_score: proposedScore ?? null,
+          proposed_grade: proposedGrade || null,
+          score_delta: scoreDelta ?? null,
+          score_components: scoreComponents || {},
+          penalty_reasons: penaltyReasons || [],
+          bonus_reasons: bonusReasons || [],
+          major_penalty_active: Boolean(majorPenaltyActive),
+          recommended_action: recommendedAction || null,
+          updated_at: new Date().toISOString(),
+        },
+      }),
+    );
+  }
+
+  function updateShadowScoreOutcome({
+    candidateKey,
+    alertId,
+    refId,
+    outcomeType,
+    outcomeTimeMs,
+    marketMovePct,
+    return2x,
+    return3x,
+    return4x,
+    return5x,
+    return6x,
+    rMultiple,
+  }) {
+    if (!candidateKey) return;
+
+    background("SHADOW SCORE OUTCOME UPDATE", () =>
+      request("shadow_score_evaluations", {
+        method: "PATCH",
+        query: `?candidate_key=eq.${encodeURIComponent(String(candidateKey))}`,
+        body: {
+          alert_id: alertId ? String(alertId) : null,
+          ref_id: refId ? String(refId) : null,
+          outcome_type: outcomeType || null,
+          outcome_time_utc: isoFromMs(outcomeTimeMs),
+          market_move_pct: marketMovePct ?? null,
+          r_multiple: rMultiple ?? null,
+          return_2x: return2x ?? null,
+          return_3x: return3x ?? null,
+          return_4x: return4x ?? null,
+          return_5x: return5x ?? null,
+          return_6x: return6x ?? null,
+          updated_at: new Date().toISOString(),
+        },
+      }),
+    );
+  }
+
   function persistRejection({ symbol, side, setupType, reason, qualityScore, qualityGrade, rawPayload }) {
     background("REJECTION INSERT", () =>
       request("alert_rejections", {
@@ -584,6 +684,8 @@ export function createSupabaseService({ enabled, url, serviceRoleKey, backendVer
     persistOutcome,
     persistShadowEvaluation,
     updateShadowOutcome,
+    persistShadowScoreEvaluation,
+    updateShadowScoreOutcome,
     persistRejection,
     persistGuardrailBlock,
     persistDailySummary,

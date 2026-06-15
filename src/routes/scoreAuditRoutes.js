@@ -26,4 +26,54 @@ export function registerScoreAuditRoutes(app, {
       });
     }
   });
+
+  app.get("/admin/audit/shadow-score", async (req, res) => {
+    const token = String(req.query.token || req.headers["x-summary-token"] || "");
+
+    if (!summaryAdminToken || token !== summaryAdminToken) {
+      return res.status(403).json({
+        ok: false,
+        error: "forbidden",
+      });
+    }
+
+    try {
+      const report = await scoreAuditService.getShadowScoreReport();
+
+      res.set("Cache-Control", "no-store");
+      return res.status(report.ok ? 200 : 503).json(report);
+    } catch (err) {
+      console.error("SHADOW SCORE REPORT ERROR:", err?.message || String(err));
+      return res.status(500).json({
+        ok: false,
+        error: "shadow score report failed",
+        generated_at_utc: new Date().toISOString(),
+      });
+    }
+  });
+
+  app.post("/admin/audit/shadow-score/backfill", async (req, res) => {
+    const token = String(req.query.token || req.headers["x-summary-token"] || "");
+
+    if (!summaryAdminToken || token !== summaryAdminToken) {
+      return res.status(403).json({
+        ok: false,
+        error: "forbidden",
+      });
+    }
+
+    try {
+      const result = await scoreAuditService.backfillShadowScoreHistory();
+
+      res.set("Cache-Control", "no-store");
+      return res.status(result.ok ? 200 : 503).json(result);
+    } catch (err) {
+      console.error("SHADOW SCORE BACKFILL ERROR:", err?.message || String(err));
+      return res.status(500).json({
+        ok: false,
+        error: "shadow score backfill failed",
+        generated_at_utc: new Date().toISOString(),
+      });
+    }
+  });
 }
