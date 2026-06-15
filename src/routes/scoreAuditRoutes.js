@@ -97,11 +97,17 @@ export function registerScoreAuditRoutes(app, {
       const dryRun = String(req.query.dry_run ?? "1") !== "0";
       const confirm = String(req.query.confirm || "") === "1";
       const includeSupabaseOnly = String(req.query.include_supabase_only ?? "1") !== "0";
+      const allowExpiredWithoutPrice = String(req.query.allow_expired_without_price || "") === "1";
+      const eventPrice = req.body?.event_price ?? req.body?.current_price ?? req.query.event_price ?? null;
+      const eventSymbol = req.body?.event_symbol ?? req.body?.symbol ?? req.query.event_symbol ?? req.query.symbol ?? null;
 
       const report = await lifecycleAutoCloseService.runLifecycleAutoClose({
         dryRun,
         confirm,
         includeSupabaseOnly,
+        allowExpiredWithoutPrice,
+        eventPrice,
+        eventSymbol,
       });
 
       res.set("Cache-Control", "no-store");

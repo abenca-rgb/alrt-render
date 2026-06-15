@@ -3,6 +3,7 @@ import { getTimeExitResult } from "../utils/outcomes.js";
 import { pctMove } from "../utils/tradeMath.js";
 
 const CLOSE_OUTCOMES = new Set(["TP", "SL", "TIME_EXIT_PROFIT", "TIME_EXIT_LOSS", "EXPIRED", "MANUAL_CLOSE"]);
+const PROFIT_LOSS_OUTCOMES = new Set(["TIME_EXIT_PROFIT", "TIME_EXIT_LOSS"]);
 
 function normalizeId(value) {
   return String(value || "").trim();
@@ -54,23 +55,58 @@ function ageMsForTrade(trade, nowMs) {
   return Math.max(0, nowMs - createdAtMs);
 }
 
-function buildClosePreview({ key, trade, source, nowMs, maxTradeAgeMs, priceResult, duplicateClose }) {
+function isFreshPrice(priceResult, nowMs, maxPriceAgeMs) {
+  if (!priceResult?.fetched_at_utc) return false;
+  const fetchedAtMs = new Date(priceResult.fetched_at_utc).getTime();
+  return Number.isFinite(fetchedAtMs) && nowMs - fetchedAtMs <= maxPriceAgeMs;
+}
+
+function buildClosePreview({
+  key,
+  trade,
+  source,
+  nowMs,
+  maxTradeAgeMs,
+  maxPriceAgeMs,
+  priceResult,
+  duplicateClose,
+  allowExpiredWithoutPrice,
+}) {
   const ageMs = ageMsForTrade(trade, nowMs);
   const stale = ageMs !== null && ageMs >= maxTradeAgeMs;
-  const exitPrice = priceResult?.ok ? priceResult.price : null;
+  const symbolMatches = !priceResult?.symbol || priceResult.symbol === trade.symbol;
+  const priceFresh = isFreshPrice(priceResult, nowMs, maxPriceAgeMs);
+  const priceReliable = Boolean(priceResult?.reliable && symbolMatches && priceFresh);
+  const exitPrice = priceReliable ? priceResult.price : null;
   const suggestedOutcome = exitPrice !== null ? getTimeExitResult(trade, exitPrice) : "EXPIRED";
   const movePct = exitPrice !== null ? pctMove(trade.side, trade.entry, exitPrice) : null;
+  const isProfitLoss = PROFIT_LOSS_OUTCOMES.has(suggestedOutcome);
+  const expiredWithoutPrice = suggestedOutcome === "EXPIRED" && !priceReliable && allowExpiredWithoutPrice;
   const canWrite =
     source === "runtime_active_trade" &&
     stale &&
     isTradeUsable(trade) &&
-    priceResult?.ok &&
+    !duplicateClose &&
+    ((isProfitLoss && priceReliable) || expiredWithoutPrice) &&
+    symbolMatches &&
+    (priceFresh || expiredWithoutPrice);
+
+  const canWriteProfitLoss =
+    canWrite &&
+    isProfitLoss &&
+    priceReliable &&
+    source === "runtime_active_trade" &&
     !duplicateClose;
+  const canWriteExpired = canWrite && suggestedOutcome === "EXPIRED";
 
   let reason = "ready_for_lifecycle_close";
   if (!stale) reason = "trade_is_not_stale";
   if (!isTradeUsable(trade)) reason = "missing_required_trade_fields";
-  if (!priceResult?.ok) reason = "no_reliable_exit_price";
+  if (!priceResult?.reliable) reason = "NO_RELIABLE_PRICE";
+  if (priceResult?.reliable && !symbolMatches) reason = "price_symbol_mismatch";
+  if (priceResult?.reliable && symbolMatches && !priceFresh) reason = "stale_price";
+  if (suggestedOutcome === "EXPIRED" && !priceReliable && !allowExpiredWithoutPrice) reason = "NO_RELIABLE_PRICE";
+  if (canWriteExpired) reason = "ready_for_expired_lifecycle_close";
   if (duplicateClose) reason = "close_outcome_already_exists";
   if (source !== "runtime_active_trade") reason = "supabase_only_historical_record_dry_run_only";
 
@@ -86,13 +122,47 @@ function buildClosePreview({ key, trade, source, nowMs, maxTradeAgeMs, priceResu
     age_hours: ageMs === null ? null : round(ageMs / 3600000, 2),
     stale,
     exit_price: exitPrice,
-    price_source: priceResult?.source || null,
-    price_error: priceResult?.ok ? null : priceResult?.error || "unknown_price_error",
+    price_provider: priceResult?.provider || priceResult?.source || null,
+    price_source: priceResult?.source || priceResult?.provider || null,
+    price_fetched_at_utc: priceResult?.fetched_at_utc || null,
+    price_freshness: priceResult?.freshness || null,
+    price_reliable: priceReliable,
+    price_error: priceReliable ? null : priceResult?.error || "NO_RELIABLE_PRICE",
+    price_attempts: priceResult?.attempts || [],
     suggested_outcome: suggestedOutcome,
     market_move_pct: round(movePct, 4),
     duplicate_close: Boolean(duplicateClose),
     writable: canWrite,
+    writable_profit_loss: canWriteProfitLoss,
+    writable_expired: canWriteExpired,
     reason,
+  };
+}
+
+function buildTotals({ previews, runtimeCandidates, supabaseOnlyCandidates, closed, skipped }) {
+  const byProvider = {};
+  let noPrice = 0;
+  let errors = 0;
+
+  for (const preview of previews) {
+    const provider = preview.price_provider || "none";
+    byProvider[provider] = (byProvider[provider] || 0) + 1;
+    if (!preview.price_reliable) noPrice += 1;
+    if (preview.price_error) errors += 1;
+  }
+
+  return {
+    candidates: previews.length,
+    runtime_candidates: runtimeCandidates.length,
+    supabase_only_candidates: supabaseOnlyCandidates.length,
+    by_provider: byProvider,
+    no_price: noPrice,
+    writable_profit_loss: previews.filter((preview) => preview.writable_profit_loss).length,
+    writable_expired: previews.filter((preview) => preview.writable_expired).length,
+    writable_candidates: previews.filter((preview) => preview.writable).length,
+    closed: closed.length,
+    skipped: skipped.length,
+    errors,
   };
 }
 
@@ -102,6 +172,7 @@ export function createLifecycleAutoCloseService({
   closeCompletionService,
   priceService,
   maxTradeAgeMs,
+  maxPriceAgeMs = 5 * 60 * 1000,
 } = {}) {
   async function selectRows(table, query) {
     return supabase.selectRows(table, query);
@@ -161,11 +232,11 @@ export function createLifecycleAutoCloseService({
       }));
   }
 
-  async function getPriceResults(symbols) {
+  async function getPriceResults(symbols, options = {}) {
     const resultBySymbol = new Map();
     for (const symbol of symbols) {
       if (!symbol || resultBySymbol.has(symbol)) continue;
-      resultBySymbol.set(symbol, await priceService.getLatestPrice(symbol));
+      resultBySymbol.set(symbol, await priceService.getLatestPrice(symbol, options));
     }
     return resultBySymbol;
   }
@@ -174,6 +245,9 @@ export function createLifecycleAutoCloseService({
     dryRun = true,
     confirm = false,
     includeSupabaseOnly = true,
+    allowExpiredWithoutPrice = false,
+    eventPrice = null,
+    eventSymbol = null,
     nowMs = Date.now(),
     limit = 10000,
   } = {}) {
@@ -195,7 +269,10 @@ export function createLifecycleAutoCloseService({
       : [];
 
     const allCandidates = [...runtimeCandidates, ...supabaseOnlyCandidates];
-    const priceResults = await getPriceResults([...new Set(allCandidates.map(({ trade }) => trade.symbol).filter(Boolean))]);
+    const priceResults = await getPriceResults(
+      [...new Set(allCandidates.map(({ trade }) => trade.symbol).filter(Boolean))],
+      { eventPrice, eventSymbol },
+    );
 
     const previews = allCandidates.map(({ key, trade, source }) => {
       const alertId = normalizeId(trade.primaryAlertId || trade.alertId || trade.alertIds?.[0]);
@@ -206,8 +283,10 @@ export function createLifecycleAutoCloseService({
         source,
         nowMs,
         maxTradeAgeMs,
+        maxPriceAgeMs,
         priceResult: priceResults.get(trade.symbol),
         duplicateClose: closedKeys.alertIds.has(alertId) || closedKeys.refIds.has(refId),
+        allowExpiredWithoutPrice,
       });
     });
 
@@ -268,14 +347,7 @@ export function createLifecycleAutoCloseService({
       mode: writeRequested ? "confirmed_write" : "dry_run",
       generated_at_utc: new Date(nowMs).toISOString(),
       lifecycle_limit_hours: round(maxTradeAgeMs / 3600000, 2),
-      totals: {
-        candidates: previews.length,
-        runtime_candidates: runtimeCandidates.length,
-        supabase_only_candidates: supabaseOnlyCandidates.length,
-        writable_candidates: previews.filter((preview) => preview.writable).length,
-        closed: closed.length,
-        skipped: skipped.length,
-      },
+      totals: buildTotals({ previews, runtimeCandidates, supabaseOnlyCandidates, closed, skipped }),
       closed,
       candidates: previews,
     };
