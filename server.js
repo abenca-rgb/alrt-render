@@ -77,6 +77,7 @@ import { createRecentHitService } from "./src/services/recentHitService.js";
 import { createRefAllocatorService } from "./src/services/refAllocatorService.js";
 import { createShadowValidationService } from "./src/services/shadowValidationService.js";
 import { createSignalDeliveryService } from "./src/services/signalDeliveryService.js";
+import { createScoreAuditService } from "./src/services/scoreAuditService.js";
 import { createStripeMemberService } from "./src/services/stripeMemberService.js";
 import { createSupabasePersistenceService } from "./src/services/supabasePersistenceService.js";
 import { evaluateSignalAcceptance } from "./src/services/signalFilterService.js";
@@ -88,6 +89,7 @@ import { createWordPressSyncService } from "./src/services/wordpressSyncService.
 import { registerChartRoutes } from "./src/routes/chartRoutes.js";
 import { registerMemberRoutes } from "./src/routes/memberRoutes.js";
 import { registerPublicResultsRoutes } from "./src/routes/publicResultsRoutes.js";
+import { registerScoreAuditRoutes } from "./src/routes/scoreAuditRoutes.js";
 import { registerStripeRoutes } from "./src/routes/stripeRoutes.js";
 import { registerSystemRoutes } from "./src/routes/systemRoutes.js";
 import { registerTradingViewRoutes } from "./src/routes/tradingViewRoutes.js";
@@ -236,6 +238,9 @@ const optimizerReportingService = createOptimizerReportingService({
   supabase,
 });
 const publicResultsService = createPublicResultsService({
+  supabase,
+});
+const scoreAuditService = createScoreAuditService({
   supabase,
 });
 
@@ -566,6 +571,11 @@ registerMemberRoutes(app, {
 
 registerPublicResultsRoutes(app, {
   publicResultsService,
+});
+
+registerScoreAuditRoutes(app, {
+  summaryAdminToken: SUMMARY_ADMIN_TOKEN,
+  scoreAuditService,
 });
 
 // ===== WEBHOOK HANDLER =====
