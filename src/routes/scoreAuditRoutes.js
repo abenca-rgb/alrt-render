@@ -2,6 +2,7 @@ export function registerScoreAuditRoutes(app, {
   summaryAdminToken = "",
   scoreAuditService,
   openTradeAuditService,
+  lifecycleAutoCloseService,
 } = {}) {
   function authorize(req, res) {
     const token = String(req.query.token || req.headers["x-summary-token"] || "");
@@ -84,6 +85,32 @@ export function registerScoreAuditRoutes(app, {
       return res.status(500).json({
         ok: false,
         error: "open trade audit failed",
+        generated_at_utc: new Date().toISOString(),
+      });
+    }
+  });
+
+  app.post("/admin/audit/open-trades/auto-close", async (req, res) => {
+    if (!authorize(req, res)) return;
+
+    try {
+      const dryRun = String(req.query.dry_run ?? "1") !== "0";
+      const confirm = String(req.query.confirm || "") === "1";
+      const includeSupabaseOnly = String(req.query.include_supabase_only ?? "1") !== "0";
+
+      const report = await lifecycleAutoCloseService.runLifecycleAutoClose({
+        dryRun,
+        confirm,
+        includeSupabaseOnly,
+      });
+
+      res.set("Cache-Control", "no-store");
+      return res.status(report.ok ? 200 : 503).json(report);
+    } catch (err) {
+      console.error("LIFECYCLE AUTO-CLOSE ERROR:", err?.message || String(err));
+      return res.status(500).json({
+        ok: false,
+        error: "lifecycle auto-close failed",
         generated_at_utc: new Date().toISOString(),
       });
     }

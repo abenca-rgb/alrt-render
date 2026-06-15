@@ -65,6 +65,8 @@ import { createCloseCompletionService } from "./src/services/closeCompletionServ
 import { createCloseFlowService } from "./src/services/closeFlowService.js";
 import { appendChartLinkIfMissing } from "./src/services/messageTemplates.js";
 import { createInviteService } from "./src/services/inviteService.js";
+import { createLifecycleAutoCloseService } from "./src/services/lifecycleAutoCloseService.js";
+import { createMarketPriceService } from "./src/services/marketPriceService.js";
 import { createDailyStatsService } from "./src/services/dailyStatsService.js";
 import { createDailySummaryRunnerService } from "./src/services/dailySummaryRunnerService.js";
 import { createOptimizerReportingService } from "./src/services/optimizerReportingService.js";
@@ -250,6 +252,7 @@ const openTradeAuditService = createOpenTradeAuditService({
   getActiveTrades: () => Array.from(activeTrades.values()),
   maxTradeAgeMs: MAX_TRADE_AGE_MS,
 });
+const marketPriceService = createMarketPriceService();
 
 function supabaseReady() {
   return supabasePersistence.ready();
@@ -444,6 +447,13 @@ const closeCompletionService = createCloseCompletionService({
   markRecentHit,
   removeTrade,
 });
+const lifecycleAutoCloseService = createLifecycleAutoCloseService({
+  supabase,
+  activeTrades,
+  closeCompletionService,
+  priceService: marketPriceService,
+  maxTradeAgeMs: MAX_TRADE_AGE_MS,
+});
 
 const closeFlowService = createCloseFlowService({
   closeCompletionService,
@@ -601,6 +611,7 @@ registerScoreAuditRoutes(app, {
   summaryAdminToken: SUMMARY_ADMIN_TOKEN,
   scoreAuditService,
   openTradeAuditService,
+  lifecycleAutoCloseService,
 });
 
 // ===== WEBHOOK HANDLER =====
