@@ -2,7 +2,11 @@ import express from "express";
 import fetch from "node-fetch";
 import {
   ALERT_QUALITY_FILTER_ENABLED,
+  ALERT_DUPLICATE_GUARD_ENABLED,
+  ALERT_DUPLICATE_GUARD_TTL_MS,
+  ALERT_DUPLICATE_GUARD_WINDOW_MS,
   ALLOWED_SYMBOLS,
+  AUTO_TUNING,
   APP_BASE_URL,
   APP_VERSION,
   BOT_TOKEN,
@@ -38,6 +42,9 @@ import {
   PAID_TELEGRAM_CHAT_ID,
   PORT,
   PUBLIC_SITE_URL,
+  QUALITY_OPTIMIZER_ENABLED,
+  QUALITY_OPTIMIZER_UTC_HOUR,
+  QUALITY_OPTIMIZER_UTC_MINUTE,
   REF_START_FLOOR,
   ROOT_DIR,
   STATE_FILE,
@@ -70,12 +77,14 @@ import { createLastPriceCacheService } from "./src/services/lastPriceCacheServic
 import { createMarketPriceService } from "./src/services/marketPriceService.js";
 import { createDailyStatsService } from "./src/services/dailyStatsService.js";
 import { createDailySummaryRunnerService } from "./src/services/dailySummaryRunnerService.js";
+import { createDuplicateGuardService } from "./src/services/duplicateGuardService.js";
 import { createOptimizerReportingService } from "./src/services/optimizerReportingService.js";
 import { createOpenTradeAuditService } from "./src/services/openTradeAuditService.js";
 import { createPersistentSummaryService } from "./src/services/persistentSummaryService.js";
 import { createFreeChannelService } from "./src/services/freeChannelService.js";
 import { createHealthStateService } from "./src/services/healthStateService.js";
 import { createPublicResultsService } from "./src/services/publicResultsService.js";
+import { createQualityOptimizerService } from "./src/services/qualityOptimizerService.js";
 import { createHitNotificationService } from "./src/services/hitNotificationService.js";
 import { createRecentHitService } from "./src/services/recentHitService.js";
 import { createRefAllocatorService } from "./src/services/refAllocatorService.js";
@@ -158,6 +167,7 @@ const {
 // ===== STATE =====
 const activeTrades = new Map();
 const recentHitKeys = new Map();
+const recentAlertFingerprints = new Map();
 const recentLossStops = new Map();
 const freeSharedRefs = new Map();
 const lastPrices = new Map();
@@ -180,6 +190,7 @@ const runtimeState = createRuntimeStateService({
   maps: {
     activeTrades,
     recentHitKeys,
+    recentAlertFingerprints,
     recentLossStops,
     freeSharedRefs,
     lastPrices,
@@ -243,6 +254,11 @@ const supabasePersistence = createSupabasePersistenceService({
 
 const optimizerReportingService = createOptimizerReportingService({
   supabase,
+});
+const qualityOptimizerService = createQualityOptimizerService({
+  supabase,
+  enabled: QUALITY_OPTIMIZER_ENABLED,
+  autoTuning: AUTO_TUNING,
 });
 const publicResultsService = createPublicResultsService({
   supabase,
@@ -308,6 +324,10 @@ function runOptimizerReport({ periodType, detail }) {
   return optimizerReportingService.runReport({ periodType, detail });
 }
 
+function runQualityOptimizerReport({ persist = true } = {}) {
+  return qualityOptimizerService.runReport({ persist });
+}
+
 const freeChannelService = createFreeChannelService({
   freeSharedRefs,
   freeChatId: FREE_CHAT_ID,
@@ -334,6 +354,14 @@ const candidateLoggingService = createCandidateLoggingService({
   enabled: LEARNING_LOGGING_ENABLED && CANDIDATE_LOGGING_ENABLED,
   persistCandidateToSupabase,
   updateCandidateDecisionInSupabase,
+});
+const duplicateGuardService = createDuplicateGuardService({
+  enabled: ALERT_DUPLICATE_GUARD_ENABLED,
+  recentAlertFingerprints,
+  activeTrades,
+  persistState,
+  windowMs: ALERT_DUPLICATE_GUARD_WINDOW_MS,
+  ttlMs: ALERT_DUPLICATE_GUARD_TTL_MS,
 });
 
 const shadowValidationService = createShadowValidationService({
@@ -418,6 +446,7 @@ function cleanupState() {
   const { changed } = cleanupRuntimeState({
     maps: {
       recentHitKeys,
+      recentAlertFingerprints,
       recentLossStops,
       freeSharedRefs,
       lastPrices,
@@ -471,6 +500,7 @@ const closeFlowService = createCloseFlowService({
   hitNotificationService,
   mirrorHitNotificationService,
   wasRecentHitSent,
+  markRecentHit,
   wasSharedToFree,
   paidChatId: PAID_TELEGRAM_CHAT_ID,
   freeChatId: FREE_CHAT_ID,
@@ -539,6 +569,7 @@ const healthStateService = createHealthStateService({
   supabaseReady,
   activeTrades,
   recentHitKeys,
+  recentAlertFingerprints,
   recentLossStops,
   getNextRef: () => nextRef,
   getFreePostDate: () => freePostDate,
@@ -578,6 +609,9 @@ registerSystemRoutes(app, {
     optimizerReportsEnabled: OPTIMIZER_REPORTS_ENABLED,
     historicalQualityAdjustmentsEnabled: HISTORICAL_QUALITY_ADJUSTMENTS_ENABLED,
     duplicateSuppressionEnabled: DUPLICATE_SUPPRESSION_ENABLED,
+    alertDuplicateGuardEnabled: ALERT_DUPLICATE_GUARD_ENABLED,
+    alertDuplicateGuardWindowMinutes: Math.round(ALERT_DUPLICATE_GUARD_WINDOW_MS / 60000),
+    alertDuplicateGuardTtlHours: Math.round(ALERT_DUPLICATE_GUARD_TTL_MS / 3600000),
     clusterGuardrailEnabled: CLUSTER_GUARDRAIL_ENABLED,
     clusterGuardrailWindowMinutes: CLUSTER_GUARDRAIL_WINDOW_MINUTES,
     clusterGuardrailMode: CLUSTER_GUARDRAIL_MODE,
@@ -593,11 +627,16 @@ registerSystemRoutes(app, {
     dailySummaryUtcMinute: DAILY_SUMMARY_UTC_MINUTE,
     summaryDispatchScope: SUMMARY_DISPATCH_SCOPE,
     summaryAdminToken: SUMMARY_ADMIN_TOKEN,
+    qualityOptimizerEnabled: QUALITY_OPTIMIZER_ENABLED,
+    qualityOptimizerUtcHour: QUALITY_OPTIMIZER_UTC_HOUR,
+    qualityOptimizerUtcMinute: QUALITY_OPTIMIZER_UTC_MINUTE,
+    autoTuning: AUTO_TUNING,
   },
   getHealthState: healthStateService.getHealthState,
   sendDailySummary,
   summaryService: persistentSummaryService,
   runOptimizerReport,
+  runQualityOptimizerReport,
   getUtcDateKey,
 });
 
@@ -952,6 +991,78 @@ async function handleTradingViewWebhook(req, res) {
       return;
     }
 
+    const duplicateReservation = await duplicateGuardService.reserveSignal({
+      context: signalContext,
+      candidateKey,
+      alertId: candidateIdsBase[0] || incomingRef || candidateKey,
+      receivedAtMs,
+    });
+
+    if (duplicateReservation.blocked) {
+      const blockAlertId = candidateIdsBase[0] || incomingRef || candidateKey;
+      const rawPayload = sanitizePayloadForStorage(body);
+      const duplicateDetails = duplicateGuardService.describeBlock(duplicateReservation);
+
+      await recordRejectStat({
+        symbol,
+        side,
+        setupType,
+        reason: duplicateReservation.reason || "duplicate_signal_fingerprint",
+        qualityScore: quality?.score ?? null,
+        qualityGrade: quality?.grade ?? null,
+        rawPayload,
+        ts: receivedAtMs,
+      });
+
+      persistGuardrailBlockToSupabase(buildClusterGuardrailBlockRecord({
+        result: {
+          blockedBy: duplicateReservation.reason || "duplicate_signal_fingerprint",
+          guardrailVersion: "duplicate-guard-v1",
+          mode: "fingerprint",
+          windowMinutes: Math.round((duplicateReservation.windowMs || ALERT_DUPLICATE_GUARD_WINDOW_MS) / 60000),
+          symbol,
+          side,
+          setupType,
+          setupGroup: setupType || "UNKNOWN",
+          matchedPreviousAlertId: duplicateReservation.original?.alertId || null,
+          matchedPreviousRefId: duplicateReservation.original?.refId || null,
+          minutesSincePreviousAlert: Number.isFinite(duplicateReservation.ageMs)
+            ? Math.max(0, Math.round(duplicateReservation.ageMs / 60000))
+            : null,
+        },
+        alertId: blockAlertId,
+        candidateKey,
+        eventTimeMs: signalContext.eventTimeMs || receivedAtMs,
+        rawPayload: {
+          ...rawPayload,
+          duplicate_guard: duplicateDetails,
+        },
+      }));
+
+      candidateLoggingService.updateDecision({
+        candidateKey: loggedCandidate?.candidateKey,
+        decision: "REJECTED",
+        reason: duplicateReservation.reason || "duplicate_signal_fingerprint",
+        quality,
+        alertId: blockAlertId,
+        postedToPaid: false,
+        postedToFree: false,
+      });
+      shadowScoringService.recordCandidate({
+        context: signalContext,
+        quality,
+        liveDecision: "REJECTED",
+        decisionReason: duplicateReservation.reason || "duplicate_signal_fingerprint",
+      });
+
+      console.log("SIGNAL BLOCKED BY DUPLICATE GUARD:", {
+        ...duplicateGuardService.formatSignalContext(signalContext),
+        alertId: blockAlertId,
+        duplicate: duplicateDetails,
+      });
+      return;
+    }
+
     const delivery = await signalDeliveryService.deliverSignal({
       body,
       context: {
@@ -1086,11 +1197,26 @@ async function startServer() {
     lastSummarySentDate,
   });
 
+  console.log("QUALITY IMPROVEMENT:", {
+    alertDuplicateGuardEnabled: ALERT_DUPLICATE_GUARD_ENABLED,
+    alertDuplicateGuardWindowMinutes: Math.round(ALERT_DUPLICATE_GUARD_WINDOW_MS / 60000),
+    alertDuplicateGuardTtlHours: Math.round(ALERT_DUPLICATE_GUARD_TTL_MS / 3600000),
+    qualityOptimizerEnabled: QUALITY_OPTIMIZER_ENABLED,
+    qualityOptimizerUtcHour: QUALITY_OPTIMIZER_UTC_HOUR,
+    qualityOptimizerUtcMinute: QUALITY_OPTIMIZER_UTC_MINUTE,
+    autoTuning: AUTO_TUNING,
+  });
+
   setInterval(() => {
     maybeSendDailySummary().catch((err) => {
       console.error("DAILY SUMMARY INTERVAL ERROR:", err);
     });
   }, 30 * 1000);
+
+  qualityOptimizerService.createScheduler({
+    utcHour: QUALITY_OPTIMIZER_UTC_HOUR,
+    utcMinute: QUALITY_OPTIMIZER_UTC_MINUTE,
+  });
 
   app.listen(PORT, () => {
     console.log(`ALRT-Render ${APP_VERSION} running on port ${PORT}`);

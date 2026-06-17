@@ -16,6 +16,16 @@ export function cleanupRuntimeState({
     }
   }
 
+  if (maps.recentAlertFingerprints) {
+    for (const [key, info] of maps.recentAlertFingerprints.entries()) {
+      const atMs = Number(info?.atMs || info);
+      if (!Number.isFinite(atMs) || now - atMs > hitDedupTtlMs) {
+        maps.recentAlertFingerprints.delete(key);
+        changed = true;
+      }
+    }
+  }
+
   for (const [key, info] of maps.recentLossStops.entries()) {
     if (!info?.atMs || now - Number(info.atMs) > lossGuardRetentionMs) {
       maps.recentLossStops.delete(key);

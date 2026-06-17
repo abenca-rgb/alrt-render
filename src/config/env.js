@@ -103,6 +103,18 @@ export const HISTORICAL_QUALITY_ADJUSTMENTS_ENABLED =
   String(process.env.HISTORICAL_QUALITY_ADJUSTMENTS_ENABLED || "false").toLowerCase() === "true";
 export const DUPLICATE_SUPPRESSION_ENABLED =
   String(process.env.DUPLICATE_SUPPRESSION_ENABLED || "false").toLowerCase() === "true";
+export const ALERT_DUPLICATE_GUARD_ENABLED =
+  String(process.env.ALERT_DUPLICATE_GUARD_ENABLED || "true").toLowerCase() !== "false";
+export const ALERT_DUPLICATE_GUARD_WINDOW_MS =
+  Number(process.env.ALERT_DUPLICATE_GUARD_WINDOW_MINUTES || 10) * 60 * 1000;
+export const ALERT_DUPLICATE_GUARD_TTL_MS =
+  Number(process.env.ALERT_DUPLICATE_GUARD_TTL_HOURS || 36) * 60 * 60 * 1000;
+export const QUALITY_OPTIMIZER_ENABLED =
+  String(process.env.QUALITY_OPTIMIZER_ENABLED || "true").toLowerCase() !== "false";
+export const QUALITY_OPTIMIZER_UTC_HOUR = Number(process.env.QUALITY_OPTIMIZER_UTC_HOUR || 2);
+export const QUALITY_OPTIMIZER_UTC_MINUTE = Number(process.env.QUALITY_OPTIMIZER_UTC_MINUTE || 10);
+export const AUTO_TUNING =
+  String(process.env.AUTO_TUNING || "false").toLowerCase() === "true";
 export const ALLOWED_SYMBOLS = getAllowedSymbolsFromEnv(process.env.ALLOWED_SYMBOLS || "");
 
 export const CLUSTER_GUARDRAIL_ENABLED =

@@ -40,6 +40,7 @@ export function hydrateStateFromPayload({
 }) {
   const active = arrayEntries(parsed?.activeTrades);
   const hits = arrayEntries(parsed?.recentHitKeys);
+  const alertFingerprints = arrayEntries(parsed?.recentAlertFingerprints);
   const lossStops = arrayEntries(parsed?.recentLossStops);
   const freeRefs = arrayEntries(parsed?.freeSharedRefs);
   const lastPrices = arrayEntries(parsed?.lastPrices);
@@ -79,6 +80,23 @@ export function hydrateStateFromPayload({
     if (!ts || now - ts > hitDedupTtlMs) continue;
 
     maps.recentHitKeys.set(key, ts);
+  }
+
+  if (maps.recentAlertFingerprints) {
+    for (const item of alertFingerprints) {
+      if (!Array.isArray(item) || item.length !== 2) continue;
+
+      const [fingerprint, info] = item;
+      const atMs = Number(info?.atMs || info);
+
+      if (!fingerprint || !Number.isFinite(atMs)) continue;
+      if (now - atMs > hitDedupTtlMs) continue;
+
+      maps.recentAlertFingerprints.set(String(fingerprint), {
+        ...(typeof info === "object" && info ? info : {}),
+        atMs,
+      });
+    }
   }
 
   for (const item of lossStops) {

@@ -4,6 +4,7 @@ export function registerSystemRoutes(app, {
   sendDailySummary,
   summaryService,
   runOptimizerReport,
+  runQualityOptimizerReport,
   getUtcDateKey,
 } = {}) {
   function authorizeSummary(req, res) {
@@ -48,6 +49,7 @@ export function registerSystemRoutes(app, {
       stripeWebhookVerificationEnabled: Boolean(config.stripeWebhookVerificationEnabled),
       activeTrades: state.activeTrades,
       recentHitKeys: state.recentHitKeys,
+      recentAlertFingerprints: state.recentAlertFingerprints,
       recentLossStops: state.recentLossStops,
       nextRef: state.nextRef,
       refStartFloor: config.refStartFloor,
@@ -69,6 +71,9 @@ export function registerSystemRoutes(app, {
       optimizerReportsEnabled: config.optimizerReportsEnabled,
       historicalQualityAdjustmentsEnabled: config.historicalQualityAdjustmentsEnabled,
       duplicateSuppressionEnabled: config.duplicateSuppressionEnabled,
+      alertDuplicateGuardEnabled: config.alertDuplicateGuardEnabled,
+      alertDuplicateGuardWindowMinutes: config.alertDuplicateGuardWindowMinutes,
+      alertDuplicateGuardTtlHours: config.alertDuplicateGuardTtlHours,
       clusterGuardrailEnabled: config.clusterGuardrailEnabled,
       clusterGuardrailWindowMinutes: config.clusterGuardrailWindowMinutes,
       clusterGuardrailMode: config.clusterGuardrailMode,
@@ -91,6 +96,10 @@ export function registerSystemRoutes(app, {
       summaryDispatchScope: config.summaryDispatchScope,
       manualSummaryEnabled: Boolean(config.summaryAdminToken),
       manualOptimizerEnabled: Boolean(config.summaryAdminToken && config.optimizerReportsEnabled),
+      qualityOptimizerEnabled: Boolean(config.qualityOptimizerEnabled),
+      qualityOptimizerUtcHour: config.qualityOptimizerUtcHour,
+      qualityOptimizerUtcMinute: config.qualityOptimizerUtcMinute,
+      autoTuningEnabled: Boolean(config.autoTuning),
       paidMembers: state.paidMembers,
       freeMembers: state.freeMembers,
     });
@@ -330,6 +339,69 @@ export function registerSystemRoutes(app, {
       res.status(200).json(report);
     } catch (err) {
       console.error("MANUAL OPTIMIZER ERROR:", err);
+      res.status(500).json({
+        ok: false,
+        error: err?.message || String(err),
+      });
+    }
+  });
+
+  app.post("/optimizer/quality/run-now", async (req, res) => {
+    const token = String(req.query.token || req.headers["x-summary-token"] || "");
+
+    if (!config.summaryAdminToken || token !== config.summaryAdminToken) {
+      return res.status(403).json({
+        ok: false,
+        error: "quality optimizer disabled",
+      });
+    }
+
+    if (!config.qualityOptimizerEnabled || !runQualityOptimizerReport) {
+      return res.status(503).json({
+        ok: false,
+        error: "quality optimizer disabled",
+      });
+    }
+
+    try {
+      const report = await runQualityOptimizerReport({ persist: true });
+      res.status(200).json(report);
+    } catch (err) {
+      console.error("QUALITY OPTIMIZER MANUAL ERROR:", err);
+      res.status(500).json({
+        ok: false,
+        error: err?.message || String(err),
+      });
+    }
+  });
+
+  app.get("/optimizer/quality/weekly-preview", async (req, res) => {
+    const token = String(req.query.token || req.headers["x-summary-token"] || "");
+
+    if (!config.summaryAdminToken || token !== config.summaryAdminToken) {
+      return res.status(403).json({
+        ok: false,
+        error: "quality optimizer disabled",
+      });
+    }
+
+    if (!config.qualityOptimizerEnabled || !runQualityOptimizerReport) {
+      return res.status(503).json({
+        ok: false,
+        error: "quality optimizer disabled",
+      });
+    }
+
+    try {
+      const report = await runQualityOptimizerReport({ persist: false });
+      res.status(200).json({
+        ok: true,
+        generated_at_utc: report.generated_at_utc,
+        weekly_quality_report: report.weekly_quality_report,
+        shadow_comparison: report.shadow_comparison,
+      });
+    } catch (err) {
+      console.error("QUALITY WEEKLY PREVIEW ERROR:", err);
       res.status(500).json({
         ok: false,
         error: err?.message || String(err),

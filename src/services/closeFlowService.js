@@ -1,3 +1,4 @@
+import { buildCloseFingerprint } from "./duplicateGuardService.js";
 import { buildRecentHitKey } from "./tradeIdentityService.js";
 import { eventTimeToMs } from "../utils/date.js";
 import { fmtPct, fmtPrice, parseNum } from "../utils/numbers.js";
@@ -8,6 +9,7 @@ export function createCloseFlowService({
   hitNotificationService,
   mirrorHitNotificationService = hitNotificationService,
   wasRecentHitSent,
+  markRecentHit,
   wasSharedToFree,
   paidChatId,
   freeChatId,
@@ -51,16 +53,29 @@ export function createCloseFlowService({
       refId: trade.refId,
       eventTime: hitEventBucket,
     });
+    const duplicateCloseKey = buildCloseFingerprint({
+      trade,
+      closeType,
+      hitPrice: currentPrice,
+      eventTimeMs: closedAtMs,
+      windowMs: 60 * 1000,
+    });
 
-    if (wasRecentHitSent(hitKey)) {
+    if (wasRecentHitSent(hitKey) || wasRecentHitSent(duplicateCloseKey)) {
       console.log("DUPLICATE CLOSE IGNORED:", {
         symbol: trade.symbol,
         closeType,
         refId: trade.refId,
         eventTime,
+        duplicateCloseKey,
         source,
       });
       return false;
+    }
+
+    if (markRecentHit) {
+      await markRecentHit(hitKey);
+      await markRecentHit(duplicateCloseKey);
     }
 
     let finalCloseType = closeType;

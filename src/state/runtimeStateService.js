@@ -30,6 +30,9 @@ export function createRuntimeStateService({
           refStartFloor,
           activeTrades: Array.from(maps.activeTrades.entries()).map(([key, trade]) => [key, trade]),
           recentHitKeys: Array.from(maps.recentHitKeys.entries()).map(([key, ts]) => [key, ts]),
+          recentAlertFingerprints: maps.recentAlertFingerprints
+            ? Array.from(maps.recentAlertFingerprints.entries()).map(([key, info]) => [key, info])
+            : [],
           recentLossStops: Array.from(maps.recentLossStops.entries()).map(([key, info]) => [key, info]),
           freePostDate: freeCounter.freePostDate,
           freePostsToday: freeCounter.freePostsToday,
@@ -70,6 +73,9 @@ export function createRuntimeStateService({
 
       console.log(`Loaded ${maps.activeTrades.size} active trades from disk`);
       console.log(`Loaded ${maps.recentHitKeys.size} recent hit keys from disk`);
+      if (maps.recentAlertFingerprints) {
+        console.log(`Loaded ${maps.recentAlertFingerprints.size} recent alert fingerprints from disk`);
+      }
       console.log(`Loaded ${maps.recentLossStops.size} recent loss stops from disk`);
       console.log(`Loaded ${maps.freeSharedRefs.size} free shared refs from disk`);
       console.log(`Loaded ${maps.lastPrices.size} last prices from disk`);
