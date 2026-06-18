@@ -30,6 +30,55 @@ const BONUS_TESTS = [
 ];
 
 const A_PLUS_THRESHOLDS = [92, 94, 96, 98];
+const SHADOW_V21_VERSION = "shadow_v2_1_simulation";
+
+const V21_VARIANTS = [
+  {
+    key: "A",
+    label: "RSI A+ blockers",
+    rules: {
+      rsiBlocksAPlus: true,
+    },
+  },
+  {
+    key: "B",
+    label: "RSI blockers + TREND_PULLBACK support requirement",
+    rules: {
+      rsiBlocksAPlus: true,
+      trendPullbackRequiresAdditionalSupport: true,
+    },
+  },
+  {
+    key: "C",
+    label: "Variant B + NEUTRAL/TREND A+ blockers",
+    rules: {
+      rsiBlocksAPlus: true,
+      trendPullbackRequiresAdditionalSupport: true,
+      neutralOrTrendRequiresStrongSupport: true,
+    },
+  },
+  {
+    key: "D",
+    label: "Variant C + LIQUIDITY_RECLAIM support requirement",
+    rules: {
+      rsiBlocksAPlus: true,
+      trendPullbackRequiresAdditionalSupport: true,
+      neutralOrTrendRequiresStrongSupport: true,
+      liquidityReclaimRequiresLondonOrCompression: true,
+    },
+  },
+  {
+    key: "E",
+    label: "Variant D + BNBUSDT false A+ test",
+    rules: {
+      rsiBlocksAPlus: true,
+      trendPullbackRequiresAdditionalSupport: true,
+      neutralOrTrendRequiresStrongSupport: true,
+      liquidityReclaimRequiresLondonOrCompression: true,
+      bnbusdtBlocksAPlus: true,
+    },
+  },
+];
 
 function hasFlag(name) {
   return process.argv.includes(name);
@@ -261,6 +310,252 @@ function withShadowV2(rows) {
       v2_recommended_action: v2.recommendedAction,
     };
   });
+}
+
+function strongSupportBuckets(row) {
+  const setup = componentValue(row, "setup");
+  const session = componentValue(row, "session");
+  const regime = componentValue(row, "regime");
+  const rsiBucket = componentValue(row, "rsi_bucket");
+
+  return {
+    compression: regime === "COMPRESSION",
+    london: session === "LONDON",
+    rsi45To54: rsiBucket === "45-54",
+    compressionBreakout: setup === "COMPRESSION_BREAKOUT",
+  };
+}
+
+function hasAnyStrongSupport(row) {
+  return Object.values(strongSupportBuckets(row)).some(Boolean);
+}
+
+function hasLondonOrCompression(row) {
+  const support = strongSupportBuckets(row);
+  return support.london || support.compression;
+}
+
+function applyV21Variant(row, variant) {
+  const next = {
+    ...row,
+    v21_variant: variant.key,
+    v21_variant_label: variant.label,
+    v21_proposed_score: row.v2_proposed_score,
+    v21_proposed_grade: row.v2_proposed_grade,
+    v21_a_plus_block_reasons: [],
+  };
+
+  if (row.v2_proposed_grade !== "A+") return next;
+
+  const setup = componentValue(row, "setup");
+  const symbol = componentValue(row, "symbol");
+  const session = componentValue(row, "session");
+  const regime = componentValue(row, "regime");
+  const rsiBucket = componentValue(row, "rsi_bucket");
+  const support = strongSupportBuckets(row);
+  const strongSupportCount = Object.values(support).filter(Boolean).length;
+  const reasons = [];
+
+  if (variant.rules.rsiBlocksAPlus && ["35-44", "55-64"].includes(rsiBucket)) {
+    reasons.push(`rsi_${rsiBucket}_blocks_a_plus`);
+  }
+
+  if (
+    variant.rules.trendPullbackRequiresAdditionalSupport &&
+    setup === "TREND_PULLBACK" &&
+    strongSupportCount < 1
+  ) {
+    reasons.push("trend_pullback_requires_additional_strong_support");
+  }
+
+  if (
+    variant.rules.neutralOrTrendRequiresStrongSupport &&
+    session === "NEUTRAL" &&
+    strongSupportCount < 1
+  ) {
+    reasons.push("neutral_session_requires_strong_support");
+  }
+
+  if (
+    variant.rules.neutralOrTrendRequiresStrongSupport &&
+    regime === "TREND" &&
+    strongSupportCount < 1
+  ) {
+    reasons.push("trend_regime_requires_strong_support");
+  }
+
+  if (
+    variant.rules.liquidityReclaimRequiresLondonOrCompression &&
+    setup === "LIQUIDITY_RECLAIM" &&
+    !hasLondonOrCompression(row)
+  ) {
+    reasons.push("liquidity_reclaim_requires_london_or_compression");
+  }
+
+  if (variant.rules.bnbusdtBlocksAPlus && symbol === "BNBUSDT") {
+    reasons.push("bnbusdt_false_a_plus_test");
+  }
+
+  if (reasons.length) {
+    next.v21_proposed_grade = "A";
+    next.v21_a_plus_block_reasons = reasons;
+  }
+
+  return next;
+}
+
+function withV21Variant(rows, variant) {
+  return rows.map((row) => applyV21Variant(row, variant));
+}
+
+function aPlusStats(rows, gradeField = "proposed_grade") {
+  const aPlus = rows.filter((row) => row[gradeField] === "A+");
+  const wins = aPlus.filter((row) => WIN_OUTCOMES.has(row.outcome_type));
+  const losses = aPlus.filter((row) => LOSS_OUTCOMES.has(row.outcome_type));
+
+  return {
+    a_plus_count: aPlus.length,
+    a_plus_tp: wins.length,
+    false_a_plus_losses: losses.length,
+    a_plus_winrate_pct: aPlus.length ? round((wins.length / aPlus.length) * 100, 2) : null,
+    a_plus_expectancy_r: round(average(aPlus.map(estimatedR)), 3),
+  };
+}
+
+function v21VariantSummary(rows, variant, baseline, v1APlus, v2APlus) {
+  const variantRows = withV21Variant(rows, variant);
+  const kept = variantRows.filter((row) => ["A+", "A"].includes(row.v21_proposed_grade));
+  const model = summarize(kept);
+  const aPlus = aPlusStats(variantRows, "v21_proposed_grade");
+  const demoted = variantRows.filter((row) => row.v2_proposed_grade === "A+" && row.v21_proposed_grade !== "A+");
+  const demotedWins = demoted.filter((row) => WIN_OUTCOMES.has(row.outcome_type)).length;
+  const demotedLosses = demoted.filter((row) => LOSS_OUTCOMES.has(row.outcome_type)).length;
+  const reasons = new Map();
+
+  for (const row of demoted) {
+    for (const reason of row.v21_a_plus_block_reasons || []) {
+      reasons.set(reason, (reasons.get(reason) || 0) + 1);
+    }
+  }
+
+  return {
+    variant: variant.key,
+    label: variant.label,
+    closed: model.closed,
+    tp: model.tp,
+    sl: model.sl,
+    winrate_pct: model.winrate_pct,
+    expectancy_r: model.expectancy_r,
+    average_market_move_pct: model.average_market_move_pct,
+    alert_volume: model.alerts,
+    volume_delta_pct: deltaSummary(model, baseline).volume_delta_pct,
+    a_plus_count: aPlus.a_plus_count,
+    false_a_plus_losses: aPlus.false_a_plus_losses,
+    false_a_plus_delta_vs_v1: aPlus.false_a_plus_losses - v1APlus.false_a_plus_losses,
+    false_a_plus_delta_vs_v2: aPlus.false_a_plus_losses - v2APlus.false_a_plus_losses,
+    tp_lost_by_demotion: demotedWins,
+    sl_avoided_by_demotion: demotedLosses,
+    demoted_a_plus_count: demoted.length,
+    demotion_reasons: [...reasons.entries()]
+      .map(([reason, count]) => ({ reason, count }))
+      .sort((a, b) => b.count - a.count),
+  };
+}
+
+function selectBestV21Variant({ variants, current, v1, v2 }) {
+  const candidates = variants.filter((variant) => (
+    (variant.winrate_pct ?? 0) > (current.winrate_pct ?? 0) &&
+    (variant.expectancy_r ?? -Infinity) > (current.expectancy_r ?? -Infinity) &&
+    (
+      (variant.winrate_pct ?? 0) > (v1.winrate_pct ?? 0) ||
+      (
+        (variant.winrate_pct ?? 0) === (v1.winrate_pct ?? 0) &&
+        variant.false_a_plus_delta_vs_v1 < 0
+      )
+    ) &&
+    variant.false_a_plus_delta_vs_v2 < 0 &&
+    (variant.expectancy_r ?? 0) > 0 &&
+    (variant.volume_delta_pct ?? -100) >= -60
+  ));
+
+  return candidates
+    .sort((a, b) => (
+      (a.false_a_plus_losses - b.false_a_plus_losses) ||
+      ((b.expectancy_r ?? -Infinity) - (a.expectancy_r ?? -Infinity)) ||
+      ((b.winrate_pct ?? -Infinity) - (a.winrate_pct ?? -Infinity))
+    ))[0] || null;
+}
+
+function bucketSummary(rows, field, gradeField = "v21_proposed_grade") {
+  const kept = rows.filter((row) => ["A+", "A"].includes(row[gradeField]));
+  const groups = new Map();
+
+  for (const row of kept) {
+    const key = `${field}:${componentValue(row, field)}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  }
+
+  return [...groups.entries()]
+    .map(([bucket, items]) => ({
+      bucket,
+      ...summarize(items),
+    }))
+    .filter((row) => row.closed >= 3)
+    .sort((a, b) => (b.expectancy_r ?? -999) - (a.expectancy_r ?? -999));
+}
+
+function buildV21BucketReport(rows, bestVariant) {
+  if (!bestVariant) {
+    return {
+      variant: null,
+      top_buckets: [],
+      worst_buckets: [],
+    };
+  }
+
+  const variant = V21_VARIANTS.find((item) => item.key === bestVariant.variant);
+  const variantRows = withV21Variant(rows, variant);
+  const buckets = [
+    ...bucketSummary(variantRows, "setup"),
+    ...bucketSummary(variantRows, "symbol"),
+    ...bucketSummary(variantRows, "session"),
+    ...bucketSummary(variantRows, "regime"),
+    ...bucketSummary(variantRows, "rsi_bucket"),
+  ];
+
+  return {
+    variant: bestVariant.variant,
+    top_buckets: buckets.slice(0, 10),
+    worst_buckets: buckets.slice().sort((a, b) => (a.expectancy_r ?? 999) - (b.expectancy_r ?? 999)).slice(0, 10),
+  };
+}
+
+function bucketsNotPenalizedYet(variants) {
+  const bnb = variants.find((variant) => variant.variant === "E");
+
+  return [
+    {
+      bucket: "BTCUSDT",
+      reason: "Measured separately only; not recommended as automatic V2/V2.1 penalty by instruction and sample impact remains weak.",
+    },
+    {
+      bucket: "BNBUSDT",
+      reason: bnb && bnb.false_a_plus_delta_vs_v2 < 0
+        ? "BNBUSDT A+ block can reduce false A+ in Variant E, but this is still a simulation-only test and needs more data before becoming a penalty."
+        : "No automatic BNBUSDT penalty yet; keep measuring as a false A+ bucket.",
+    },
+    {
+      bucket: "TREND_PULLBACK",
+      reason: "Useful bucket overall; V2.1 only tests extra A+ support requirements, not a broad setup penalty.",
+    },
+  ];
+}
+
+function v21GoLiveStatus(bestVariant, rows) {
+  if (!bestVariant) return "KEEP V2 SHADOW ONLY";
+  if (rows.length < 100) return "V2.1 SHADOW CANDIDATE";
+  return "V2.1 SHADOW CANDIDATE";
 }
 
 function modelComparison(rows) {
@@ -573,6 +868,27 @@ function renderMarkdown(report) {
     { key: "expected_expectancy_delta_r", label: "Expectancy Delta" },
     { key: "risk", label: "Confidence" },
   ]);
+  line("");
+  line("## Shadow V2.1 Variant Comparison");
+  table(report.shadow_v2_1.variant_comparison, [
+    { key: "variant", label: "Variant" },
+    { key: "closed", label: "Closed" },
+    { key: "tp", label: "TP" },
+    { key: "sl", label: "SL" },
+    { key: "winrate_pct", label: "Winrate" },
+    { key: "expectancy_r", label: "Expectancy" },
+    { key: "average_market_move_pct", label: "Avg Move" },
+    { key: "a_plus_count", label: "A+ Count" },
+    { key: "false_a_plus_losses", label: "False A+ SL" },
+    { key: "tp_lost_by_demotion", label: "TP Demoted" },
+    { key: "sl_avoided_by_demotion", label: "SL Demoted" },
+  ]);
+  line("");
+  line("## Shadow V2.1 Best Variant");
+  line(report.shadow_v2_1.best_variant
+    ? `${report.shadow_v2_1.best_variant.variant}: ${report.shadow_v2_1.best_variant.label}`
+    : "No V2.1 variant met all selection criteria.");
+  line(`Go-live status: ${report.shadow_v2_1.go_live_status}`);
 }
 
 async function main() {
@@ -601,6 +917,22 @@ async function main() {
   const falseAPlus = falseAPlusAnalysis(rows);
   const comparison = modelComparison(rows);
   const falseAPlusV2 = falseAPlusReduction(rows);
+  const v1APlus = aPlusStats(rows, "proposed_grade");
+  const v2APlus = aPlusStats(rows, "v2_proposed_grade");
+  const v21Variants = V21_VARIANTS.map((variant) => v21VariantSummary(
+    rows,
+    variant,
+    baseline,
+    v1APlus,
+    v2APlus,
+  ));
+  const bestV21 = selectBestV21Variant({
+    variants: v21Variants,
+    current: comparison.current_model,
+    v1: comparison.shadow_v1,
+    v2: comparison.shadow_v2,
+  });
+  const v21Buckets = buildV21BucketReport(rows, bestV21);
   const recommended = recommendedChanges({
     penaltyRanking,
     bonusRanking,
@@ -641,8 +973,27 @@ async function main() {
     recommended_shadow_v2_model: recommended,
     estimated_quality_improvement: comparison.shadow_v2,
     expected_alert_volume_reduction: comparison.shadow_v2.volume_delta_pct ?? null,
+    shadow_v2_1: {
+      version: SHADOW_V21_VERSION,
+      simulation_only: true,
+      variants_tested: V21_VARIANTS.map((variant) => ({
+        variant: variant.key,
+        label: variant.label,
+        rules: variant.rules,
+      })),
+      baseline_a_plus: {
+        v1: v1APlus,
+        v2: v2APlus,
+      },
+      variant_comparison: v21Variants,
+      best_variant: bestV21,
+      bucket_report: v21Buckets,
+      buckets_not_penalized_yet: bucketsNotPenalizedYet(v21Variants),
+      expected_volume_reduction: bestV21?.volume_delta_pct ?? null,
+      go_live_status: v21GoLiveStatus(bestV21, rows),
+    },
     go_live_readiness: {
-      status: "NOT_READY_SHADOW_ONLY",
+      status: v21GoLiveStatus(bestV21, rows),
       reasons: [
         "Requires 100+ closed outcomes before any promotion.",
         "Requires V2 to beat both current model and Shadow V1.",
