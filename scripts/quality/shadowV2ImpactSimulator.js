@@ -404,7 +404,11 @@ function confidence(sample) {
 
 function recommendedChanges({ penaltyRanking, bonusRanking, bestThreshold, falseAPlus }) {
   const changes = [];
-  for (const row of penaltyRanking.filter((item) => item.sample >= 5 && (item.expectancy_delta_r ?? 0) > 0).slice(0, 6)) {
+  for (const row of penaltyRanking.filter((item) => (
+    item.key !== "BTCUSDT" &&
+    item.sample >= 5 &&
+    (item.expectancy_delta_r ?? 0) > 0
+  )).slice(0, 6)) {
     changes.push({
       type: "penalty",
       change: `Increase or enforce ${row.key} penalty`,
