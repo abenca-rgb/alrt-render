@@ -1,4 +1,5 @@
 export const SHADOW_SCORING_VERSION = "shadow-score-v1";
+export const SHADOW_SCORING_V2_VERSION = "shadow_v2";
 
 const NEGATIVE_SETUPS = new Set(["HTF_CONTINUATION"]);
 const NEGATIVE_SESSIONS = new Set(["NEW_YORK", "LONDON_NY_OVERLAP"]);
@@ -11,6 +12,17 @@ const POSITIVE_SESSIONS = new Set(["LONDON"]);
 const POSITIVE_REGIMES = new Set(["COMPRESSION"]);
 const POSITIVE_RSI_BUCKETS = new Set(["45-54"]);
 const POSITIVE_TREND_BUCKETS = new Set(["14-21"]);
+
+const V2_MAJOR_NEGATIVE_SETUPS = new Set(["HTF_CONTINUATION"]);
+const V2_MAJOR_NEGATIVE_SESSIONS = new Set(["NEW_YORK", "LONDON_NY_OVERLAP"]);
+const V2_MAJOR_NEGATIVE_REGIMES = new Set(["EXPANSION"]);
+const V2_MAJOR_NEGATIVE_SYMBOLS = new Set(["SOLUSDT"]);
+const V2_NEGATIVE_RSI_BUCKETS = new Set(["55-64", "35-44"]);
+
+const V2_POSITIVE_SETUPS = new Set(["COMPRESSION_BREAKOUT", "TREND_PULLBACK"]);
+const V2_POSITIVE_SESSIONS = new Set(["LONDON"]);
+const V2_POSITIVE_REGIMES = new Set(["COMPRESSION"]);
+const V2_POSITIVE_RSI_BUCKETS = new Set(["45-54"]);
 
 const WIN_OUTCOMES = new Set(["TP", "TP1", "TP2", "TP_FULL", "TIME_EXIT_PROFIT"]);
 const LOSS_OUTCOMES = new Set(["SL", "TIME_EXIT_LOSS"]);
@@ -82,6 +94,19 @@ function proposedGradeFromScore(score, {
   ) {
     return "A+";
   }
+  if (numericScore >= 84) return "A";
+  if (numericScore >= 75) return "B+";
+  return "B";
+}
+
+function proposedGradeFromScoreV2(score, {
+  majorPenaltyActive,
+  positiveSupportActive,
+} = {}) {
+  const numericScore = numberOrNull(score);
+  if (numericScore === null) return "UNKNOWN";
+
+  if (numericScore >= 92 && !majorPenaltyActive && positiveSupportActive) return "A+";
   if (numericScore >= 84) return "A";
   if (numericScore >= 75) return "B+";
   return "B";
@@ -238,6 +263,166 @@ export function evaluateShadowScore({ context = {}, quality = null } = {}) {
     penaltyReasons: penalties,
     bonusReasons: bonuses,
     majorPenaltyActive,
+    recommendedAction,
+  };
+}
+
+export function evaluateShadowScoreV2({ context = {}, quality = null } = {}) {
+  const components = buildScoreComponents({ context, quality });
+  const currentScore = clampScore(quality?.score);
+  const currentGrade = normalizeGrade(quality?.grade);
+  const penalties = [];
+  const bonuses = [];
+  let proposedScore = currentScore;
+
+  if (proposedScore === null) {
+    return {
+      shadowVersion: SHADOW_SCORING_V2_VERSION,
+      currentScore,
+      currentGrade,
+      proposedScore: null,
+      proposedGrade: "UNKNOWN",
+      scoreDelta: null,
+      scoreComponents: components,
+      penaltyReasons: penalties,
+      bonusReasons: bonuses,
+      majorPenaltyActive: false,
+      positiveSupportActive: false,
+      recommendedAction: "insufficient_current_score",
+    };
+  }
+
+  const setupNegative = V2_MAJOR_NEGATIVE_SETUPS.has(components.setup);
+  const sessionNegative = V2_MAJOR_NEGATIVE_SESSIONS.has(components.session);
+  const regimeNegative = V2_MAJOR_NEGATIVE_REGIMES.has(components.regime);
+  const symbolNegative = V2_MAJOR_NEGATIVE_SYMBOLS.has(components.symbol);
+  const majorPenaltyActive = setupNegative || sessionNegative || regimeNegative || symbolNegative;
+
+  const compressionSupport = V2_POSITIVE_REGIMES.has(components.regime);
+  const londonSupport = V2_POSITIVE_SESSIONS.has(components.session);
+  const setupSupport = V2_POSITIVE_SETUPS.has(components.setup);
+  const rsiSupport = V2_POSITIVE_RSI_BUCKETS.has(components.rsi_bucket);
+  const positiveSupportActive = compressionSupport || londonSupport || setupSupport || rsiSupport;
+
+  if (setupNegative) {
+    proposedScore += addPenalty({
+      amount: 18,
+      reason: "v2_strong_penalty:HTF_CONTINUATION",
+      penalties,
+    });
+  }
+  if (regimeNegative) {
+    proposedScore += addPenalty({
+      amount: 12,
+      reason: "v2_medium_penalty:EXPANSION",
+      penalties,
+    });
+  }
+  if (sessionNegative) {
+    proposedScore += addPenalty({
+      amount: 12,
+      reason: `v2_medium_penalty:${components.session}`,
+      penalties,
+    });
+  }
+  if (symbolNegative) {
+    proposedScore += addPenalty({
+      amount: 8,
+      reason: "v2_modest_penalty:SOLUSDT",
+      penalties,
+    });
+  }
+  if (V2_NEGATIVE_RSI_BUCKETS.has(components.rsi_bucket)) {
+    proposedScore += addPenalty({
+      amount: 8,
+      reason: `v2_medium_penalty:rsi_${components.rsi_bucket}`,
+      penalties,
+    });
+  }
+
+  if (compressionSupport) {
+    proposedScore += addBonus({
+      amount: 8,
+      reason: "v2_support_bonus:COMPRESSION",
+      bonuses,
+    });
+  }
+  if (londonSupport) {
+    proposedScore += addBonus({
+      amount: 7,
+      reason: "v2_support_bonus:LONDON",
+      bonuses,
+    });
+  }
+  if (components.setup === "COMPRESSION_BREAKOUT") {
+    proposedScore += addBonus({
+      amount: 6,
+      reason: "v2_support_bonus:COMPRESSION_BREAKOUT",
+      bonuses,
+    });
+  }
+  if (components.setup === "TREND_PULLBACK" && !majorPenaltyActive) {
+    proposedScore += addBonus({
+      amount: 5,
+      reason: "v2_support_bonus:TREND_PULLBACK",
+      bonuses,
+    });
+  }
+  if (rsiSupport) {
+    proposedScore += addBonus({
+      amount: 6,
+      reason: "v2_support_bonus:rsi_45_54",
+      bonuses,
+    });
+  }
+
+  if (components.setup === "TREND_PULLBACK" && majorPenaltyActive) {
+    penalties.push({
+      amount: 0,
+      reason: "v2_trend_pullback_bonus_suppressed_by_major_penalty",
+    });
+  }
+  if ((components.rr ?? 0) >= 2.5 && majorPenaltyActive) {
+    proposedScore += addPenalty({
+      amount: 6,
+      reason: "v2_high_rr_confidence_reduced_by_major_penalty",
+      penalties,
+    });
+  }
+  if ((components.trend_strength ?? 0) >= 22 && majorPenaltyActive) {
+    proposedScore += addPenalty({
+      amount: 6,
+      reason: "v2_high_trend_strength_confidence_reduced_by_major_penalty",
+      penalties,
+    });
+  }
+
+  proposedScore = clampScore(proposedScore);
+  const proposedGrade = proposedGradeFromScoreV2(proposedScore, {
+    majorPenaltyActive,
+    positiveSupportActive,
+  });
+
+  let recommendedAction = "keep_watch";
+  if (currentGrade === "A+" && proposedGrade !== "A+") recommendedAction = "v2_demote_false_a_plus_risk";
+  if (proposedScore !== null && currentScore !== null && proposedScore <= currentScore - 18) recommendedAction = "v2_major_penalty_review";
+  if (proposedGrade === "A+" && currentGrade !== "A+") recommendedAction = "v2_shadow_upgrade_candidate";
+
+  return {
+    shadowVersion: SHADOW_SCORING_V2_VERSION,
+    currentScore,
+    currentGrade,
+    proposedScore,
+    proposedGrade,
+    scoreDelta: proposedScore === null || currentScore === null ? null : proposedScore - currentScore,
+    scoreComponents: {
+      ...components,
+      v2_positive_support_active: positiveSupportActive,
+    },
+    penaltyReasons: penalties,
+    bonusReasons: bonuses,
+    majorPenaltyActive,
+    positiveSupportActive,
     recommendedAction,
   };
 }
