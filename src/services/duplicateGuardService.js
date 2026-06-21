@@ -32,6 +32,21 @@ export function buildSignalFingerprint({
   ].join("|");
 }
 
+export function buildSignalEntryFingerprint({
+  symbol,
+  side,
+  setupType,
+  entry,
+}) {
+  return [
+    "signal-entry",
+    cleanToken(symbol),
+    cleanToken(side),
+    cleanToken(setupType),
+    priceBucket(entry),
+  ].join("|");
+}
+
 function buildTradeFingerprint(trade) {
   return buildSignalFingerprint({
     symbol: trade?.symbol,
@@ -40,6 +55,15 @@ function buildTradeFingerprint(trade) {
     entry: trade?.entry,
     tp: trade?.tp,
     sl: trade?.sl,
+  });
+}
+
+function buildTradeEntryFingerprint(trade) {
+  return buildSignalEntryFingerprint({
+    symbol: trade?.symbol,
+    side: trade?.side,
+    setupType: trade?.setupType,
+    entry: trade?.entry,
   });
 }
 
@@ -102,10 +126,10 @@ export function createDuplicateGuardService({
     return changed;
   }
 
-  function findActiveDuplicate(fingerprint, receivedAtMs) {
+  function findActiveDuplicate(fingerprint, receivedAtMs, buildFingerprint = buildTradeFingerprint) {
     for (const [, trade] of activeTrades.entries()) {
       if (!trade || trade.hit) continue;
-      if (buildTradeFingerprint(trade) !== fingerprint) continue;
+      if (buildFingerprint(trade) !== fingerprint) continue;
 
       const createdAtMs = Number(trade.createdAtMs);
       const ageMs = Number.isFinite(createdAtMs) ? receivedAtMs - createdAtMs : 0;
@@ -137,6 +161,12 @@ export function createDuplicateGuardService({
       tp: context?.tpParsed,
       sl: context?.slParsed,
     });
+    const entryFingerprint = buildSignalEntryFingerprint({
+      symbol: context?.symbol,
+      side: context?.side,
+      setupType: context?.setupType,
+      entry: context?.entryParsed,
+    });
 
     const existing = recentAlertFingerprints.get(fingerprint);
     const existingAtMs = Number(existing?.atMs || existing);
@@ -147,6 +177,19 @@ export function createDuplicateGuardService({
         fingerprint,
         original: existing,
         ageMs: receivedAtMs - existingAtMs,
+        windowMs,
+      };
+    }
+
+    const existingEntry = recentAlertFingerprints.get(entryFingerprint);
+    const existingEntryAtMs = Number(existingEntry?.atMs || existingEntry);
+    if (Number.isFinite(existingEntryAtMs) && receivedAtMs - existingEntryAtMs <= windowMs) {
+      return {
+        blocked: true,
+        reason: "duplicate_signal_entry_fingerprint",
+        fingerprint: entryFingerprint,
+        original: existingEntry,
+        ageMs: receivedAtMs - existingEntryAtMs,
         windowMs,
       };
     }
@@ -165,6 +208,20 @@ export function createDuplicateGuardService({
       };
     }
 
+    const activeEntryDuplicate = findActiveDuplicate(entryFingerprint, receivedAtMs, buildTradeEntryFingerprint);
+    if (activeEntryDuplicate) {
+      return {
+        blocked: true,
+        reason: "duplicate_active_trade_entry_fingerprint",
+        fingerprint: entryFingerprint,
+        original: activeEntryDuplicate,
+        ageMs: Number.isFinite(activeEntryDuplicate.createdAtMs)
+          ? receivedAtMs - Number(activeEntryDuplicate.createdAtMs)
+          : null,
+        windowMs: ttlMs,
+      };
+    }
+
     recentAlertFingerprints.set(fingerprint, {
       atMs: receivedAtMs,
       refId: context?.incomingRef || null,
@@ -176,6 +233,17 @@ export function createDuplicateGuardService({
       entry: Number.isFinite(Number(context?.entryParsed)) ? Number(context.entryParsed) : null,
       tp: Number.isFinite(Number(context?.tpParsed)) ? Number(context.tpParsed) : null,
       sl: Number.isFinite(Number(context?.slParsed)) ? Number(context.slParsed) : null,
+    });
+    recentAlertFingerprints.set(entryFingerprint, {
+      atMs: receivedAtMs,
+      refId: context?.incomingRef || null,
+      alertId: alertId || null,
+      candidateKey: candidateKey || null,
+      symbol: context?.symbol || null,
+      side: context?.side || null,
+      setupType: context?.setupType || null,
+      entry: Number.isFinite(Number(context?.entryParsed)) ? Number(context.entryParsed) : null,
+      mode: "entry",
     });
 
     await persistState?.();

@@ -1,6 +1,50 @@
 import fetch from "node-fetch";
 import { isoFromMs } from "../utils/date.js";
 
+function normalizeText(value) {
+  const text = String(value || "").trim();
+  return text || null;
+}
+
+function normalizeId(value) {
+  const text = normalizeText(value);
+  return text ? String(text) : null;
+}
+
+function buildAlertFallbackFromTrade({ trade, alertId, refId, rawPayload }) {
+  const signalTimeMs = Number(trade?.createdAtMs);
+
+  return {
+    alert_id: String(alertId),
+    ref_id: String(refId),
+    symbol: trade?.symbol || "UNKNOWN",
+    direction: trade?.side || "LONG",
+    timeframe: trade?.timeframe || null,
+    setup_type: trade?.setupType || "UNKNOWN",
+    entry_price: trade?.entry ?? null,
+    tp_price: trade?.tp ?? null,
+    sl_price: trade?.sl ?? null,
+    rr: trade?.rr ?? null,
+    risk_score: null,
+    quality_score: trade?.qualityScore ?? null,
+    quality_grade: trade?.qualityGrade || null,
+    why_text: "Recovered automatically before outcome insert because the alert row was missing.",
+    signal_time_utc: isoFromMs(Number.isFinite(signalTimeMs) ? signalTimeMs : Date.now()),
+    session_name: trade?.session || null,
+    market_regime: trade?.marketRegime || trade?.volatilityState || null,
+    pine_version: null,
+    backend_version: rawPayload?.backendVersion || null,
+    is_free_shared: Boolean(trade?.sharedToFree),
+    raw_payload: {
+      source: "outcome_alert_fallback",
+      candidate_key: trade?.candidateKey || null,
+      primary_alert_id: trade?.primaryAlertId || null,
+      alert_ids: Array.isArray(trade?.alertIds) ? trade.alertIds : [],
+      original_close_payload: rawPayload || null,
+    },
+  };
+}
+
 export function createSupabaseService({ enabled, url, serviceRoleKey, backendVersion }) {
   function ready() {
     return Boolean(enabled && url && serviceRoleKey);
@@ -230,14 +274,31 @@ export function createSupabaseService({ enabled, url, serviceRoleKey, backendVer
   }
 
   function persistOutcome({ trade, outcomeType, outcomeTimeMs, pnlPercent, durationMinutes, exitPrice, rawPayload }) {
-    const alertId = trade?.primaryAlertId || trade?.alertIds?.[0] || trade?.refId;
-    if (!alertId || !trade?.refId) return;
+    const alertId = normalizeId(trade?.primaryAlertId || trade?.alertIds?.[0] || trade?.candidateKey || trade?.refId);
+    const refId = normalizeId(trade?.refId);
+    if (!alertId || !refId) return;
 
-    background("OUTCOME INSERT", () =>
-      request("outcomes", {
+    background("OUTCOME UPSERT", async () => {
+      await request("alerts", {
+        query: "?on_conflict=alert_id",
+        prefer: "resolution=ignore-duplicates,return=minimal",
+        body: buildAlertFallbackFromTrade({
+          trade,
+          alertId,
+          refId,
+          rawPayload: {
+            ...rawPayload,
+            backendVersion,
+          },
+        }),
+      });
+
+      await request("outcomes", {
+        query: "?on_conflict=alert_id",
+        prefer: "resolution=merge-duplicates,return=minimal",
         body: {
           alert_id: String(alertId),
-          ref_id: String(trade.refId),
+          ref_id: String(refId),
           candidate_key: trade.candidateKey || trade.primaryAlertId || null,
           symbol: trade.symbol || null,
           direction: trade.side || null,
@@ -252,8 +313,8 @@ export function createSupabaseService({ enabled, url, serviceRoleKey, backendVer
           matched_by: rawPayload?.matchType || null,
           raw_payload: rawPayload || null,
         },
-      }),
-    );
+      });
+    });
   }
 
   function persistShadowEvaluation({

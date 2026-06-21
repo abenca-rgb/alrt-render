@@ -169,6 +169,7 @@ export function createSignalDeliveryService({
       refId,
       symbol,
       side,
+      timeframe,
       entry: entryParsed,
       tp: tpParsed,
       sl: slParsed,
