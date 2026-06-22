@@ -59,9 +59,50 @@ function contextFromShadowRow(row) {
   };
 }
 
+function contextFromCandidateRow(row) {
+  const raw = row.raw_payload || {};
+  return {
+    candidateKey: row.candidate_key || row.alert_id || row.ref_id,
+    symbol: row.symbol || raw.symbol,
+    side: row.direction || raw.direction || raw.side,
+    timeframe: row.timeframe || raw.timeframe,
+    setupType: row.setup_type || raw.setup,
+    rr: row.rr ?? raw.rr,
+    strength: row.strength || raw.strength,
+    setupScore: row.setup_score ?? raw.setup_score,
+    trendStrength: row.trend_strength ?? raw.trend_strength ?? raw.adx,
+    marketRegime: row.market_regime || raw.regime,
+    session: row.session_name || raw.session,
+    rsi: row.rsi ?? raw.rsi,
+    atrPct: row.atr_pct ?? raw.atr_pct,
+  };
+}
+
 async function fetchRows() {
   const limit = Number(argValue("--limit", "50"));
-  return selectRows(
+  const candidates = await selectRows(
+    "alert_candidates",
+    [
+      "?select=candidate_key,alert_id,ref_id,symbol,direction,timeframe,entry_price,tp1_price,sl_price,rr,rsi,trend_strength,atr_pct,session_name,market_regime,setup_type,setup_score,strength,event_time_utc,decision,decision_reason,quality_score,quality_grade,raw_payload",
+      "order=event_time_utc.desc",
+      `limit=${limit}`,
+    ].join("&"),
+  );
+
+  if (candidates.length) {
+    return candidates.map((row) => ({
+      source: "alert_candidates",
+      raw: row,
+      context: contextFromCandidateRow(row),
+      current_score: row.quality_score,
+      current_grade: row.quality_grade,
+      decision: row.decision || "",
+      decision_reason: row.decision_reason || "",
+      event_time_utc: row.event_time_utc || "",
+    }));
+  }
+
+  const shadows = await selectRows(
     "shadow_score_evaluations",
     [
       "?select=shadow_version,candidate_key,alert_id,ref_id,symbol,direction,timeframe,setup_type,current_score,current_grade,proposed_score,proposed_grade,score_components,penalty_reasons,bonus_reasons,live_decision,decision_reason,event_time_utc",
@@ -70,24 +111,40 @@ async function fetchRows() {
       `limit=${limit}`,
     ].join("&"),
   );
+
+  return shadows.map((row) => ({
+    source: "shadow_score_evaluations",
+    raw: row,
+    context: contextFromShadowRow(row),
+    current_score: row.current_score,
+    current_grade: row.current_grade,
+    decision: row.live_decision || "",
+    decision_reason: row.decision_reason || "",
+    event_time_utc: row.event_time_utc || "",
+  }));
 }
 
 function evaluateRows(rows) {
   return rows.map((row) => {
     const evaluation = evaluateShadowScoreV21({
-      context: contextFromShadowRow(row),
+      context: row.context,
       quality: {
         score: row.current_score,
         grade: row.current_grade,
       },
     });
     const wouldSend = ["A+", "A"].includes(evaluation.proposedGrade);
+    const raw = row.raw || {};
     return {
-      ref_id: row.ref_id || "",
-      alert_id: row.alert_id || "",
-      symbol: normalize(row.symbol || row.score_components?.symbol),
-      direction: normalize(row.direction || row.score_components?.direction),
-      setup: normalize(row.setup_type || row.score_components?.setup),
+      source: row.source,
+      ref_id: raw.ref_id || "",
+      alert_id: raw.alert_id || "",
+      candidate_key: raw.candidate_key || "",
+      symbol: normalize(row.context.symbol),
+      direction: normalize(row.context.side),
+      setup: normalize(row.context.setupType),
+      session: normalize(row.context.session),
+      regime: normalize(row.context.marketRegime),
       current_grade: row.current_grade || "",
       current_score: row.current_score ?? "",
       shadow_v21_grade: evaluation.proposedGrade || "",
@@ -131,10 +188,13 @@ function renderMarkdown(rows) {
   line("");
   line("## Last Signals");
   table(rows, [
+    { key: "source", label: "Source" },
     { key: "ref_id", label: "Ref" },
     { key: "symbol", label: "Symbol" },
     { key: "direction", label: "Direction" },
     { key: "setup", label: "Setup" },
+    { key: "session", label: "Session" },
+    { key: "regime", label: "Regime" },
     { key: "current_grade", label: "Current Grade" },
     { key: "current_score", label: "Current Score" },
     { key: "shadow_v21_grade", label: "V2.1 Grade" },
