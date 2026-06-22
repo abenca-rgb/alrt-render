@@ -1063,6 +1063,78 @@ async function handleTradingViewWebhook(req, res) {
       return;
     }
 
+    const telegramReservation = await duplicateGuardService.reserveTelegramSend({
+      context: signalContext,
+      candidateKey,
+      alertId: candidateIdsBase[0] || incomingRef || candidateKey,
+      receivedAtMs,
+    });
+
+    if (telegramReservation.blocked) {
+      const blockAlertId = candidateIdsBase[0] || incomingRef || candidateKey;
+      const rawPayload = sanitizePayloadForStorage(body);
+      const duplicateDetails = duplicateGuardService.describeBlock(telegramReservation);
+
+      await recordRejectStat({
+        symbol,
+        side,
+        setupType,
+        reason: telegramReservation.reason || "duplicate_telegram_send_guard",
+        qualityScore: quality?.score ?? null,
+        qualityGrade: quality?.grade ?? null,
+        rawPayload,
+        ts: receivedAtMs,
+      });
+
+      persistGuardrailBlockToSupabase(buildClusterGuardrailBlockRecord({
+        result: {
+          blockedBy: telegramReservation.reason || "duplicate_telegram_send_guard",
+          guardrailVersion: "duplicate-guard-v1",
+          mode: "telegram-send",
+          windowMinutes: Math.round((telegramReservation.windowMs || ALERT_DUPLICATE_GUARD_TTL_MS) / 60000),
+          symbol,
+          side,
+          setupType,
+          setupGroup: setupType || "UNKNOWN",
+          matchedPreviousAlertId: telegramReservation.original?.alertId || null,
+          matchedPreviousRefId: telegramReservation.original?.refId || null,
+          minutesSincePreviousAlert: Number.isFinite(telegramReservation.ageMs)
+            ? Math.max(0, Math.round(telegramReservation.ageMs / 60000))
+            : null,
+        },
+        alertId: blockAlertId,
+        candidateKey,
+        eventTimeMs: signalContext.eventTimeMs || receivedAtMs,
+        rawPayload: {
+          ...rawPayload,
+          duplicate_guard: duplicateDetails,
+        },
+      }));
+
+      candidateLoggingService.updateDecision({
+        candidateKey: loggedCandidate?.candidateKey,
+        decision: "REJECTED",
+        reason: telegramReservation.reason || "duplicate_telegram_send_guard",
+        quality,
+        alertId: blockAlertId,
+        postedToPaid: false,
+        postedToFree: false,
+      });
+      shadowScoringService.recordCandidate({
+        context: signalContext,
+        quality,
+        liveDecision: "REJECTED",
+        decisionReason: telegramReservation.reason || "duplicate_telegram_send_guard",
+      });
+
+      console.log("SIGNAL BLOCKED BY TELEGRAM DUPLICATE GUARD:", {
+        ...duplicateGuardService.formatSignalContext(signalContext),
+        alertId: blockAlertId,
+        duplicate: duplicateDetails,
+      });
+      return;
+    }
+
     const delivery = await signalDeliveryService.deliverSignal({
       body,
       context: {

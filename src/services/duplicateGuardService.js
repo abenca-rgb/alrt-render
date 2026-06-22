@@ -13,6 +13,22 @@ function priceBucket(value) {
   return n.toFixed(8);
 }
 
+function identityPriceBucket(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "NA";
+  if (Math.abs(n) >= 10000) return (Math.round(n / 10) * 10).toFixed(0);
+  if (Math.abs(n) >= 1000) return (Math.round(n / 5) * 5).toFixed(0);
+  if (Math.abs(n) >= 100) return (Math.round(n * 2) / 2).toFixed(1);
+  if (Math.abs(n) >= 1) return (Math.round(n * 10) / 10).toFixed(1);
+  return (Math.round(n * 1000) / 1000).toFixed(3);
+}
+
+function timeBucket(value, bucketMs) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || !Number.isFinite(bucketMs) || bucketMs <= 0) return "NA";
+  return Math.floor(n / bucketMs);
+}
+
 export function buildSignalFingerprint({
   symbol,
   side,
@@ -47,6 +63,58 @@ export function buildSignalEntryFingerprint({
   ].join("|");
 }
 
+export function buildSignalIdentityFingerprint({
+  symbol,
+  side,
+  setupType,
+  timeframe,
+  entry,
+  tp,
+  sl,
+  eventTimeMs,
+  receivedAtMs,
+  bucketMinutes = 10,
+}) {
+  const bucketMs = bucketMinutes * 60 * 1000;
+  const effectiveTimeMs = Number.isFinite(Number(eventTimeMs)) ? Number(eventTimeMs) : Number(receivedAtMs);
+
+  return [
+    "signal-identity",
+    cleanToken(symbol),
+    cleanToken(side),
+    cleanToken(setupType),
+    cleanToken(timeframe),
+    identityPriceBucket(entry),
+    identityPriceBucket(tp),
+    identityPriceBucket(sl),
+    timeBucket(effectiveTimeMs, bucketMs),
+  ].join("|");
+}
+
+export function buildSignalEntryIdentityFingerprint({
+  symbol,
+  side,
+  setupType,
+  timeframe,
+  entry,
+  eventTimeMs,
+  receivedAtMs,
+  bucketMinutes = 15,
+}) {
+  const bucketMs = bucketMinutes * 60 * 1000;
+  const effectiveTimeMs = Number.isFinite(Number(eventTimeMs)) ? Number(eventTimeMs) : Number(receivedAtMs);
+
+  return [
+    "signal-entry-identity",
+    cleanToken(symbol),
+    cleanToken(side),
+    cleanToken(setupType),
+    cleanToken(timeframe),
+    identityPriceBucket(entry),
+    timeBucket(effectiveTimeMs, bucketMs),
+  ].join("|");
+}
+
 function buildTradeFingerprint(trade) {
   return buildSignalFingerprint({
     symbol: trade?.symbol,
@@ -64,6 +132,32 @@ function buildTradeEntryFingerprint(trade) {
     side: trade?.side,
     setupType: trade?.setupType,
     entry: trade?.entry,
+  });
+}
+
+function buildTradeIdentityFingerprint(trade, receivedAtMs) {
+  return buildSignalIdentityFingerprint({
+    symbol: trade?.symbol,
+    side: trade?.side,
+    setupType: trade?.setupType,
+    timeframe: trade?.timeframe,
+    entry: trade?.entry,
+    tp: trade?.tp,
+    sl: trade?.sl,
+    eventTimeMs: trade?.eventTimeMs || trade?.createdAtMs,
+    receivedAtMs,
+  });
+}
+
+function buildTradeEntryIdentityFingerprint(trade, receivedAtMs) {
+  return buildSignalEntryIdentityFingerprint({
+    symbol: trade?.symbol,
+    side: trade?.side,
+    setupType: trade?.setupType,
+    timeframe: trade?.timeframe,
+    entry: trade?.entry,
+    eventTimeMs: trade?.eventTimeMs || trade?.createdAtMs,
+    receivedAtMs,
   });
 }
 
@@ -120,8 +214,14 @@ export function createDuplicateGuardService({
   windowMs = 10 * 60 * 1000,
   ttlMs = 36 * 60 * 60 * 1000,
 }) {
+  const processingIdentities = new Map();
+  const recentTelegramSendFingerprints = new Map();
+  const processingTtlMs = Math.min(windowMs, 2 * 60 * 1000);
+
   function cleanup(now = Date.now()) {
     const changed = cleanupMap(recentAlertFingerprints, now, ttlMs);
+    cleanupMap(processingIdentities, now, processingTtlMs);
+    cleanupMap(recentTelegramSendFingerprints, now, ttlMs);
     if (changed) void persistState?.();
     return changed;
   }
@@ -139,6 +239,79 @@ export function createDuplicateGuardService({
     }
 
     return null;
+  }
+
+  function findExistingIdentity(fingerprints, receivedAtMs, { includeProcessing = true, map = recentAlertFingerprints } = {}) {
+    for (const fingerprint of fingerprints) {
+      const existing = map.get(fingerprint);
+      const existingAtMs = Number(existing?.atMs || existing);
+      if (Number.isFinite(existingAtMs) && receivedAtMs - existingAtMs <= ttlMs) {
+        return {
+          fingerprint,
+          original: existing,
+          ageMs: receivedAtMs - existingAtMs,
+        };
+      }
+
+      if (!includeProcessing) continue;
+
+      const processing = processingIdentities.get(fingerprint);
+      const processingAtMs = Number(processing?.atMs || processing);
+      if (Number.isFinite(processingAtMs) && receivedAtMs - processingAtMs <= processingTtlMs) {
+        return {
+          fingerprint,
+          original: processing,
+          ageMs: receivedAtMs - processingAtMs,
+          processing: true,
+        };
+      }
+    }
+
+    return null;
+  }
+
+  function buildIdentityFingerprints({ context, receivedAtMs, prefix = "" }) {
+    const full = buildSignalIdentityFingerprint({
+      symbol: context?.symbol,
+      side: context?.side,
+      setupType: context?.setupType,
+      timeframe: context?.timeframe,
+      entry: context?.entryParsed,
+      tp: context?.tpParsed,
+      sl: context?.slParsed,
+      eventTimeMs: context?.eventTimeMs,
+      receivedAtMs,
+      bucketMinutes: 10,
+    });
+    const entry = buildSignalEntryIdentityFingerprint({
+      symbol: context?.symbol,
+      side: context?.side,
+      setupType: context?.setupType,
+      timeframe: context?.timeframe,
+      entry: context?.entryParsed,
+      eventTimeMs: context?.eventTimeMs,
+      receivedAtMs,
+      bucketMinutes: 15,
+    });
+
+    return prefix ? [`${prefix}|${full}`, `${prefix}|${entry}`] : [full, entry];
+  }
+
+  function candidateInfo({ context, candidateKey, alertId, receivedAtMs }) {
+    return {
+      atMs: receivedAtMs,
+      refId: context?.incomingRef || null,
+      alertId: alertId || null,
+      candidateKey: candidateKey || null,
+      symbol: context?.symbol || null,
+      side: context?.side || null,
+      setupType: context?.setupType || null,
+      timeframe: context?.timeframe || null,
+      entry: Number.isFinite(Number(context?.entryParsed)) ? Number(context.entryParsed) : null,
+      tp: Number.isFinite(Number(context?.tpParsed)) ? Number(context.tpParsed) : null,
+      sl: Number.isFinite(Number(context?.slParsed)) ? Number(context.slParsed) : null,
+      eventTimeMs: Number.isFinite(Number(context?.eventTimeMs)) ? Number(context.eventTimeMs) : null,
+    };
   }
 
   async function reserveSignal({
@@ -167,6 +340,29 @@ export function createDuplicateGuardService({
       setupType: context?.setupType,
       entry: context?.entryParsed,
     });
+    const identityFingerprints = buildIdentityFingerprints({ context, receivedAtMs });
+    const info = candidateInfo({ context, candidateKey, alertId, receivedAtMs });
+
+    const processingMatch = findExistingIdentity(identityFingerprints, receivedAtMs, {
+      includeProcessing: true,
+    });
+    if (processingMatch?.processing) {
+      return {
+        blocked: true,
+        reason: "duplicate_processing_lock",
+        fingerprint: processingMatch.fingerprint,
+        original: processingMatch.original,
+        ageMs: processingMatch.ageMs,
+        windowMs: processingTtlMs,
+      };
+    }
+
+    for (const identity of identityFingerprints) {
+      processingIdentities.set(identity, {
+        ...info,
+        mode: "processing",
+      });
+    }
 
     const existing = recentAlertFingerprints.get(fingerprint);
     const existingAtMs = Number(existing?.atMs || existing);
@@ -191,6 +387,22 @@ export function createDuplicateGuardService({
         original: existingEntry,
         ageMs: receivedAtMs - existingEntryAtMs,
         windowMs,
+      };
+    }
+
+    const existingIdentity = findExistingIdentity(identityFingerprints, receivedAtMs, {
+      includeProcessing: false,
+    });
+    if (existingIdentity) {
+      return {
+        blocked: true,
+        reason: existingIdentity.fingerprint.includes("signal-entry-identity")
+          ? "duplicate_signal_entry_identity"
+          : "duplicate_signal_identity",
+        fingerprint: existingIdentity.fingerprint,
+        original: existingIdentity.original,
+        ageMs: existingIdentity.ageMs,
+        windowMs: ttlMs,
       };
     }
 
@@ -222,35 +434,89 @@ export function createDuplicateGuardService({
       };
     }
 
+    const activeIdentityDuplicate =
+      findActiveDuplicate(identityFingerprints[0], receivedAtMs, (trade) => buildTradeIdentityFingerprint(trade, receivedAtMs)) ||
+      findActiveDuplicate(identityFingerprints[1], receivedAtMs, (trade) => buildTradeEntryIdentityFingerprint(trade, receivedAtMs));
+    if (activeIdentityDuplicate) {
+      return {
+        blocked: true,
+        reason: "duplicate_active_trade_identity",
+        fingerprint: identityFingerprints[0],
+        original: activeIdentityDuplicate,
+        ageMs: Number.isFinite(activeIdentityDuplicate.createdAtMs)
+          ? receivedAtMs - Number(activeIdentityDuplicate.createdAtMs)
+          : null,
+        windowMs: ttlMs,
+      };
+    }
+
     recentAlertFingerprints.set(fingerprint, {
-      atMs: receivedAtMs,
-      refId: context?.incomingRef || null,
-      alertId: alertId || null,
-      candidateKey: candidateKey || null,
-      symbol: context?.symbol || null,
-      side: context?.side || null,
-      setupType: context?.setupType || null,
-      entry: Number.isFinite(Number(context?.entryParsed)) ? Number(context.entryParsed) : null,
-      tp: Number.isFinite(Number(context?.tpParsed)) ? Number(context.tpParsed) : null,
-      sl: Number.isFinite(Number(context?.slParsed)) ? Number(context.slParsed) : null,
+      ...info,
     });
     recentAlertFingerprints.set(entryFingerprint, {
-      atMs: receivedAtMs,
-      refId: context?.incomingRef || null,
-      alertId: alertId || null,
-      candidateKey: candidateKey || null,
-      symbol: context?.symbol || null,
-      side: context?.side || null,
-      setupType: context?.setupType || null,
-      entry: Number.isFinite(Number(context?.entryParsed)) ? Number(context.entryParsed) : null,
+      ...info,
       mode: "entry",
     });
+    for (const identity of identityFingerprints) {
+      recentAlertFingerprints.set(identity, {
+        ...info,
+        mode: "identity",
+      });
+    }
 
     await persistState?.();
 
     return {
       blocked: false,
       fingerprint,
+    };
+  }
+
+  async function reserveTelegramSend({
+    context,
+    candidateKey,
+    alertId,
+    refId,
+    receivedAtMs = Date.now(),
+  }) {
+    if (!enabled) return { blocked: false, enabled: false };
+
+    cleanup(receivedAtMs);
+
+    const fingerprints = buildIdentityFingerprints({
+      context,
+      receivedAtMs,
+      prefix: "telegram",
+    });
+    const existing = findExistingIdentity(fingerprints, receivedAtMs, {
+      includeProcessing: false,
+      map: recentTelegramSendFingerprints,
+    });
+
+    if (existing) {
+      return {
+        blocked: true,
+        reason: "duplicate_telegram_send_guard",
+        fingerprint: existing.fingerprint,
+        original: existing.original,
+        ageMs: existing.ageMs,
+        windowMs: ttlMs,
+      };
+    }
+
+    const info = {
+      ...candidateInfo({ context, candidateKey, alertId, receivedAtMs }),
+      refId: refId || context?.incomingRef || null,
+      mode: "telegram",
+    };
+
+    for (const fingerprint of fingerprints) {
+      recentTelegramSendFingerprints.set(fingerprint, info);
+    }
+
+    return {
+      blocked: false,
+      fingerprint: fingerprints[0],
     };
   }
 
@@ -277,6 +543,7 @@ export function createDuplicateGuardService({
 
   return {
     reserveSignal,
+    reserveTelegramSend,
     cleanup,
     describeBlock,
     formatSignalContext,
