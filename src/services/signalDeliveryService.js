@@ -28,6 +28,7 @@ export function createSignalDeliveryService({
     prettyTime,
     chartLink,
     receivedAtMs,
+    telegramGate = null,
   }) {
     const {
       symbol,
@@ -135,7 +136,13 @@ export function createSignalDeliveryService({
 
     let sharedToFree = false;
 
-    if (canSendFreeSignal(receivedAtMs)) {
+    if (telegramGate?.allowFree === false) {
+      console.log("FREE SIGNAL BLOCKED BY SHADOW GATE:", {
+        refId,
+        reason: telegramGate.reason,
+        shadowGrade: telegramGate.shadowGrade,
+      });
+    } else if (canSendFreeSignal(receivedAtMs)) {
       try {
         await sendTelegramAlert({
           text,

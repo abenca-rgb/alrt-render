@@ -1,5 +1,6 @@
 export const SHADOW_SCORING_VERSION = "shadow-score-v1";
 export const SHADOW_SCORING_V2_VERSION = "shadow_v2";
+export const SHADOW_SCORING_V21_VERSION = "shadow_v2_1";
 
 const NEGATIVE_SETUPS = new Set(["HTF_CONTINUATION"]);
 const NEGATIVE_SESSIONS = new Set(["NEW_YORK", "LONDON_NY_OVERLAP"]);
@@ -427,6 +428,70 @@ export function evaluateShadowScoreV2({ context = {}, quality = null } = {}) {
   };
 }
 
+function strongSupportBuckets(components) {
+  return {
+    compression: components.regime === "COMPRESSION",
+    london: components.session === "LONDON",
+    rsi45To54: components.rsi_bucket === "45-54",
+    compressionBreakout: components.setup === "COMPRESSION_BREAKOUT",
+  };
+}
+
+export function evaluateShadowScoreV21({ context = {}, quality = null } = {}) {
+  const v2 = evaluateShadowScoreV2({ context, quality });
+  const components = v2.scoreComponents || {};
+  const support = strongSupportBuckets(components);
+  const strongSupportCount = Object.values(support).filter(Boolean).length;
+  const aPlusBlockReasons = [];
+  let proposedGrade = v2.proposedGrade;
+
+  if (proposedGrade === "A+") {
+    if (["35-44", "55-64"].includes(components.rsi_bucket)) {
+      aPlusBlockReasons.push(`rsi_${components.rsi_bucket}_blocks_a_plus`);
+    }
+    if (components.setup === "TREND_PULLBACK" && strongSupportCount < 1) {
+      aPlusBlockReasons.push("trend_pullback_requires_additional_strong_support");
+    }
+    if (components.session === "NEUTRAL" && strongSupportCount < 1) {
+      aPlusBlockReasons.push("neutral_session_requires_strong_support");
+    }
+    if (components.regime === "TREND" && strongSupportCount < 1) {
+      aPlusBlockReasons.push("trend_regime_requires_strong_support");
+    }
+    if (
+      components.setup === "LIQUIDITY_RECLAIM" &&
+      !(support.london || support.compression)
+    ) {
+      aPlusBlockReasons.push("liquidity_reclaim_requires_london_or_compression");
+    }
+  }
+
+  if (aPlusBlockReasons.length) proposedGrade = "A";
+
+  return {
+    ...v2,
+    shadowVersion: SHADOW_SCORING_V21_VERSION,
+    proposedGrade,
+    scoreComponents: {
+      ...components,
+      v21_strong_support_count: strongSupportCount,
+      v21_strong_support_buckets: support,
+    },
+    penaltyReasons: [
+      ...(v2.penaltyReasons || []),
+      ...aPlusBlockReasons.map((reason) => ({
+        amount: 0,
+        reason,
+      })),
+    ],
+    recommendedAction:
+      v2.currentGrade === "A+" && proposedGrade !== "A+"
+        ? "v21_demote_false_a_plus_risk"
+        : v2.recommendedAction,
+    aPlusBlockReasons,
+  };
+}
+
 function summarize(rows, name, predicate = () => true) {
   const items = rows.filter(predicate);
   const closed = items.filter((row) => CLOSED_OUTCOMES.has(row.outcome_type));
@@ -551,6 +616,39 @@ export function createShadowScoringService({
     };
   }
 
+  function evaluateCandidateV21({ context, quality }) {
+    if (!enabled || !context?.candidateKey) return null;
+
+    return {
+      candidateKey: context.candidateKey,
+      alertId: context.candidateIdsBase?.[0] || context.incomingRef || context.candidateKey,
+      refId: context.incomingRef || null,
+      symbol: context.symbol || null,
+      side: context.side || null,
+      timeframe: context.timeframe || null,
+      setupType: context.setupType || null,
+      eventTimeMs: context.eventTimeMs || Date.now(),
+      ...evaluateShadowScoreV21({ context, quality }),
+    };
+  }
+
+  function recordCandidateV21({ context, quality, liveDecision, decisionReason, delivery = null }) {
+    const evaluation = evaluateCandidateV21({ context, quality });
+    if (!evaluation) return null;
+
+    persistShadowScoreEvaluation?.({
+      ...evaluation,
+      alertId: delivery?.primaryAlertId || evaluation.alertId,
+      refId: delivery?.refId || evaluation.refId,
+      liveDecision,
+      decisionReason,
+      postedToPaid: Boolean(delivery?.primaryAlertId),
+      postedToFree: Boolean(delivery?.sharedToFree),
+    });
+
+    return evaluation;
+  }
+
   function recordCandidate({ context, quality, liveDecision, decisionReason, delivery = null }) {
     const evaluation = evaluateCandidate({ context, quality });
     if (!evaluation) return null;
@@ -590,7 +688,9 @@ export function createShadowScoringService({
 
   return {
     evaluateCandidate,
+    evaluateCandidateV21,
     recordCandidate,
+    recordCandidateV21,
     updateOutcome,
   };
 }

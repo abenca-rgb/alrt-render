@@ -51,6 +51,8 @@ import {
   STRIPE_WEBHOOK_SECRET,
   SUMMARY_DISPATCH_SCOPE,
   SUMMARY_ADMIN_TOKEN,
+  SHADOW_V21_LIVE_GATE_ENABLED,
+  SHADOW_V21_LIVE_GATE_MODE,
   SHADOW_VALIDATION_ENABLED,
   OPTIMIZER_REPORTS_ENABLED,
   SUPABASE_ENABLED,
@@ -90,6 +92,7 @@ import { createRecentHitService } from "./src/services/recentHitService.js";
 import { createRefAllocatorService } from "./src/services/refAllocatorService.js";
 import { createShadowValidationService } from "./src/services/shadowValidationService.js";
 import { createShadowScoringService } from "./src/services/shadowScoringService.js";
+import { createShadowV21LiveGateService } from "./src/services/shadowV21LiveGateService.js";
 import { createSignalDeliveryService } from "./src/services/signalDeliveryService.js";
 import { createScoreAuditService } from "./src/services/scoreAuditService.js";
 import { createStripeMemberService } from "./src/services/stripeMemberService.js";
@@ -375,6 +378,11 @@ const shadowScoringService = createShadowScoringService({
   persistShadowScoreEvaluation: persistShadowScoreEvaluationToSupabase,
   updateShadowScoreOutcome: updateShadowScoreOutcomeInSupabase,
 });
+const shadowV21LiveGateService = createShadowV21LiveGateService({
+  enabled: SHADOW_V21_LIVE_GATE_ENABLED,
+  mode: SHADOW_V21_LIVE_GATE_MODE,
+  shadowScoringService,
+});
 
 // ===== FREE CHANNEL =====
 function resetFreeCounterIfNeeded(nowMs = Date.now()) {
@@ -606,6 +614,9 @@ registerSystemRoutes(app, {
     learningLoggingEnabled: LEARNING_LOGGING_ENABLED,
     candidateLoggingEnabled: CANDIDATE_LOGGING_ENABLED,
     shadowValidationEnabled: SHADOW_VALIDATION_ENABLED,
+    shadowV21LiveGateEnabled: SHADOW_V21_LIVE_GATE_ENABLED,
+    shadowV21LiveGateMode: SHADOW_V21_LIVE_GATE_MODE,
+    shadowV21CandidateLogging: LEARNING_LOGGING_ENABLED && CANDIDATE_LOGGING_ENABLED,
     optimizerReportsEnabled: OPTIMIZER_REPORTS_ENABLED,
     historicalQualityAdjustmentsEnabled: HISTORICAL_QUALITY_ADJUSTMENTS_ENABLED,
     duplicateSuppressionEnabled: DUPLICATE_SUPPRESSION_ENABLED,
@@ -924,6 +935,12 @@ async function handleTradingViewWebhook(req, res) {
         liveDecision: "REJECTED",
         decisionReason: signalGate.reason || "signal_filter",
       });
+      shadowScoringService.recordCandidateV21({
+        context: signalContext,
+        quality: signalGate.quality,
+        liveDecision: "REJECTED",
+        decisionReason: signalGate.reason || "signal_filter",
+      });
       return;
     }
 
@@ -973,6 +990,12 @@ async function handleTradingViewWebhook(req, res) {
         postedToFree: false,
       });
       shadowScoringService.recordCandidate({
+        context: signalContext,
+        quality,
+        liveDecision: "REJECTED",
+        decisionReason: clusterGuardrail.blockedBy,
+      });
+      shadowScoringService.recordCandidateV21({
         context: signalContext,
         quality,
         liveDecision: "REJECTED",
@@ -1054,11 +1077,84 @@ async function handleTradingViewWebhook(req, res) {
         liveDecision: "REJECTED",
         decisionReason: duplicateReservation.reason || "duplicate_signal_fingerprint",
       });
+      shadowScoringService.recordCandidateV21({
+        context: signalContext,
+        quality,
+        liveDecision: "REJECTED",
+        decisionReason: duplicateReservation.reason || "duplicate_signal_fingerprint",
+      });
 
       console.log("SIGNAL BLOCKED BY DUPLICATE GUARD:", {
         ...duplicateGuardService.formatSignalContext(signalContext),
         alertId: blockAlertId,
         duplicate: duplicateDetails,
+      });
+      return;
+    }
+
+    const shadowV21Gate = shadowV21LiveGateService.evaluate({
+      context: signalContext,
+      quality,
+    });
+
+    if (shadowV21Gate.shouldBlockPaid) {
+      const blockAlertId = candidateIdsBase[0] || incomingRef || candidateKey;
+      const rawPayload = sanitizePayloadForStorage(body);
+
+      await recordRejectStat({
+        symbol,
+        side,
+        setupType,
+        reason: shadowV21Gate.reason,
+        qualityScore: quality?.score ?? null,
+        qualityGrade: quality?.grade ?? null,
+        rawPayload: {
+          ...rawPayload,
+          shadow_v21_live_gate: {
+            enabled: shadowV21Gate.enabled,
+            mode: shadowV21Gate.mode,
+            proposedScore: shadowV21Gate.evaluation?.proposedScore ?? null,
+            proposedGrade: shadowV21Gate.evaluation?.proposedGrade ?? null,
+            scoreDelta: shadowV21Gate.evaluation?.scoreDelta ?? null,
+            penaltyReasons: shadowV21Gate.evaluation?.penaltyReasons || [],
+            bonusReasons: shadowV21Gate.evaluation?.bonusReasons || [],
+          },
+        },
+        ts: receivedAtMs,
+      });
+
+      candidateLoggingService.updateDecision({
+        candidateKey: loggedCandidate?.candidateKey,
+        decision: "REJECTED",
+        reason: shadowV21Gate.reason,
+        quality,
+        alertId: blockAlertId,
+        postedToPaid: false,
+        postedToFree: false,
+      });
+      shadowScoringService.recordCandidate({
+        context: signalContext,
+        quality,
+        liveDecision: "REJECTED",
+        decisionReason: shadowV21Gate.reason,
+      });
+      shadowScoringService.recordCandidateV21({
+        context: signalContext,
+        quality,
+        liveDecision: "REJECTED",
+        decisionReason: shadowV21Gate.reason,
+      });
+
+      console.log("SIGNAL BLOCKED BY SHADOW V2.1 LIVE GATE:", {
+        symbol,
+        side,
+        setupType,
+        currentScore: quality?.score ?? null,
+        currentGrade: quality?.grade ?? null,
+        shadowV21Score: shadowV21Gate.evaluation?.proposedScore ?? null,
+        shadowV21Grade: shadowV21Gate.evaluation?.proposedGrade ?? null,
+        mode: shadowV21Gate.mode,
+        reason: shadowV21Gate.reason,
       });
       return;
     }
@@ -1126,6 +1222,12 @@ async function handleTradingViewWebhook(req, res) {
         liveDecision: "REJECTED",
         decisionReason: telegramReservation.reason || "duplicate_telegram_send_guard",
       });
+      shadowScoringService.recordCandidateV21({
+        context: signalContext,
+        quality,
+        liveDecision: "REJECTED",
+        decisionReason: telegramReservation.reason || "duplicate_telegram_send_guard",
+      });
 
       console.log("SIGNAL BLOCKED BY TELEGRAM DUPLICATE GUARD:", {
         ...duplicateGuardService.formatSignalContext(signalContext),
@@ -1166,6 +1268,11 @@ async function handleTradingViewWebhook(req, res) {
       prettyTime,
       chartLink,
       receivedAtMs,
+      telegramGate: {
+        allowFree: !shadowV21Gate.shouldBlockFree,
+        reason: shadowV21Gate.shouldBlockFree ? shadowV21Gate.reason : null,
+        shadowGrade: shadowV21Gate.evaluation?.proposedGrade ?? null,
+      },
     });
 
     console.log("ALERT SENT:", {
@@ -1199,6 +1306,15 @@ async function handleTradingViewWebhook(req, res) {
       quality,
       liveDecision: "ACCEPTED",
       decisionReason: "published_paid",
+      delivery,
+    });
+    shadowScoringService.recordCandidateV21({
+      context: signalContext,
+      quality,
+      liveDecision: "ACCEPTED",
+      decisionReason: shadowV21Gate.shouldBlockFree
+        ? "published_paid_shadow_v21_free_blocked"
+        : "published_paid",
       delivery,
     });
 
@@ -1277,6 +1393,9 @@ async function startServer() {
     qualityOptimizerUtcHour: QUALITY_OPTIMIZER_UTC_HOUR,
     qualityOptimizerUtcMinute: QUALITY_OPTIMIZER_UTC_MINUTE,
     autoTuning: AUTO_TUNING,
+    shadowV21LiveGateEnabled: SHADOW_V21_LIVE_GATE_ENABLED,
+    shadowV21LiveGateMode: SHADOW_V21_LIVE_GATE_MODE,
+    shadowV21CandidateLogging: LEARNING_LOGGING_ENABLED && CANDIDATE_LOGGING_ENABLED,
   });
 
   setInterval(() => {

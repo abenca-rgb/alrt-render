@@ -55,6 +55,13 @@ export const OPTIMIZER_REPORTS_ENABLED =
   String(process.env.OPTIMIZER_REPORTS_ENABLED || "true").toLowerCase() !== "false";
 export const SHADOW_VALIDATION_ENABLED =
   String(process.env.SHADOW_VALIDATION_ENABLED || "true").toLowerCase() !== "false";
+export const SHADOW_V21_LIVE_GATE_ENABLED =
+  String(process.env.SHADOW_V21_LIVE_GATE_ENABLED || "false").toLowerCase() === "true";
+const SHADOW_V21_LIVE_GATE_MODE_RAW = String(process.env.SHADOW_V21_LIVE_GATE_MODE || "paid_only").toLowerCase();
+export const SHADOW_V21_LIVE_GATE_MODE =
+  ["off", "free_only", "paid_only", "all"].includes(SHADOW_V21_LIVE_GATE_MODE_RAW)
+    ? SHADOW_V21_LIVE_GATE_MODE_RAW
+    : "paid_only";
 
 export const SUMMARY_ADMIN_TOKEN = process.env.SUMMARY_ADMIN_TOKEN || "";
 
