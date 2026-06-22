@@ -8,6 +8,7 @@
     "guardrail:investigate-cluster-pairs": "node scripts/guardrails/investigateClusterPairs.js",
     "guardrail:status": "node scripts/guardrails/guardrailStatus.js",
     "quality:shadow-v2-sim": "node scripts/quality/shadowV2ImpactSimulator.js",
+    "quality:tp-first-rebuild": "node scripts/quality/tpFirstHistoricalRebuild.js",
     "postinstall": "npx playwright install chromium"
   },
   "dependencies": {
