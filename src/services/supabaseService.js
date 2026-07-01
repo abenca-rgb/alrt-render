@@ -518,6 +518,32 @@ export function createSupabaseService({ enabled, url, serviceRoleKey, backendVer
   }) {
     if (!candidateKey || !shadowVersion) return;
 
+    if (shadowVersion === "shadow_v2_1") {
+      background("SHADOW V2.1 CANDIDATE UPDATE", () =>
+        request("alert_candidates", {
+          method: "PATCH",
+          query: `?candidate_key=eq.${encodeURIComponent(String(candidateKey))}`,
+          body: {
+            current_score: currentScore ?? null,
+            current_grade: currentGrade || null,
+            proposed_score: proposedScore ?? null,
+            proposed_grade: proposedGrade || null,
+            score_delta: scoreDelta ?? null,
+            score_components: scoreComponents || {},
+            shadow_v21_score: proposedScore ?? null,
+            shadow_v21_grade: proposedGrade || null,
+            shadow_v21_decision: liveDecision || "PENDING",
+            shadow_v21_block_reason:
+              String(decisionReason || "").includes("shadow_v21_live_gate_blocked")
+                ? decisionReason
+                : null,
+            shadow_v21_scored_at_utc: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          },
+        }),
+      );
+    }
+
     background("SHADOW SCORE UPSERT", () =>
       request("shadow_score_evaluations", {
         query: "?on_conflict=candidate_key,shadow_version",
